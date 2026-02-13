@@ -1,0 +1,27 @@
+# Local worktree roots created under this repository
+.worktrees/
+tmp/
+
+# OS / editor noise
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Environment files (keep examples trackable)
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+
+# Go build / test artifacts
+bin/
+dist/
+coverage.out
+*.coverprofile
+*.test
+
+# Rust build artifacts
+target/
