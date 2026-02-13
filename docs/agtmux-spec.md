@@ -91,7 +91,7 @@ The desired direction is:
 - NFR-6: Adapter contract stability (backward-compatible interface across minor versions).
 - NFR-7: Partial-result operation under target failures (do not block global listings).
 - NFR-8: Deterministic convergence for same input event stream.
-- NFR-9: Sensitive connection data must not be stored in plaintext state DB.
+- NFR-9: Sensitive connection data and unredacted payloads must not be stored in plaintext state DB.
 
 ## 7. Specification
 
@@ -172,7 +172,10 @@ Notes:
   1. reject duplicates by `(runtime_id, source, dedupe_key)`
   2. compare ordering key:
      - `source_seq` when available (same `runtime_id + source`)
-     - then `event_time`
+     - else `effective_event_time` where
+       - `effective_event_time = event_time` when `abs(event_time - ingested_at) <= skew_budget`
+       - `effective_event_time = ingested_at` when skew is larger than budget
+       - default `skew_budget` is 10 seconds (configurable)
      - then `ingested_at`
      - then `event_id`
   3. apply only if key is newer than stored cursor for that `runtime_id + source`
@@ -199,6 +202,20 @@ Core behavior:
 - State Engine consumes only normalized transitions.
 - Unknown or unsupported signals must degrade to `unknown`, never fabricated states.
 
+### 7.2.4 Runtime Identity and Pane Epoch Rules
+
+- Runtime identity is anchored to pane instance:
+  - `pane_instance = (target_id, tmux_server_boot_id, pane_id)`
+- `pane_epoch` MUST increment when any of the following happens:
+  - pane is recreated with same `pane_id` after layout churn or restart
+  - adapter/observer detects runtime process identity change (`pid`) for the pane
+  - observer resync finds active runtime row that no longer matches current pane process identity
+- `runtime_id` MUST be unique and reproducible from runtime metadata:
+  - recommended derivation:
+    - `sha256(target_id + tmux_server_boot_id + pane_id + pane_epoch + agent_type + started_at_ns)`
+- At most one active runtime (`ended_at IS NULL`) is allowed per `(target_id, pane_id)`.
+- Events or actions referencing stale runtime identity MUST be rejected (`E_RUNTIME_STALE` / precondition failure).
+
 ### 7.3 Data Model (SQLite draft)
 
 - `targets`
@@ -222,12 +239,16 @@ Core behavior:
   - `runtime_id` (PK)
   - `target_id`
   - `pane_id`
+  - `tmux_server_boot_id`
   - `pane_epoch`
   - `agent_type`
   - `pid` (nullable)
   - `started_at`
   - `ended_at` (nullable)
-  - UNIQUE: (`target_id`, `pane_id`, `pane_epoch`)
+  - UNIQUE: (`target_id`, `tmux_server_boot_id`, `pane_id`, `pane_epoch`)
+  - Active runtime invariant:
+    - at most one active runtime (`ended_at IS NULL`) per (`target_id`, `pane_id`)
+    - enforce with partial unique index at DB level
 - `events`
   - `event_id` (PK)
   - `runtime_id`
@@ -237,9 +258,26 @@ Core behavior:
   - `source_seq` (nullable)
   - `event_time`
   - `ingested_at`
-  - `dedupe_key`
-  - `raw_payload`
+  - `dedupe_key` (NOT NULL)
+  - `action_id` (nullable, FK -> `actions.action_id`)
+  - `raw_payload` (redacted form; optional by policy)
   - UNIQUE: (`runtime_id`, `source`, `dedupe_key`)
+- `event_inbox`
+  - `inbox_id` (PK)
+  - `target_id`
+  - `pane_id`
+  - `runtime_id` (nullable)
+  - `event_type`
+  - `source`
+  - `dedupe_key`
+  - `event_time`
+  - `ingested_at`
+  - `pid` (nullable)
+  - `start_hint` (nullable)
+  - `status` (`pending_bind`/`bound`/`dropped_unbound`)
+  - `reason_code` (nullable)
+  - `raw_payload` (redacted form; optional by policy)
+  - UNIQUE: (`target_id`, `pane_id`, `source`, `dedupe_key`)
 - `runtime_source_cursors`
   - `runtime_id`
   - `source`
@@ -262,6 +300,7 @@ Core behavior:
   - PK: (`target_id`, `pane_id`)
 - `action_snapshots`
   - `snapshot_id` (PK)
+  - `action_id` (FK -> `actions.action_id`)
   - `target_id`
   - `pane_id`
   - `runtime_id`
@@ -269,6 +308,19 @@ Core behavior:
   - `observed_at`
   - `expires_at`
   - `nonce`
+- `actions`
+  - `action_id` (PK)
+  - `action_type` (`attach`/`send`/`view-output`/`kill`)
+  - `request_ref` (required idempotency key; UUIDv7 or ULID recommended)
+  - `target_id`
+  - `pane_id`
+  - `runtime_id`
+  - `requested_at`
+  - `completed_at` (nullable)
+  - `result_code`
+  - `error_code` (nullable)
+  - `metadata_json`
+  - UNIQUE: (`action_type`, `request_ref`)
 - `adapters`
   - `adapter_name` (PK)
   - `agent_type`
@@ -277,19 +329,61 @@ Core behavior:
   - `enabled`
   - `updated_at`
 
+### 7.3.1 Data Protection, Retention, and Index Baseline
+
+- `targets.connection_ref` MUST store only non-secret references (for example ssh host alias).
+- `events.raw_payload` MUST be stored as redacted content by default.
+- Unredacted payload MUST NOT be persisted in SQLite in any mode.
+- Debug mode may keep unredacted payload only in memory or encrypted temporary file storage with max TTL 24 hours.
+- Default retention policy:
+  - `events` raw payload: 7 days
+  - `events` metadata rows: 14 days (configurable)
+- Required baseline indexes:
+  - unique partial: `runtimes(target_id, pane_id) WHERE ended_at IS NULL`
+  - unique: `actions(action_type, request_ref)`
+  - `events(runtime_id, source, ingested_at DESC)`
+  - `events(ingested_at DESC)`
+  - `event_inbox(status, ingested_at)`
+  - `states(updated_at DESC)`
+  - `states(state, updated_at DESC)`
+
 ### 7.4 Signal Ingestion
 
+### 7.4.1 Event Envelope v1 (Normative)
+
 Common event envelope fields:
-- `runtime_id`
-- `source`
-- `source_event_id` or `dedupe_key`
-- `source_seq` (if available)
-- `event_time`
-- `ingested_at`
+- `event_id` (required, string/UUID)
+- `event_type` (required, string)
+- `source` (required, enum: `hook|notify|wrapper|poller`)
+- `dedupe_key` (required, string, non-empty)
+- `source_event_id` (optional, string)
+- `source_seq` (optional, int64)
+- `event_time` (required, timestamp from source)
+- `ingested_at` (required, daemon timestamp)
+- `runtime_id` (required for bound events, optional for pending-bind events)
+- `target_id` (required when `runtime_id` is absent)
+- `pane_id` (required when `runtime_id` is absent)
+- `pid` (optional, pending-bind hint)
+- `start_hint` (optional, pending-bind hint timestamp)
+- `raw_payload` (optional; redacted form under default policy)
+
+Envelope rules:
+- `dedupe_key` MUST always be present, even when `source_event_id` exists.
+- Recommended `dedupe_key` derivation:
+  - `sha256(source + ":" + coalesce(source_event_id,"") + ":" + normalize(payload_hash) + ":" + normalize(event_type))`
+- If `source_seq` is absent, ordering relies on 7.2.2 `effective_event_time`.
+- `ingested_at` is authoritative for freshness and demotion timing decisions.
 
 Runtime binding rule:
 - If adapter event lacks `runtime_id`, ingest as `pending_bind` with `target_id + pane_id (+ pid/start_hint if present)`.
-- Resolver binds pending event to current runtime (`bound`) or drops as `dropped_unbound` after TTL.
+- Resolver MUST bind only when there is exactly one active runtime candidate that satisfies all available hints.
+  - candidate set is filtered by `target_id + pane_id`
+  - if `pid` exists, candidate runtime `pid` MUST match
+  - if `start_hint` exists, `abs(runtime.started_at - start_hint)` MUST be within bind window (default 5 seconds)
+- Resolver MUST drop pending event as `dropped_unbound` when:
+  - no candidate exists (`reason_code = bind_no_candidate`)
+  - more than one candidate exists (`reason_code = bind_ambiguous`)
+  - pending-bind TTL expires before safe resolution (`reason_code = bind_ttl_expired`)
 - Only `bound` events are eligible for state transitions.
 
 Adapter-specific ingestion:
@@ -319,33 +413,77 @@ Target management:
 - `agtmux target remove <name> [--yes]`
 
 Listings and actions (aggregated by default):
-- `agtmux list panes [--target <name>|--all-targets] [--target-session <target>/<session>] [--session <name>] [--state <state>] [--agent <type>] [--needs-action] [--json]`
-- `agtmux list windows [--target <name>|--all-targets] [--target-session <target>/<session>] [--session <name>] [--with-agent-status] [--json]`
+- `agtmux list panes [--target <name>|--all-targets] [--target-session <target>/<session-enc>] [--session <name>] [--state <state>] [--agent <type>] [--needs-action] [--json]`
+- `agtmux list windows [--target <name>|--all-targets] [--target-session <target>/<session-enc>] [--session <name>] [--with-agent-status] [--json]`
 - `agtmux list sessions [--target <name>|--all-targets] [--agent-summary] [--group-by target-session|session-name] [--json]`
-- `agtmux attach <ref> [--if-state <state>] [--if-updated-within <duration>] [--force-stale]`
-- `agtmux send <ref> --text <text> [--if-runtime <runtime_id>] [--if-state <state>] [--if-updated-within <duration>] [--force-stale]`
+- `agtmux attach <ref> [--if-runtime <runtime_id>] [--if-state <state>] [--if-updated-within <duration>] [--force-stale]`
+- `agtmux send <ref> (--text <text>|--stdin|--key <key>) [--enter] [--paste] [--if-runtime <runtime_id>] [--if-state <state>] [--if-updated-within <duration>] [--force-stale]`
 - `agtmux view-output <ref> [--lines <n>]`
-- `agtmux kill <ref> [--signal INT|TERM|KILL] [--if-runtime <runtime_id>] [--if-state <state>] [--if-updated-within <duration>] [--force-stale] [--yes]`
-- `agtmux watch [--target <name>|--all-targets] [--scope panes|windows|sessions] [--format table|jsonl] [--interval <duration>] [--since <timestamp>] [--once]`
+- `agtmux kill <ref> [--mode key|signal] [--signal INT|TERM|KILL] [--if-runtime <runtime_id>] [--if-state <state>] [--if-updated-within <duration>] [--force-stale] [--yes]`
+- `agtmux watch [--target <name>|--all-targets] [--scope panes|windows|sessions] [--format table|jsonl] [--interval <duration>] [--cursor <stream_id:sequence>] [--once]`
 
-Canonical action reference grammar:
-- `runtime:<runtime_id>`
-- `pane:<target>/<session>/<window>/<pane>`
+Canonical action reference grammar (BNF):
+
+```txt
+<ref> ::= <runtime-ref> | <pane-ref>
+<runtime-ref> ::= "runtime:" <runtime-id>
+<runtime-id> ::= /[A-Za-z0-9._:-]{16,128}/
+<pane-ref> ::= "pane:" <target> "/" <session-enc> "/" <window-id> "/" <pane-id>
+<target> ::= /[A-Za-z0-9._-]+/
+<session-enc> ::= RFC3986 percent-encoded session name
+<window-id> ::= "@" <digits>
+<pane-id> ::= "%" <digits>
+```
+
+Reference component rules:
+- `target` is the registered target name.
+- `session-enc` MUST be percent-encoded before parsing.
+- `window-id` / `pane-id` MUST use tmux immutable IDs, not display names.
+- `--target-session` MUST use `<target>/<session-enc>` with the same encoding rule.
 
 Reference resolution:
-1. no match -> `E_REF_NOT_FOUND`
-2. multiple match -> `E_REF_AMBIGUOUS` (must not execute action)
-3. single match -> action snapshot is created server-side before execution
+1. parse failure -> `E_REF_INVALID`
+2. decode failure -> `E_REF_INVALID_ENCODING`
+3. no match -> `E_REF_NOT_FOUND`
+4. multiple match -> `E_REF_AMBIGUOUS` (must not execute action)
+5. single match -> action snapshot is created server-side before execution
 
 Output expectations:
 - Default: human-readable table.
 - `--json`: stable schema for automation and future UI.
 - `watch --format jsonl` must emit one event per line with stable schema.
 - JSON must include `schema_version`, `generated_at`, `filters`, `summary`, and per-item `identity`.
+- If any target fails during aggregated read, JSON MUST include:
+  - `partial` (boolean)
+  - `requested_targets`
+  - `responded_targets`
+  - `target_errors` (per-target error list)
 - Identity fields by scope:
   - `panes`: `target`, `session_name`, `window_id`, `pane_id`
   - `windows`: `target`, `session_name`, `window_id`
   - `sessions`: `target`, `session_name`
+
+### 7.5.1 Watch JSONL Contract
+
+- `watch --format jsonl` emits UTF-8 JSON lines, one event per line.
+- Line envelope fields:
+  - `schema_version`
+  - `generated_at`
+  - `emitted_at`
+  - `stream_id`
+  - `cursor` (`<stream_id>:<sequence>`)
+  - `scope` (`panes|windows|sessions`)
+  - `type` (`snapshot|delta|reset`)
+  - `sequence` (monotonic within same `stream_id`)
+  - `filters`
+  - `summary`
+  - `items` (for `snapshot`)
+  - `changes` (for `delta`)
+- `items[].identity` MUST follow scope-specific identity requirements from 7.5.
+- `delta` lines MUST include per-item operation (`upsert|delete`) with identity.
+- `cursor` resumes from the first event whose sequence is greater than requested cursor in the same stream.
+- If provided cursor is invalid: `E_CURSOR_INVALID`.
+- If cursor is expired (outside retention): emit `reset` then next `snapshot`, and return `E_CURSOR_EXPIRED` in API response mode.
 
 ### 7.6 Grouping and Summaries
 
@@ -365,11 +503,21 @@ Output expectations:
 ### 7.7 Control Behavior
 
 Server-side action snapshot:
-- Before any action (`attach`, `send`, `view-output`, `kill`), daemon must create `action_snapshot` containing `target`, `pane`, `runtime_id`, `state_version`, `observed_at`, `expires_at`.
-- Action execution must fail closed if current state no longer matches snapshot and `--force-stale` is not explicitly set.
+- Before any action (`attach`, `send`, `view-output`, `kill`), daemon MUST create `actions` row and `action_snapshot` containing `target`, `pane`, `runtime_id`, `state_version`, `observed_at`, `expires_at`, `nonce`.
+- Action execution MUST fail closed if current state no longer matches snapshot and `--force-stale` is not explicitly set.
+- CLI guard flags (`--if-runtime`, `--if-state`, `--if-updated-within`) are additional constraints only; they MUST NOT weaken server-side validation.
+- Action execution MUST reject expired snapshot with `E_SNAPSHOT_EXPIRED`.
+- Action write APIs MUST be idempotent by (`action_type`, `request_ref`):
+  - same key replay returns existing `action_id` and stored result
+  - conflicting replay with different payload returns `E_IDEMPOTENCY_CONFLICT`
 
 - `send`:
   - sends keystrokes/text to target pane via tmux on target.
+  - `--text` sends literal text (no shell interpolation).
+  - `--stdin` sends stdin payload (for multiline input).
+  - `--key` sends tmux key token (for example `C-c`, `Escape`).
+  - `--enter` appends Enter after payload.
+  - `--paste` uses paste-buffer style delivery for multiline safety.
   - must fail closed if runtime/state/freshness guard does not match.
 - `attach`:
   - jumps user to pane/session on target safely.
@@ -377,8 +525,10 @@ Server-side action snapshot:
 - `view-output`:
   - uses pane capture, bounded by line limit.
 - `kill`:
-  - default `INT` for graceful interruption.
-  - `TERM`/`KILL` only by explicit option.
+  - default mode is `key`; `INT` maps to `C-c` send-key behavior.
+  - `--mode signal` sends OS signal to runtime `pid` on target.
+  - `TERM`/`KILL` are valid only with `--mode signal`.
+  - `--mode signal` MUST fail with `E_PID_UNAVAILABLE` when runtime `pid` is unknown.
   - confirmation prompt is required by default; `--yes` skips confirmation.
   - must fail closed on guard mismatch (`if-runtime`, `if-state`, freshness window).
 
@@ -396,7 +546,56 @@ Server-side action snapshot:
   - view output
   - kill
 
+### 7.9 agtmuxd API v1 (Normative Minimum)
+
+Transport and versioning:
+- Daemon API v1 is the shared backend contract for CLI and macOS app.
+- Responses MUST include `schema_version`.
+- Read responses MUST include `generated_at`.
+- Action responses MUST include `action_id`, `result_code`, and `completed_at` (when completed).
+
+Read endpoints (minimum):
+- `GET /v1/panes`
+- `GET /v1/windows`
+- `GET /v1/sessions`
+- `GET /v1/watch?scope=<panes|windows|sessions>&cursor=<stream_id:sequence>`
+
+Write endpoints (minimum):
+- `POST /v1/actions/attach`
+- `POST /v1/actions/send`
+- `POST /v1/actions/view-output`
+- `POST /v1/actions/kill`
+
+Action request minimum fields:
+- `request_ref` (required idempotency key)
+- `ref`
+- `if_runtime` (optional)
+- `if_state` (optional)
+- `if_updated_within` (optional)
+- `force_stale` (optional; default false)
+
+Error code contract (minimum):
+- `E_REF_INVALID`
+- `E_REF_INVALID_ENCODING`
+- `E_REF_NOT_FOUND`
+- `E_REF_AMBIGUOUS`
+- `E_RUNTIME_STALE`
+- `E_PRECONDITION_FAILED`
+- `E_SNAPSHOT_EXPIRED`
+- `E_IDEMPOTENCY_CONFLICT`
+- `E_CURSOR_INVALID`
+- `E_CURSOR_EXPIRED`
+- `E_PID_UNAVAILABLE`
+- `E_TARGET_UNREACHABLE`
+
 ## 8. High-Level Plan / Phases
+
+### 8.1 Delivery Artifacts (Recommended)
+
+- Maintain a rolling implementation plan document (`plan`) per active phase.
+- Maintain executable task breakdown (`task`) linked to FR/NFR IDs.
+- Maintain a test catalog (`test`) that maps each critical contract to automated coverage.
+- Gate phase completion on artifacts being updated together with code/spec changes.
 
 ### Phase 0: Core Runtime
 
@@ -418,20 +617,26 @@ Exit criteria:
 - Implement Codex notify + wrapper adapter.
 - Implement list commands (panes/windows/sessions) with `target-session` default grouping.
 - Implement `watch` and `attach`.
+- Define and expose `agtmuxd API v1` read/watch contract.
 
 Exit criteria:
 - manual polling no longer required for Claude/Codex workflows across host and VM targets.
 - listing and watch remain usable with partial target failures.
 - visibility latency target is met (`p95 <= 2s` on supported environments).
+- watch jsonl schema contract is validated by compatibility tests.
+- attach fail-closed behavior is validated in stale-runtime integration tests.
 
 ### Phase 1.5: Control MVP
 
 - Implement `send`, `view-output`, `kill` with fail-closed precondition checks.
 - Add audit trail for control actions via correlated events.
+- Expose API v1 write endpoints for control actions.
 
 Exit criteria:
 - control actions are safe against stale pane/runtime mapping.
 - stale action attempts are rejected by snapshot guard in integration tests.
+- action-to-event correlation is queryable by `action_id`.
+- idempotent replay of action requests is validated by integration tests.
 
 ### Phase 2: Gemini + Reliability Hardening
 
@@ -485,10 +690,10 @@ Decisions fixed:
 2. `completed -> idle` default demotion is 120 seconds (configurable).
 3. `kill` default signal is `INT`.
 4. Destructive actions (`kill`, `remove target`) require confirmation by default.
-5. Gemini strategy for MVP is interactive CLI first, with scripted ingestion as a supported extension path.
+5. Gemini strategy is interactive CLI first when enabled in Phase 2, with scripted ingestion as a supported extension path.
 6. Architecture must stay adapter-first so Copilot CLI and Cursor CLI can be added incrementally.
 7. Default session grouping is `target-session`; cross-target session-name merge is explicit.
-8. Mutating actions are fail-closed by default via server-side action snapshot validation.
+8. All actions are fail-closed by default via server-side action snapshot validation.
 9. Action refs must be unambiguous (`runtime:` or fully-qualified `pane:`).
 
 Open questions:
