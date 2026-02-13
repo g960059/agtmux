@@ -60,11 +60,11 @@ Test layers:
 | TC-037 | Integration | Cursor adapter contract suite | FR-12 | adapter integration fixtures | core engine unchanged | CI |
 | TC-038 | E2E | macOS app read parity | Goal | app screens vs API v1 data | parity validated | Manual+CI |
 | TC-039 | E2E | macOS app action safety parity | Goal, FR-15 | app actions under stale runtime | same fail-closed behavior as CLI | Manual+CI |
-| TC-040 | Integration | TargetExecutor and daemon boundary | FR-9 | mixed local/ssh target read-write flows | all target operations go through executor boundary | CI |
+| TC-040 | Integration | TargetExecutor and daemon boundary | FR-9 | mixed local/ssh target read-write flows over daemon UDS API | all target operations go through executor boundary and `/v1/health` contract is stable | CI |
 | TC-041 | E2E | Multi-target topology observer | FR-3, FR-9 | target reconnect and pane churn | topology converges without stale bleed | CI |
 | TC-042 | Contract | Grouping and summary correctness | FR-7 | panes/windows/sessions rollups | counts and precedence are correct | CI |
 | TC-043 | Contract | Aggregated multi-target semantics | FR-9, NFR-7 | partial target failure during aggregated read | requested/responded/target_errors consistency | CI |
-| TC-044 | Performance | Visibility latency benchmark | NFR-1 | benchmark profile traffic | visible lag p95 <= 2s | Nightly |
+| TC-044 | Performance | Visibility latency benchmark | NFR-1 | benchmark profile traffic | visible lag p95 <= 2s and benchmark artifacts are emitted | Nightly |
 | TC-045 | Contract | Watch JSONL schema compatibility | FR-6 | compare watch snapshot/delta schemas across commits | schema remains compatible | CI |
 | TC-046 | Integration | Adapter registry extensibility | FR-11, NFR-5 | add mock adapter through registry | no core engine modifications required | CI |
 | TC-047 | Contract | Adapter contract version compatibility | NFR-6 | adapter minor version bump | backward-compatible behavior preserved | CI |
@@ -82,8 +82,8 @@ Test layers:
 | Phase 0 close | TC-001, TC-002, TC-003, TC-004, TC-005, TC-006, TC-007, TC-008, TC-009, TC-010, TC-011, TC-012, TC-013, TC-040, TC-041, TC-049, TC-050 |
 | Phase 1 close | Phase 0 bundle + TC-014, TC-015, TC-016, TC-017, TC-018, TC-019, TC-020, TC-021, TC-022, TC-023, TC-024, TC-042, TC-043, TC-044, TC-045, TC-051 |
 | Phase 1.5 close | Phase 1 bundle + TC-025, TC-026, TC-027, TC-028, TC-029, TC-030, TC-031, TC-032, TC-053 |
-| Phase 2 close | Phase 1.5 bundle + TC-033, TC-034, TC-035, TC-047, TC-048, TC-052 |
-| Phase 2.5 close | Phase 2 bundle + TC-036, TC-037, TC-046 |
+| Phase 2 close | Phase 1.5 bundle + TC-033, TC-034, TC-035, TC-046, TC-047, TC-048, TC-052 |
+| Phase 2.5 close | Phase 2 bundle + TC-036, TC-037 |
 | Phase 3 close | Phase 2.5 bundle + TC-038, TC-039 |
 
 ## 4. Benchmark Profile (for NFR-1)
@@ -111,7 +111,20 @@ Default benchmark profile for visibility latency gates:
 - Nightly failures must keep artifacts for replay (logs, seed, fixture versions).
 - Manual+CI tests must include reproducible runbook evidence in PR.
 
-## 7. Reporting and Traceability
+## 7. Execution Environment Contract
+
+- CI environment:
+  - Linux runner with tmux (`>= 3.3`) and local sshd harness.
+  - Must run all CI-labeled tests in this catalog.
+  - tmux session names and socket paths must be test-unique for parallel runs.
+- Nightly environment:
+  - Multi-target profile (host + ssh targets) with benchmark workload from Section 4.
+  - Must run all Nightly-labeled tests and retain artifacts for replay.
+  - Required artifacts: logs, metrics, property seeds, fixture version/hash.
+- Manual+CI environment:
+  - Must attach reproducible runbook and evidence artifacts to PR.
+
+## 8. Reporting and Traceability
 
 Every PR affecting runtime/API/action behavior must include:
 

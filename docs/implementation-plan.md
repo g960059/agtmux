@@ -18,6 +18,8 @@ The following contracts are treated as phase-entry prerequisites and must not ch
 - Watch stream resume contract (`cursor=<stream_id:sequence>`).
 - Runtime identity rules (`tmux_server_boot_id`, `pane_epoch`, stale runtime rejection).
 - Event ordering and dedupe semantics (`source_seq`, `effective_event_time`, source cursor model).
+- Daemon API transport contract (`HTTP/JSON over UDS`, health endpoint, lifecycle semantics).
+- Target health transition policy and SSH execution timeouts/retry behavior.
 
 ## 3. Delivery Principles
 
@@ -46,6 +48,7 @@ Objective:
 
 In scope:
 - `TargetExecutor` implementation and daemon boundary (`agtmuxd`).
+- Daemon transport and lifecycle baseline (`HTTP/JSON over UDS`, single-instance lock, graceful shutdown/restart behavior).
 - tmux topology observer per target.
 - SQLite schema + migrations for `runtimes`, `events`, `event_inbox`, `runtime_source_cursors`, `states`, `actions`, `action_snapshots`.
 - Runtime identity + pane epoch lifecycle.
@@ -62,6 +65,7 @@ Exit criteria:
 - Active runtime uniqueness constraint enforced at DB level.
 - Security/performance baseline tests are green (`TC-011`, `TC-012`, `TC-013`).
 - Target execution and topology observation tests are green (`TC-040`, `TC-041`).
+- CI/Nightly execution baseline exists for tmux + ssh scenarios and stores replay artifacts.
 
 ### Phase 1: Visibility MVP
 
@@ -72,6 +76,7 @@ In scope:
 - Target manager (`add/connect/list/remove`).
 - Claude and Codex adapters.
 - List commands (`panes/windows/sessions`) + watch stream.
+- Structured error envelope baseline for API/CLI parity.
 - Shared action write path/idempotency for attach flow (`actions`, `request_ref`).
 - Attach with fail-closed snapshot validation using shared action infrastructure.
 - API v1 read/watch endpoints.
@@ -85,6 +90,7 @@ Exit criteria:
 - Listing/watch usable under partial target failure.
 - Visibility latency p95 <= 2s (defined benchmark profile).
 - Watch jsonl schema compatibility tests pass.
+- API/CLI error envelope baseline is stable for read/attach paths.
 - Attach stale-runtime rejection tests pass.
 - Grouping and multi-target aggregation semantics tests pass (`TC-042`, `TC-043`).
 
@@ -149,7 +155,7 @@ Exit criteria:
 ## 6. Dependency and Sequence Rules
 
 - No control actions before Phase 1 watch/read contracts are stable.
-- No adapter expansion before Phase 2 gate bundle (`TC-033`, `TC-034`, `TC-035`, `TC-047`, `TC-048`, `TC-052`) is green.
+- No adapter expansion before Phase 2 gate bundle (`TC-033`, `TC-034`, `TC-035`, `TC-046`, `TC-047`, `TC-048`, `TC-052`) is green.
 - No app shipping before API v1 compatibility contract and test suite are stable.
 - Attach shipment requires action snapshot + idempotency core tests to be green.
 
@@ -172,3 +178,14 @@ Exit criteria:
 - Weekly: phase status, blockers, top risks.
 - Per PR: linked task IDs + linked test IDs + gate impact.
 - Phase close: gate checklist evidence and residual risk summary.
+
+## 10. Test Execution Profiles
+
+- CI profile:
+  - Runs on Linux with tmux (`>= 3.3`) and local ssh test harness.
+  - Must execute all CI-labeled tests, including watch/action contracts and target executor flows.
+- Nightly profile:
+  - Runs multi-target profile (host + ssh targets) with benchmark workload.
+  - Must execute Nightly-labeled tests and publish artifacts (logs, metrics, seeds, fixture versions).
+- Manual+CI profile:
+  - Uses reproducible runbook and evidence artifacts attached to PR.

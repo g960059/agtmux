@@ -17,7 +17,7 @@ Plan Reference: `docs/implementation-plan.md`
 | TASK-006 | 0 | P1 | Implement reconciler stale/health transitions | FR-8, NFR-2 | TASK-004 | Down/stale signals converge to unknown safely | TC-010 | Todo |
 | TASK-007 | 0 | P1 | Add payload redaction + retention jobs | NFR-9 | TASK-001 | Unredacted payload never persisted in SQLite | TC-011, TC-012, TC-050 | Todo |
 | TASK-008 | 0 | P1 | Add index set from spec baseline | NFR-1, NFR-3 | TASK-001 | Query plan confirms expected index usage | TC-013 | Todo |
-| TASK-009 | 1 | P0 | Implement target manager commands | FR-10 | TASK-031 | add/connect/list/remove works for local + ssh targets | TC-014 | Todo |
+| TASK-009 | 1 | P0 | Implement target manager commands | FR-10 | TASK-001, TASK-031 | add/connect/list/remove works for local + ssh targets | TC-014 | Todo |
 | TASK-010 | 1 | P0 | Implement Claude adapter | FR-1, FR-2 | TASK-003, TASK-004 | Claude signals normalize into canonical states | TC-015 | Todo |
 | TASK-011 | 1 | P0 | Implement Codex adapter | FR-1, FR-2 | TASK-003, TASK-004 | Codex notify/wrapper events normalize correctly | TC-016 | Todo |
 | TASK-012 | 1 | P0 | Implement API v1 read endpoints | FR-4, FR-6, FR-7, FR-9 | TASK-004, TASK-006 | panes/windows/sessions JSON contract stable with grouping counts and multi-target aggregate semantics | TC-017 | Todo |
@@ -31,7 +31,7 @@ Plan Reference: `docs/implementation-plan.md`
 | TASK-020 | 1.5 | P0 | Implement `view-output` action | FR-5 | TASK-018 | bounded capture returns correct pane output | TC-028 | Todo |
 | TASK-021 | 1.5 | P0 | Implement `kill` mode `key\|signal` and guard logic | FR-5, FR-15 | TASK-018 | pid missing under signal mode yields `E_PID_UNAVAILABLE` | TC-029, TC-030 | Todo |
 | TASK-022 | 1.5 | P1 | Implement action-event audit correlation | FR-15 | TASK-018 | action_id traces to correlated events | TC-031 | Todo |
-| TASK-023 | 1.5 | P1 | Implement structured error envelope + code mapping | FR-16 | TASK-012, TASK-018 | machine-readable error object stable across API/CLI | TC-018, TC-032, TC-053 | Todo |
+| TASK-023 | 1 | P1 | Implement structured error envelope + code mapping | FR-16 | TASK-012, TASK-018 | machine-readable error object stable across API/CLI | TC-018, TC-032, TC-053 | Todo |
 | TASK-024 | 2 | P0 | Implement Gemini adapter | FR-1, FR-2 | TASK-004, TASK-006 | Gemini parser/wrapper transitions converge | TC-033 | Todo |
 | TASK-025 | 2 | P1 | Reliability hardening for reconnect/backoff | NFR-1, NFR-7 | TASK-024 | sustained target flaps keep system convergent | TC-034, TC-052 | Todo |
 | TASK-026 | 2 | P1 | JSON schema compatibility tests for v1 | FR-6 | TASK-012, TASK-013, TASK-023 | schema compatibility suite gates release | TC-035, TC-045 | Todo |
@@ -39,7 +39,7 @@ Plan Reference: `docs/implementation-plan.md`
 | TASK-028 | 2.5 | P1 | Add Cursor CLI adapter | FR-12 | TASK-025, TASK-026, TASK-035 | adapter passes shared contract tests | TC-037 | Todo |
 | TASK-029 | 3 | P1 | Build macOS app read views using API v1 | Goal | TASK-012, TASK-013 | app can render global/session/window/pane views | TC-038 | Todo |
 | TASK-030 | 3 | P1 | Build macOS app actions with same safety checks | Goal, FR-15 | TASK-018, TASK-019, TASK-021 | app actions preserve fail-closed semantics | TC-039 | Todo |
-| TASK-031 | 0 | P0 | Implement `TargetExecutor` and daemon boundary | FR-9 | TASK-001 | all target read/write paths go through executor abstraction | TC-040 | Todo |
+| TASK-031 | 0 | P0 | Implement `TargetExecutor` and daemon boundary | FR-9 | TASK-001 | all target read/write paths go through executor abstraction with UDS transport + health endpoint contract | TC-040 | Todo |
 | TASK-032 | 0 | P0 | Implement tmux topology observer per target | FR-3, FR-9 | TASK-031 | topology snapshots converge across targets | TC-041 | Todo |
 | TASK-033 | 1 | P1 | Implement grouping and summary rollups | FR-7 | TASK-012 | session/window summaries match spec section 7.6 | TC-042 | Todo |
 | TASK-034 | 1 | P1 | Enforce aggregated multi-target response semantics | FR-9, NFR-7 | TASK-009, TASK-012, TASK-016 | requested/responded/target_errors consistency | TC-043 | Todo |
@@ -47,6 +47,8 @@ Plan Reference: `docs/implementation-plan.md`
 | TASK-036 | 2 | P1 | Add adapter contract version compatibility checks | NFR-6 | TASK-035 | backward-compatible minor version changes validated | TC-047 | Todo |
 | TASK-037 | 2 | P1 | Add richer list/watch filters and sorting | FR-4, FR-7 | TASK-012, TASK-013 | filter/sort contract remains stable and deterministic | TC-048 | Todo |
 | TASK-038 | 0 | P1 | Harden ingestion duplicate storm behavior | NFR-4, FR-14 | TASK-004, TASK-005 | duplicate/retry storms do not create divergent state | TC-049 | Todo |
+| TASK-039 | 1 | P1 | Add visibility latency benchmark harness and SLO gate | NFR-1 | TASK-012, TASK-013, TASK-031 | benchmark profile is reproducible and enforces p95 visible lag <= 2s | TC-044 | Todo |
+| TASK-040 | 0 | P0 | Establish CI/Nightly execution baseline (tmux + local sshd) | NFR-1, NFR-7 | TASK-001, TASK-031 | CI runs tmux/target integration suite and Nightly runs multi-target/reliability suites with artifacts | TC-040, TC-041, TC-044, TC-052 | Todo |
 
 ## 2. Immediate Sprint Candidates (Recommended)
 
@@ -58,6 +60,7 @@ Plan Reference: `docs/implementation-plan.md`
 - TASK-006
 - TASK-031
 - TASK-032
+- TASK-040
 
 ## 3. Definition of Done
 

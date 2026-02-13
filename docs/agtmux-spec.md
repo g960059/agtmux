@@ -127,6 +127,33 @@ The desired direction is:
   - CLI commands now.
   - macOS resident app later, reading the same daemon API.
 
+### 7.1.1 State Ownership Boundary
+
+- `states` table is owned by State Engine only.
+- Reconciler MUST NOT write `states` rows directly.
+- Reconciler emits synthetic reconciliation events (`stale_detected`, `target_health_changed`, `demotion_due`) into the same ingestion path.
+- State Engine applies both adapter and reconciler events using the same dedupe/order/runtime guards.
+
+### 7.1.2 TargetExecutor and SSH Lifecycle
+
+- TargetExecutor MUST expose the same read/write contract for `local` and `ssh` targets.
+- SSH mode MUST use persistent connection reuse (ControlMaster-equivalent/session pool) to avoid per-command handshake overhead.
+- Default execution timeouts (configurable):
+  - connect timeout: 3 seconds
+  - command timeout: 5 seconds
+  - retry policy: 2 retries with exponential backoff (250ms, 1s) and jitter
+- Default target health transition policy (configurable):
+  - `ok -> degraded`: first probe/command failure
+  - `degraded -> down`: 3 consecutive failures within 30 seconds
+  - `degraded|down -> ok`: 2 consecutive successful probes plus successful topology fetch
+- When a target is `down`, aggregated reads MUST continue with partial results and target-scoped `E_TARGET_UNREACHABLE`.
+
+### 7.1.3 Runtime Prerequisites
+
+- Supported tmux version is `>= 3.3`.
+- `tmux_server_boot_id` MUST be stable for one tmux server lifetime.
+- If direct boot-id is unavailable on target environment, implementation MUST derive a stable equivalent from server metadata (for example server pid + server start timestamp).
+
 ### 7.2 Canonical State Model
 
 Canonical states:
@@ -401,7 +428,8 @@ Adapter-specific ingestion:
 Reconciler:
 - periodic tmux scan (default 2 seconds for active panes).
 - exponential backoff for idle panes.
-- stale demotion and target health transitions are reconciler-owned.
+- reconciler emits reconciliation events and MUST NOT mutate `states` directly.
+- stale demotion and target health transitions are reconciler-owned decisions, applied by State Engine.
 - target unreachable transitions must emit `unknown/target_unreachable` with low confidence.
 
 ### 7.5 CLI Surface (MVP)
@@ -421,6 +449,10 @@ Listings and actions (aggregated by default):
 - `agtmux view-output <ref> [--lines <n>]`
 - `agtmux kill <ref> [--mode key|signal] [--signal INT|TERM|KILL] [--if-runtime <runtime_id>] [--if-state <state>] [--if-updated-within <duration>] [--force-stale] [--yes]`
 - `agtmux watch [--target <name>|--all-targets] [--scope panes|windows|sessions] [--format table|jsonl] [--interval <duration>] [--cursor <stream_id:sequence>] [--once]`
+
+Default option values:
+- `watch --interval`: `2s`
+- `view-output --lines`: `200`
 
 Canonical action reference grammar (BNF):
 
@@ -504,6 +536,7 @@ Output expectations:
 
 Server-side action snapshot:
 - Before any action (`attach`, `send`, `view-output`, `kill`), daemon MUST create `actions` row and `action_snapshot` containing `target`, `pane`, `runtime_id`, `state_version`, `observed_at`, `expires_at`, `nonce`.
+- Default snapshot TTL is `30s` (`expires_at = observed_at + 30s`) unless overridden by policy.
 - Action execution MUST fail closed if current state no longer matches snapshot and `--force-stale` is not explicitly set.
 - CLI guard flags (`--if-runtime`, `--if-state`, `--if-updated-within`) are additional constraints only; they MUST NOT weaken server-side validation.
 - Action execution MUST reject expired snapshot with `E_SNAPSHOT_EXPIRED`.
@@ -518,6 +551,7 @@ Server-side action snapshot:
   - `--key` sends tmux key token (for example `C-c`, `Escape`).
   - `--enter` appends Enter after payload.
   - `--paste` uses paste-buffer style delivery for multiline safety.
+  - TargetExecutor MUST execute tmux commands via argv-safe invocation (`no sh -c`) for both local and ssh targets.
   - must fail closed if runtime/state/freshness guard does not match.
 - `attach`:
   - jumps user to pane/session on target safely.
@@ -550,21 +584,35 @@ Server-side action snapshot:
 
 Transport and versioning:
 - Daemon API v1 is the shared backend contract for CLI and macOS app.
+- Default transport is `HTTP/1.1 + JSON` over Unix domain socket.
+- Default socket path is `$XDG_RUNTIME_DIR/agtmux/agtmuxd.sock` (fallback: `~/.local/state/agtmux/agtmuxd.sock`).
+- Socket permissions MUST be `0600`.
+- Optional TCP listener is loopback-only and disabled by default; when enabled, token-based auth is required.
 - Responses MUST include `schema_version`.
 - Read responses MUST include `generated_at`.
 - Action responses MUST include `action_id`, `result_code`, and `completed_at` (when completed).
 
 Read endpoints (minimum):
+- `GET /v1/health`
+- `GET /v1/targets`
 - `GET /v1/panes`
 - `GET /v1/windows`
 - `GET /v1/sessions`
 - `GET /v1/watch?scope=<panes|windows|sessions>&cursor=<stream_id:sequence>`
 
 Write endpoints (minimum):
+- `POST /v1/targets`
+- `POST /v1/targets/{name}/connect`
+- `DELETE /v1/targets/{name}`
 - `POST /v1/actions/attach`
 - `POST /v1/actions/send`
 - `POST /v1/actions/view-output`
 - `POST /v1/actions/kill`
+
+Daemon lifecycle (normative minimum):
+- Daemon MUST support single-instance lock per user/workspace scope.
+- Graceful shutdown MUST stop accepting new requests, flush in-flight DB transactions, and close watch streams with terminal `reset` event.
+- After daemon restart, watch stream MUST use new `stream_id`; stale cursors from old stream must follow reset behavior.
 
 Action request minimum fields:
 - `request_ref` (required idempotency key)
