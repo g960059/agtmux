@@ -347,6 +347,7 @@ final class DaemonManager {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: daemonBinaryPath)
         process.arguments = ["--socket", socketPath, "--db", dbPath]
+        process.environment = daemonLaunchEnvironment()
         process.standardInput = nil
         let handle = try FileHandle(forWritingTo: logURL)
         handle.seekToEndOfFile()
@@ -364,7 +365,7 @@ final class DaemonManager {
         let escapedDB = shellEscape(dbPath)
         let escapedLog = shellEscape(logURL.path)
         let command = "nohup \(escapedBin) --socket \(escapedSocket) --db \(escapedDB) >> \(escapedLog) 2>&1 &"
-        let result = try runCommand("/bin/sh", ["-lc", command])
+        let result = try runCommand("/bin/sh", ["-lc", command], environment: daemonLaunchEnvironment())
         guard result.status == 0 else {
             throw RuntimeError.commandFailed("/bin/sh -lc \(command)", result.status, result.stderr)
         }
@@ -472,6 +473,52 @@ final class DaemonManager {
         formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'"
         return formatter
     }()
+
+    private func daemonLaunchEnvironment() -> [String: String] {
+        var environment = ProcessInfo.processInfo.environment
+        let fm = FileManager.default
+        let home = fm.homeDirectoryForCurrentUser.path
+        if (environment["HOME"] ?? "").isEmpty {
+            environment["HOME"] = home
+        }
+
+        var pathEntries: [String] = []
+        if let current = environment["PATH"] {
+            pathEntries += current
+                .split(separator: ":")
+                .map { String($0) }
+                .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        }
+        pathEntries += [
+            "\(home)/.local/bin",
+            "\(home)/.nix-profile/bin",
+            "\(home)/.cargo/bin",
+            "\(home)/go/bin",
+            "/opt/homebrew/bin",
+            "/opt/homebrew/sbin",
+            "/usr/local/bin",
+            "/usr/local/sbin",
+            "/usr/bin",
+            "/bin",
+            "/usr/sbin",
+            "/sbin",
+            "/Library/Apple/usr/bin",
+        ]
+
+        var deduped: [String] = []
+        var seen: Set<String> = []
+        for raw in pathEntries {
+            let path = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if path.isEmpty {
+                continue
+            }
+            if seen.insert(path).inserted {
+                deduped.append(path)
+            }
+        }
+        environment["PATH"] = deduped.joined(separator: ":")
+        return environment
+    }
 }
 
 private struct CommandResult {
@@ -480,8 +527,8 @@ private struct CommandResult {
     let status: Int32
 }
 
-private func runCapture(_ executable: String, _ args: [String]) throws -> String {
-    let result = try runCommand(executable, args)
+private func runCapture(_ executable: String, _ args: [String], environment: [String: String]? = nil) throws -> String {
+    let result = try runCommand(executable, args, environment: environment)
     guard result.status == 0 else {
         let cmd = ([executable] + args).joined(separator: " ")
         throw RuntimeError.commandFailed(cmd, result.status, result.stderr)
@@ -489,10 +536,11 @@ private func runCapture(_ executable: String, _ args: [String]) throws -> String
     return result.stdout
 }
 
-private func runCommand(_ executable: String, _ args: [String]) throws -> CommandResult {
+private func runCommand(_ executable: String, _ args: [String], environment: [String: String]? = nil) throws -> CommandResult {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: executable)
     process.arguments = args
+    process.environment = environment
 
     let outPipe = Pipe()
     let errPipe = Pipe()
