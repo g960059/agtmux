@@ -10,6 +10,7 @@ import (
 	"io"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,19 +24,20 @@ const (
 )
 
 type codexThreadHint struct {
+	id    string
 	label string
 	at    time.Time
 }
 
 type codexSessionCacheEntry struct {
-	hint       codexThreadHint
+	hints      []codexThreadHint
 	fetchedAt  time.Time
 	nextRetry  time.Time
 	hasValue   bool
 	lastErrMsg string
 }
 
-type codexSessionFetcher func(ctx context.Context, workspacePath string) (codexThreadHint, error)
+type codexSessionFetcher func(ctx context.Context, workspacePath string) ([]codexThreadHint, error)
 
 type codexSessionEnricher struct {
 	mu      sync.Mutex
@@ -47,7 +49,7 @@ type codexSessionEnricher struct {
 
 func newCodexSessionEnricher(fetch codexSessionFetcher) *codexSessionEnricher {
 	if fetch == nil {
-		fetch = fetchCodexThreadHint
+		fetch = fetchCodexThreadHints
 	}
 	return &codexSessionEnricher{
 		cache:   map[string]codexSessionCacheEntry{},
@@ -59,6 +61,18 @@ func newCodexSessionEnricher(fetch codexSessionFetcher) *codexSessionEnricher {
 
 func (e *codexSessionEnricher) GetMany(ctx context.Context, workspacePaths []string) map[string]codexThreadHint {
 	out := map[string]codexThreadHint{}
+	ranked := e.GetManyRanked(ctx, workspacePaths)
+	for key, hints := range ranked {
+		if len(hints) == 0 {
+			continue
+		}
+		out[key] = hints[0]
+	}
+	return out
+}
+
+func (e *codexSessionEnricher) GetManyRanked(ctx context.Context, workspacePaths []string) map[string][]codexThreadHint {
+	out := map[string][]codexThreadHint{}
 	seen := map[string]struct{}{}
 	for _, raw := range workspacePaths {
 		key := normalizeCodexWorkspacePath(raw)
@@ -69,39 +83,39 @@ func (e *codexSessionEnricher) GetMany(ctx context.Context, workspacePaths []str
 			continue
 		}
 		seen[key] = struct{}{}
-		hint, ok := e.get(ctx, key)
-		if ok && hint.label != "" {
-			out[key] = hint
+		hints, ok := e.get(ctx, key)
+		if ok && len(hints) > 0 {
+			out[key] = hints
 		}
 	}
 	return out
 }
 
-func (e *codexSessionEnricher) get(ctx context.Context, key string) (codexThreadHint, bool) {
+func (e *codexSessionEnricher) get(ctx context.Context, key string) ([]codexThreadHint, bool) {
 	now := time.Now().UTC()
 
 	e.mu.Lock()
 	entry, exists := e.cache[key]
 	if exists && entry.hasValue && now.Sub(entry.fetchedAt) < e.ttl {
-		hint := entry.hint
+		hints := append([]codexThreadHint(nil), entry.hints...)
 		e.mu.Unlock()
-		return hint, true
+		return hints, len(hints) > 0
 	}
 	if exists && now.Before(entry.nextRetry) {
-		hint := entry.hint
-		hasValue := entry.hasValue && hint.label != ""
+		hints := append([]codexThreadHint(nil), entry.hints...)
+		hasValue := entry.hasValue && len(hints) > 0
 		e.mu.Unlock()
 		if hasValue {
-			return hint, true
+			return hints, true
 		}
-		return codexThreadHint{}, false
+		return nil, false
 	}
 	e.mu.Unlock()
 
 	fetchCtx, cancel := context.WithTimeout(ctx, codexAppServerRequestLimit)
 	defer cancel()
 
-	hint, err := e.fetch(fetchCtx, key)
+	hints, err := e.fetch(fetchCtx, key)
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	entry = e.cache[key]
@@ -109,46 +123,57 @@ func (e *codexSessionEnricher) get(ctx context.Context, key string) (codexThread
 		entry.nextRetry = now.Add(e.backoff)
 		entry.lastErrMsg = err.Error()
 		e.cache[key] = entry
-		if entry.hasValue && entry.hint.label != "" {
-			return entry.hint, true
+		if entry.hasValue && len(entry.hints) > 0 {
+			return append([]codexThreadHint(nil), entry.hints...), true
 		}
-		return codexThreadHint{}, false
+		return nil, false
 	}
 	entry.lastErrMsg = ""
 	entry.nextRetry = time.Time{}
-	if hint.label == "" {
+	if len(hints) == 0 {
 		entry.nextRetry = now.Add(e.backoff)
 		e.cache[key] = entry
-		if entry.hasValue && entry.hint.label != "" {
-			return entry.hint, true
+		if entry.hasValue && len(entry.hints) > 0 {
+			return append([]codexThreadHint(nil), entry.hints...), true
 		}
-		return codexThreadHint{}, false
+		return nil, false
 	}
 
-	entry.hint = hint
+	entry.hints = append([]codexThreadHint(nil), hints...)
 	entry.fetchedAt = now
 	entry.hasValue = true
 	e.cache[key] = entry
-	return hint, true
+	return append([]codexThreadHint(nil), hints...), true
 }
 
 func fetchCodexThreadHint(ctx context.Context, workspacePath string) (codexThreadHint, error) {
+	hints, err := fetchCodexThreadHints(ctx, workspacePath)
+	if err != nil {
+		return codexThreadHint{}, err
+	}
+	if len(hints) == 0 {
+		return codexThreadHint{}, nil
+	}
+	return hints[0], nil
+}
+
+func fetchCodexThreadHints(ctx context.Context, workspacePath string) ([]codexThreadHint, error) {
 	cmd := exec.CommandContext(ctx, "codex", "app-server")
 	cmd.Dir = workspacePath
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return codexThreadHint{}, fmt.Errorf("codex app-server stdin: %w", err)
+		return nil, fmt.Errorf("codex app-server stdin: %w", err)
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return codexThreadHint{}, fmt.Errorf("codex app-server stdout: %w", err)
+		return nil, fmt.Errorf("codex app-server stdout: %w", err)
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		return codexThreadHint{}, fmt.Errorf("codex app-server stderr: %w", err)
+		return nil, fmt.Errorf("codex app-server stderr: %w", err)
 	}
 	if err := cmd.Start(); err != nil {
-		return codexThreadHint{}, fmt.Errorf("start codex app-server: %w", err)
+		return nil, fmt.Errorf("start codex app-server: %w", err)
 	}
 	defer func() {
 		_ = stdin.Close()
@@ -181,13 +206,13 @@ func fetchCodexThreadHint(ctx context.Context, workspacePath string) (codexThrea
 		},
 	}
 	if err := encoder.Encode(initReq); err != nil {
-		return codexThreadHint{}, fmt.Errorf("write initialize: %w", err)
+		return nil, fmt.Errorf("write initialize: %w", err)
 	}
 	if _, err := waitCodexAppServerResponse(ctx, decoder, 1); err != nil {
-		return codexThreadHint{}, formatCodexAppServerErr("initialize failed", err, stderrBuf.String())
+		return nil, formatCodexAppServerErr("initialize failed", err, stderrBuf.String())
 	}
 	if err := encoder.Encode(map[string]any{"method": "initialized"}); err != nil {
-		return codexThreadHint{}, fmt.Errorf("write initialized: %w", err)
+		return nil, fmt.Errorf("write initialized: %w", err)
 	}
 
 	listReq := map[string]any{
@@ -200,18 +225,14 @@ func fetchCodexThreadHint(ctx context.Context, workspacePath string) (codexThrea
 		},
 	}
 	if err := encoder.Encode(listReq); err != nil {
-		return codexThreadHint{}, fmt.Errorf("write thread/list: %w", err)
+		return nil, fmt.Errorf("write thread/list: %w", err)
 	}
 	resp, err := waitCodexAppServerResponse(ctx, decoder, 2)
 	if err != nil {
-		return codexThreadHint{}, formatCodexAppServerErr("thread/list failed", err, stderrBuf.String())
+		return nil, formatCodexAppServerErr("thread/list failed", err, stderrBuf.String())
 	}
 
-	hint, ok := parseCodexThreadListHint(resp, workspacePath)
-	if !ok {
-		return codexThreadHint{}, nil
-	}
-	return hint, nil
+	return parseCodexThreadListHints(resp, workspacePath), nil
 }
 
 func waitCodexAppServerResponse(ctx context.Context, decoder *json.Decoder, requestID int64) (map[string]any, error) {
@@ -239,19 +260,25 @@ func waitCodexAppServerResponse(ctx context.Context, decoder *json.Decoder, requ
 }
 
 func parseCodexThreadListHint(resp map[string]any, workspacePath string) (codexThreadHint, bool) {
+	hints := parseCodexThreadListHints(resp, workspacePath)
+	if len(hints) == 0 {
+		return codexThreadHint{}, false
+	}
+	return hints[0], true
+}
+
+func parseCodexThreadListHints(resp map[string]any, workspacePath string) []codexThreadHint {
 	result, _ := resp["result"].(map[string]any)
 	if result == nil {
-		return codexThreadHint{}, false
+		return nil
 	}
 	items := codexThreadItems(result)
 	if len(items) == 0 {
-		return codexThreadHint{}, false
+		return nil
 	}
 
 	pathKey := normalizeCodexWorkspacePath(workspacePath)
-	bestHint := codexThreadHint{}
-	bestFound := false
-	bestRank := int64(-1)
+	byID := map[string]codexThreadHint{}
 	for _, item := range items {
 		thread, _ := item.(map[string]any)
 		if thread == nil {
@@ -276,7 +303,8 @@ func parseCodexThreadListHint(resp map[string]any, workspacePath string) (codexT
 			continue
 		}
 
-		hint := codexThreadHint{label: compactPreview(label, 72)}
+		id := strings.TrimSpace(asString(thread["id"]))
+		hint := codexThreadHint{id: id, label: compactPreview(label, 72)}
 		if ts, ok := parseCodexThreadTimestamp(thread["updatedAt"]); ok {
 			hint.at = ts.UTC()
 		} else if ts, ok := parseCodexThreadTimestamp(thread["updated_at"]); ok {
@@ -286,20 +314,45 @@ func parseCodexThreadListHint(resp map[string]any, workspacePath string) (codexT
 		} else if ts, ok := parseCodexThreadTimestamp(thread["created_at"]); ok {
 			hint.at = ts.UTC()
 		}
-		rank := int64(0)
-		if !hint.at.IsZero() {
-			rank = hint.at.Unix()
+		key := id
+		if key == "" {
+			key = hint.label
 		}
-		if !bestFound || rank > bestRank {
-			bestFound = true
-			bestRank = rank
-			bestHint = hint
+		if key == "" {
+			continue
 		}
+		if prev, ok := byID[key]; ok {
+			if prev.at.After(hint.at) {
+				continue
+			}
+		}
+		byID[key] = hint
 	}
-	if bestFound {
-		return bestHint, true
+	if len(byID) == 0 {
+		return nil
 	}
-	return codexThreadHint{}, false
+	out := make([]codexThreadHint, 0, len(byID))
+	for _, hint := range byID {
+		out = append(out, hint)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		lhs := out[i]
+		rhs := out[j]
+		if !lhs.at.Equal(rhs.at) {
+			if lhs.at.IsZero() {
+				return false
+			}
+			if rhs.at.IsZero() {
+				return true
+			}
+			return lhs.at.After(rhs.at)
+		}
+		if lhs.label != rhs.label {
+			return lhs.label < rhs.label
+		}
+		return lhs.id < rhs.id
+	})
+	return out
 }
 
 func codexThreadItems(result map[string]any) []any {

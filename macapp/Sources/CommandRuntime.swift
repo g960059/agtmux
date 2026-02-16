@@ -143,6 +143,39 @@ struct AGTMUXCLIClient {
         return try decodeSingleJSONLine(out, as: PaneEnvelope.self).items
     }
 
+    func fetchCapabilities() async throws -> CapabilitiesEnvelope {
+        let out = try await runAppCommand(["terminal", "capabilities", "--json"])
+        return try decodeSingleJSONLine(out, as: CapabilitiesEnvelope.self)
+    }
+
+    func terminalRead(target: String, paneID: String, cursor: String?, lines: Int) async throws -> TerminalReadEnvelope {
+        var args = [
+            "terminal", "read",
+            "--target", target,
+            "--pane", paneID,
+            "--lines", String(lines),
+            "--json",
+        ]
+        if let cursor, !cursor.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            args += ["--cursor", cursor.trimmingCharacters(in: .whitespacesAndNewlines)]
+        }
+        let out = try await runAppCommand(args)
+        return try decodeSingleJSONLine(out, as: TerminalReadEnvelope.self)
+    }
+
+    func terminalResize(target: String, paneID: String, cols: Int, rows: Int) async throws -> TerminalResizeResponse {
+        let args = [
+            "terminal", "resize",
+            "--target", target,
+            "--pane", paneID,
+            "--cols", String(cols),
+            "--rows", String(rows),
+            "--json",
+        ]
+        let out = try await runAppCommand(args)
+        return try decodeSingleJSONLine(out, as: TerminalResizeResponse.self)
+    }
+
     func sendText(target: String, paneID: String, text: String, requestRef: String, enter: Bool, paste: Bool) async throws -> ActionResponse {
         var args = [
             "action", "send",
@@ -212,6 +245,7 @@ final class DaemonManager {
     let logPath: String
 
     private let daemonBinaryPath: String
+    private let launcherLogPath: String
     private var ownedProcess: Process?
     private var logHandle: FileHandle?
     private var lastBackupAt: Date?
@@ -224,6 +258,8 @@ final class DaemonManager {
         self.dbPath = dbPath
         self.logPath = logPath
         self.daemonBinaryPath = try BinaryResolver.resolve(binary: "agtmuxd", envKey: "AGTMUX_DAEMON_BIN")
+        let supportDir = URL(fileURLWithPath: logPath).deletingLastPathComponent()
+        self.launcherLogPath = supportDir.appendingPathComponent("launcher.log", isDirectory: false).path
     }
 
     deinit {
@@ -252,28 +288,36 @@ final class DaemonManager {
         if fm.fileExists(atPath: logURL.path) == false {
             _ = fm.createFile(atPath: logURL.path, contents: Data())
         }
+        if fm.fileExists(atPath: launcherLogPath) == false {
+            _ = fm.createFile(atPath: launcherLogPath, contents: Data())
+        }
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: daemonBinaryPath)
-        process.arguments = ["--socket", socketPath, "--db", dbPath]
-        process.standardInput = nil
-        let logHandle = try FileHandle(forWritingTo: logURL)
-        logHandle.seekToEndOfFile()
-        process.standardOutput = logHandle
-        process.standardError = logHandle
+        appendLauncherLog("ensureRunning: start requested socket=\(socketPath)")
+        do {
+            try startOwnedDaemonProcess(logURL: logURL)
+        } catch {
+            appendLauncherLog("ensureRunning: owned start failed: \(error.localizedDescription)")
+        }
 
-        try process.run()
-        ownedProcess = process
-        self.logHandle = logHandle
-
-        for _ in 0..<50 {
-            if await client.healthcheck() {
-                return
-            }
-            try await Task.sleep(for: .milliseconds(100))
+        if await waitForHealthcheck(client: client, maxAttempts: 50, intervalMillis: 100) {
+            appendLauncherLog("ensureRunning: healthy via owned process")
+            return
         }
 
         stopIfOwned()
+        appendLauncherLog("ensureRunning: owned process did not become healthy, trying detached fallback")
+        do {
+            try startDetachedDaemonProcess(logURL: logURL)
+        } catch {
+            appendLauncherLog("ensureRunning: detached fallback failed: \(error.localizedDescription)")
+            throw error
+        }
+
+        if await waitForHealthcheck(client: client, maxAttempts: 60, intervalMillis: 100) {
+            appendLauncherLog("ensureRunning: healthy via detached process")
+            return
+        }
+        appendLauncherLog("ensureRunning: timeout waiting healthcheck")
         throw RuntimeError.daemonStartTimeout(socketPath)
     }
 
@@ -297,6 +341,61 @@ final class DaemonManager {
     private func closeLogHandle() {
         logHandle?.closeFile()
         logHandle = nil
+    }
+
+    private func startOwnedDaemonProcess(logURL: URL) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: daemonBinaryPath)
+        process.arguments = ["--socket", socketPath, "--db", dbPath]
+        process.standardInput = nil
+        let handle = try FileHandle(forWritingTo: logURL)
+        handle.seekToEndOfFile()
+        process.standardOutput = handle
+        process.standardError = handle
+        try process.run()
+        ownedProcess = process
+        logHandle = handle
+        appendLauncherLog("startOwned: pid=\(process.processIdentifier)")
+    }
+
+    private func startDetachedDaemonProcess(logURL: URL) throws {
+        let escapedBin = shellEscape(daemonBinaryPath)
+        let escapedSocket = shellEscape(socketPath)
+        let escapedDB = shellEscape(dbPath)
+        let escapedLog = shellEscape(logURL.path)
+        let command = "nohup \(escapedBin) --socket \(escapedSocket) --db \(escapedDB) >> \(escapedLog) 2>&1 &"
+        let result = try runCommand("/bin/sh", ["-lc", command])
+        guard result.status == 0 else {
+            throw RuntimeError.commandFailed("/bin/sh -lc \(command)", result.status, result.stderr)
+        }
+        appendLauncherLog("startDetached: dispatched command")
+    }
+
+    private func waitForHealthcheck(client: AGTMUXCLIClient, maxAttempts: Int, intervalMillis: Int) async -> Bool {
+        guard maxAttempts > 0 else {
+            return await client.healthcheck()
+        }
+        for _ in 0..<maxAttempts {
+            if await client.healthcheck() {
+                return true
+            }
+            try? await Task.sleep(for: .milliseconds(intervalMillis))
+        }
+        return false
+    }
+
+    private func appendLauncherLog(_ message: String) {
+        let line = "\(Self.launcherTimestampFormatter.string(from: Date())) \(message)\n"
+        if let data = line.data(using: .utf8) {
+            if FileManager.default.fileExists(atPath: launcherLogPath) == false {
+                _ = FileManager.default.createFile(atPath: launcherLogPath, contents: Data())
+            }
+            if let handle = try? FileHandle(forWritingTo: URL(fileURLWithPath: launcherLogPath)) {
+                handle.seekToEndOfFile()
+                handle.write(data)
+                try? handle.close()
+            }
+        }
     }
 
     private func backupStateDBIfNeeded(fileManager fm: FileManager, dbURL: URL) {
@@ -365,6 +464,14 @@ final class DaemonManager {
         formatter.dateFormat = "yyyyMMdd-HHmmss"
         return formatter
     }()
+
+    private static let launcherTimestampFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'"
+        return formatter
+    }()
 }
 
 private struct CommandResult {
@@ -401,6 +508,11 @@ private func runCommand(_ executable: String, _ args: [String]) throws -> Comman
     let stderr = String(data: stderrData, encoding: .utf8) ?? ""
 
     return CommandResult(stdout: stdout, stderr: stderr, status: process.terminationStatus)
+}
+
+private func shellEscape(_ raw: String) -> String {
+    let escaped = raw.replacingOccurrences(of: "'", with: "'\"'\"'")
+    return "'\(escaped)'"
 }
 
 private func decodeSingleJSONLine<T: Decodable>(_ raw: String, as type: T.Type) throws -> T {

@@ -100,12 +100,12 @@ func TestParseCodexThreadTimestampHandlesStringAndEpoch(t *testing.T) {
 func TestCodexSessionEnricherCachesFetcherResult(t *testing.T) {
 	ctx := context.Background()
 	callCount := 0
-	enricher := newCodexSessionEnricher(func(_ context.Context, workspacePath string) (codexThreadHint, error) {
+	enricher := newCodexSessionEnricher(func(_ context.Context, workspacePath string) ([]codexThreadHint, error) {
 		callCount++
-		return codexThreadHint{
+		return []codexThreadHint{{
 			label: workspacePath + " hint",
 			at:    time.Now().UTC(),
-		}, nil
+		}}, nil
 	})
 	enricher.ttl = 1 * time.Minute
 

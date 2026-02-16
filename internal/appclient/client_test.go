@@ -369,6 +369,79 @@ func TestListActionEventsDecodeErrorOnInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestTerminalAndCapabilitiesEndpoints(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/capabilities", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("expected GET, got %s", r.Method)
+		}
+		_, _ = io.WriteString(w, `{"schema_version":"v1","generated_at":"2026-02-13T00:00:00Z","capabilities":{"embedded_terminal":true,"terminal_read":true,"terminal_resize":true,"terminal_write_via_action_send":true,"terminal_frame_protocol":"snapshot-delta-reset","terminal_frame_protocol_version":"1"}}`)
+	})
+	mux.HandleFunc("/v1/terminal/read", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("expected POST, got %s", r.Method)
+		}
+		var req TerminalReadRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode terminal read request: %v", err)
+		}
+		if req.Target != "t1" || req.PaneID != "%1" || req.Cursor != "stream-1:1" || req.Lines != 120 {
+			t.Fatalf("unexpected terminal read request: %+v", req)
+		}
+		_, _ = io.WriteString(w, `{"schema_version":"v1","generated_at":"2026-02-13T00:00:00Z","frame":{"frame_type":"delta","stream_id":"stream-1","cursor":"stream-1:2","pane_id":"%1","target":"t1","lines":120,"content":"hello"}}`)
+	})
+	mux.HandleFunc("/v1/terminal/resize", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("expected POST, got %s", r.Method)
+		}
+		var req TerminalResizeRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode terminal resize request: %v", err)
+		}
+		if req.Target != "t1" || req.PaneID != "%1" || req.Cols != 120 || req.Rows != 40 {
+			t.Fatalf("unexpected terminal resize request: %+v", req)
+		}
+		_, _ = io.WriteString(w, `{"schema_version":"v1","generated_at":"2026-02-13T00:00:00Z","target":"t1","pane_id":"%1","cols":120,"rows":40,"result_code":"completed"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	client := NewWithClient(srv.URL, srv.Client())
+	caps, err := client.ListCapabilities(context.Background())
+	if err != nil {
+		t.Fatalf("list capabilities: %v", err)
+	}
+	if !caps.Capabilities.EmbeddedTerminal || caps.Capabilities.TerminalFrameProtocol != "snapshot-delta-reset" {
+		t.Fatalf("unexpected capabilities response: %+v", caps.Capabilities)
+	}
+
+	readResp, err := client.TerminalRead(context.Background(), TerminalReadRequest{
+		Target: "t1",
+		PaneID: "%1",
+		Cursor: "stream-1:1",
+		Lines:  120,
+	})
+	if err != nil {
+		t.Fatalf("terminal read: %v", err)
+	}
+	if readResp.Frame.FrameType != "delta" || readResp.Frame.Cursor != "stream-1:2" {
+		t.Fatalf("unexpected terminal read response: %+v", readResp.Frame)
+	}
+
+	resizeResp, err := client.TerminalResize(context.Background(), TerminalResizeRequest{
+		Target: "t1",
+		PaneID: "%1",
+		Cols:   120,
+		Rows:   40,
+	})
+	if err != nil {
+		t.Fatalf("terminal resize: %v", err)
+	}
+	if resizeResp.ResultCode != "completed" || resizeResp.Cols != 120 || resizeResp.Rows != 40 {
+		t.Fatalf("unexpected terminal resize response: %+v", resizeResp)
+	}
+}
+
 func TestListTargetsEndpoint(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/targets", func(w http.ResponseWriter, r *http.Request) {

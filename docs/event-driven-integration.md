@@ -38,3 +38,23 @@ active runtime がヒント付きで一意に決まる場合のみ即時 `bound`
 
 - 既存 `~/.codex/config.toml` に `notify` が既にある場合は、デフォルトで上書きしない（warning を返す）。
 - 強制置換する場合のみ `--force-codex-notify` を使う。
+
+## Embedded Terminal Contract (Phase 0/1)
+
+- capability handshake: `GET /v1/capabilities`
+  - `embedded_terminal`
+  - `terminal_read`
+  - `terminal_resize`
+  - `terminal_write_via_action_send`
+  - `terminal_frame_protocol` (`snapshot-delta-reset`)
+- terminal read: `POST /v1/terminal/read`
+  - request: `target`, `pane_id`, `cursor?`, `lines?`
+  - response frame: `frame_type` (`snapshot|delta|reset`), `stream_id`, `cursor`, `content`
+- terminal resize: `POST /v1/terminal/resize`
+  - request: `target`, `pane_id`, `cols`, `rows`
+  - response: `result_code`
+
+注意:
+
+- write 経路は新設せず、`POST /v1/actions/send` を継続利用する。
+- `terminal.read/resize/reconnect` は管理操作として扱い、`last_interaction_at` の更新トリガーに含めない。

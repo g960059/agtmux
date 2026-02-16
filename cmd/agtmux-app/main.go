@@ -27,6 +27,9 @@ type service interface {
 	ViewOutput(ctx context.Context, req appclient.ViewOutputRequest) (api.ActionResponse, error)
 	Kill(ctx context.Context, req appclient.KillRequest) (api.ActionResponse, error)
 	ListActionEvents(ctx context.Context, actionID string) (api.ActionEventsEnvelope, error)
+	ListCapabilities(ctx context.Context) (api.CapabilitiesEnvelope, error)
+	TerminalRead(ctx context.Context, req appclient.TerminalReadRequest) (api.TerminalReadEnvelope, error)
+	TerminalResize(ctx context.Context, req appclient.TerminalResizeRequest) (api.TerminalResizeResponse, error)
 	ListTargets(ctx context.Context) (api.TargetsEnvelope, error)
 	CreateTarget(ctx context.Context, req appclient.CreateTargetRequest) (api.TargetsEnvelope, error)
 	ConnectTarget(ctx context.Context, targetName string) (api.TargetsEnvelope, error)
@@ -164,6 +167,8 @@ func run(ctx context.Context, args []string, out, errOut io.Writer, svc service)
 	switch args[0] {
 	case "action":
 		return runAction(ctx, args[1:], out, errOut, svc)
+	case "terminal":
+		return runTerminal(ctx, args[1:], out, errOut, svc)
 	case "view":
 		return runView(ctx, args[1:], out, errOut, svc)
 	case "target":
@@ -469,6 +474,138 @@ func runAction(ctx context.Context, args []string, out, errOut io.Writer, svc se
 		return 0
 	default:
 		_, _ = fmt.Fprintf(errOut, "unknown action command: %s\n", args[0])
+		return 2
+	}
+}
+
+func runTerminal(ctx context.Context, args []string, out, errOut io.Writer, svc service) int {
+	if len(args) == 0 {
+		_, _ = fmt.Fprintln(errOut, "usage: agtmux-app terminal <capabilities|read|resize> ...")
+		return 2
+	}
+	switch args[0] {
+	case "capabilities":
+		fs := flag.NewFlagSet("terminal capabilities", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		jsonOut := fs.Bool("json", false, "output JSON")
+		if err := fs.Parse(args[1:]); err != nil {
+			_, _ = fmt.Fprintf(errOut, "error: %v\n", err)
+			return 2
+		}
+		if fs.NArg() > 0 {
+			_, _ = fmt.Fprintln(errOut, "usage: agtmux-app terminal capabilities [--json]")
+			return 2
+		}
+		resp, err := svc.ListCapabilities(ctx)
+		if err != nil {
+			_, _ = fmt.Fprintf(errOut, "error: %v\n", err)
+			return 1
+		}
+		if *jsonOut {
+			return writeJSONResponse(out, errOut, resp)
+		}
+		if _, err := fmt.Fprintf(out, "embedded_terminal=%t terminal_read=%t terminal_resize=%t write_via_send=%t protocol=%s\n",
+			resp.Capabilities.EmbeddedTerminal,
+			resp.Capabilities.TerminalRead,
+			resp.Capabilities.TerminalResize,
+			resp.Capabilities.TerminalWriteViaAction,
+			resp.Capabilities.TerminalFrameProtocol,
+		); err != nil {
+			_, _ = fmt.Fprintf(errOut, "error: %v\n", err)
+			return 1
+		}
+		return 0
+	case "read":
+		fs := flag.NewFlagSet("terminal read", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		target := fs.String("target", "", "target name")
+		paneID := fs.String("pane", "", "pane id")
+		cursor := fs.String("cursor", "", "terminal cursor")
+		lines := fs.Int("lines", 200, "line count")
+		jsonOut := fs.Bool("json", false, "output JSON")
+		if err := fs.Parse(args[1:]); err != nil {
+			_, _ = fmt.Fprintf(errOut, "error: %v\n", err)
+			return 2
+		}
+		if fs.NArg() > 0 {
+			_, _ = fmt.Fprintln(errOut, "usage: agtmux-app terminal read --target <name> --pane <id> [--cursor <cursor>] [--lines <n>] [--json]")
+			return 2
+		}
+		if strings.TrimSpace(*target) == "" || strings.TrimSpace(*paneID) == "" {
+			_, _ = fmt.Fprintln(errOut, "usage: agtmux-app terminal read --target <name> --pane <id> [--cursor <cursor>] [--lines <n>] [--json]")
+			return 2
+		}
+		resp, err := svc.TerminalRead(ctx, appclient.TerminalReadRequest{
+			Target: strings.TrimSpace(*target),
+			PaneID: strings.TrimSpace(*paneID),
+			Cursor: strings.TrimSpace(*cursor),
+			Lines:  *lines,
+		})
+		if err != nil {
+			_, _ = fmt.Fprintf(errOut, "error: %v\n", err)
+			return 1
+		}
+		if *jsonOut {
+			return writeJSONResponse(out, errOut, resp)
+		}
+		if _, err := fmt.Fprintf(out, "terminal frame=%s cursor=%s stream=%s lines=%d target=%s pane=%s\n",
+			resp.Frame.FrameType,
+			resp.Frame.Cursor,
+			resp.Frame.StreamID,
+			resp.Frame.Lines,
+			resp.Frame.Target,
+			resp.Frame.PaneID,
+		); err != nil {
+			_, _ = fmt.Fprintf(errOut, "error: %v\n", err)
+			return 1
+		}
+		return 0
+	case "resize":
+		fs := flag.NewFlagSet("terminal resize", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		target := fs.String("target", "", "target name")
+		paneID := fs.String("pane", "", "pane id")
+		cols := fs.Int("cols", 0, "column count")
+		rows := fs.Int("rows", 0, "row count")
+		jsonOut := fs.Bool("json", false, "output JSON")
+		if err := fs.Parse(args[1:]); err != nil {
+			_, _ = fmt.Fprintf(errOut, "error: %v\n", err)
+			return 2
+		}
+		if fs.NArg() > 0 {
+			_, _ = fmt.Fprintln(errOut, "usage: agtmux-app terminal resize --target <name> --pane <id> --cols <n> --rows <n> [--json]")
+			return 2
+		}
+		if strings.TrimSpace(*target) == "" || strings.TrimSpace(*paneID) == "" || *cols <= 0 || *rows <= 0 {
+			_, _ = fmt.Fprintln(errOut, "usage: agtmux-app terminal resize --target <name> --pane <id> --cols <n> --rows <n> [--json]")
+			return 2
+		}
+		resp, err := svc.TerminalResize(ctx, appclient.TerminalResizeRequest{
+			Target: strings.TrimSpace(*target),
+			PaneID: strings.TrimSpace(*paneID),
+			Cols:   *cols,
+			Rows:   *rows,
+		})
+		if err != nil {
+			_, _ = fmt.Fprintf(errOut, "error: %v\n", err)
+			return 1
+		}
+		if *jsonOut {
+			return writeJSONResponse(out, errOut, resp)
+		}
+		if _, err := fmt.Fprintf(out, "terminal resize %s/%s cols=%d rows=%d result=%s\n",
+			resp.Target,
+			resp.PaneID,
+			resp.Cols,
+			resp.Rows,
+			resp.ResultCode,
+		); err != nil {
+			_, _ = fmt.Fprintf(errOut, "error: %v\n", err)
+			return 1
+		}
+		return 0
+	default:
+		_, _ = fmt.Fprintf(errOut, "unknown terminal command: %s\n", args[0])
 		return 2
 	}
 }
@@ -1249,6 +1386,7 @@ func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "       agtmux-app view <snapshot|global|sessions|windows|panes|targets> ...")
 	_, _ = fmt.Fprintln(w, "       agtmux-app target <list|add|connect|remove> ...")
 	_, _ = fmt.Fprintln(w, "       agtmux-app action <attach|send|view-output|kill|events> ...")
+	_, _ = fmt.Fprintln(w, "       agtmux-app terminal <capabilities|read|resize> ...")
 	_, _ = fmt.Fprintln(w, "       agtmux-app adapter <list|enable|disable> ...")
 }
 

@@ -26,6 +26,8 @@ type fakeService struct {
 	actionEventsID  string
 	actionEvents    api.ActionEventsEnvelope
 	actionEventsErr error
+	terminalReadReq appclient.TerminalReadRequest
+	terminalResize  appclient.TerminalResizeRequest
 
 	listPanesOpts     appclient.ListOptions
 	listWindowsOpts   appclient.ListOptions
@@ -125,6 +127,47 @@ func (f *fakeService) ListActionEvents(_ context.Context, actionID string) (api.
 		}
 	}
 	return f.actionEvents, nil
+}
+
+func (f *fakeService) ListCapabilities(_ context.Context) (api.CapabilitiesEnvelope, error) {
+	return api.CapabilitiesEnvelope{
+		SchemaVersion: "v1",
+		Capabilities: api.CapabilityFlags{
+			EmbeddedTerminal:       true,
+			TerminalRead:           true,
+			TerminalResize:         true,
+			TerminalWriteViaAction: true,
+			TerminalFrameProtocol:  "snapshot-delta-reset",
+		},
+	}, nil
+}
+
+func (f *fakeService) TerminalRead(_ context.Context, req appclient.TerminalReadRequest) (api.TerminalReadEnvelope, error) {
+	f.terminalReadReq = req
+	return api.TerminalReadEnvelope{
+		SchemaVersion: "v1",
+		Frame: api.TerminalFrameItem{
+			FrameType: "snapshot",
+			StreamID:  "stream-1",
+			Cursor:    "stream-1:2",
+			Target:    req.Target,
+			PaneID:    req.PaneID,
+			Lines:     req.Lines,
+			Content:   "hello",
+		},
+	}, nil
+}
+
+func (f *fakeService) TerminalResize(_ context.Context, req appclient.TerminalResizeRequest) (api.TerminalResizeResponse, error) {
+	f.terminalResize = req
+	return api.TerminalResizeResponse{
+		SchemaVersion: "v1",
+		Target:        req.Target,
+		PaneID:        req.PaneID,
+		Cols:          req.Cols,
+		Rows:          req.Rows,
+		ResultCode:    "completed",
+	}, nil
 }
 
 func (f *fakeService) ListPanes(_ context.Context, opts appclient.ListOptions) (api.ListEnvelope[api.PaneItem], error) {
@@ -385,6 +428,69 @@ func TestRunActionSendJSON(t *testing.T) {
 	}
 	if resp.ActionID != "a-send" || resp.ResultCode != "completed" {
 		t.Fatalf("unexpected action response: %+v", resp)
+	}
+}
+
+func TestRunTerminalCapabilitiesJSON(t *testing.T) {
+	svc := &fakeService{}
+	out := &bytes.Buffer{}
+	errOut := &bytes.Buffer{}
+	code := run(context.Background(), []string{"terminal", "capabilities", "--json"}, out, errOut, svc)
+	if code != 0 {
+		t.Fatalf("expected code 0, got %d stderr=%s", code, errOut.String())
+	}
+	var resp api.CapabilitiesEnvelope
+	if err := json.Unmarshal(out.Bytes(), &resp); err != nil {
+		t.Fatalf("decode output json: %v output=%s", err, out.String())
+	}
+	if !resp.Capabilities.EmbeddedTerminal || !resp.Capabilities.TerminalRead || !resp.Capabilities.TerminalResize {
+		t.Fatalf("unexpected capabilities response: %+v", resp.Capabilities)
+	}
+}
+
+func TestRunTerminalReadJSON(t *testing.T) {
+	svc := &fakeService{}
+	out := &bytes.Buffer{}
+	errOut := &bytes.Buffer{}
+	code := run(context.Background(), []string{
+		"terminal", "read",
+		"--target", "t1",
+		"--pane", "%1",
+		"--cursor", "stream-1:1",
+		"--lines", "120",
+		"--json",
+	}, out, errOut, svc)
+	if code != 0 {
+		t.Fatalf("expected code 0, got %d stderr=%s", code, errOut.String())
+	}
+	if svc.terminalReadReq.Target != "t1" || svc.terminalReadReq.PaneID != "%1" || svc.terminalReadReq.Cursor != "stream-1:1" || svc.terminalReadReq.Lines != 120 {
+		t.Fatalf("unexpected terminal read request: %+v", svc.terminalReadReq)
+	}
+	var resp api.TerminalReadEnvelope
+	if err := json.Unmarshal(out.Bytes(), &resp); err != nil {
+		t.Fatalf("decode output json: %v output=%s", err, out.String())
+	}
+	if resp.Frame.PaneID != "%1" || resp.Frame.Target != "t1" {
+		t.Fatalf("unexpected terminal read response: %+v", resp.Frame)
+	}
+}
+
+func TestRunTerminalResizeUsageError(t *testing.T) {
+	svc := &fakeService{}
+	out := &bytes.Buffer{}
+	errOut := &bytes.Buffer{}
+	code := run(context.Background(), []string{
+		"terminal", "resize",
+		"--target", "t1",
+		"--pane", "%1",
+		"--cols", "0",
+		"--rows", "40",
+	}, out, errOut, svc)
+	if code != 2 {
+		t.Fatalf("expected code 2, got %d stderr=%s", code, errOut.String())
+	}
+	if !bytes.Contains(errOut.Bytes(), []byte("usage: agtmux-app terminal resize")) {
+		t.Fatalf("expected usage output, got %s", errOut.String())
 	}
 }
 

@@ -182,3 +182,45 @@ type EventIngestResponse struct {
 	Status        string    `json:"status"`
 	RuntimeID     string    `json:"runtime_id,omitempty"`
 }
+
+type CapabilityFlags struct {
+	EmbeddedTerminal         bool   `json:"embedded_terminal"`
+	TerminalRead             bool   `json:"terminal_read"`
+	TerminalResize           bool   `json:"terminal_resize"`
+	TerminalWriteViaAction   bool   `json:"terminal_write_via_action_send"`
+	TerminalFrameProtocol    string `json:"terminal_frame_protocol"`
+	TerminalFrameProtocolVer string `json:"terminal_frame_protocol_version,omitempty"`
+}
+
+type CapabilitiesEnvelope struct {
+	SchemaVersion string          `json:"schema_version"`
+	GeneratedAt   time.Time       `json:"generated_at"`
+	Capabilities  CapabilityFlags `json:"capabilities"`
+}
+
+type TerminalFrameItem struct {
+	FrameType   string `json:"frame_type"`
+	StreamID    string `json:"stream_id"`
+	Cursor      string `json:"cursor"`
+	PaneID      string `json:"pane_id"`
+	Target      string `json:"target"`
+	Lines       int    `json:"lines"`
+	Content     string `json:"content,omitempty"`
+	ResetReason string `json:"reset_reason,omitempty"`
+}
+
+type TerminalReadEnvelope struct {
+	SchemaVersion string            `json:"schema_version"`
+	GeneratedAt   time.Time         `json:"generated_at"`
+	Frame         TerminalFrameItem `json:"frame"`
+}
+
+type TerminalResizeResponse struct {
+	SchemaVersion string    `json:"schema_version"`
+	GeneratedAt   time.Time `json:"generated_at"`
+	Target        string    `json:"target"`
+	PaneID        string    `json:"pane_id"`
+	Cols          int       `json:"cols"`
+	Rows          int       `json:"rows"`
+	ResultCode    string    `json:"result_code"`
+}

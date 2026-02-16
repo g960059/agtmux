@@ -293,6 +293,20 @@ func (c *Client) DeleteTarget(ctx context.Context, targetName string) error {
 	return err
 }
 
+type TerminalReadRequest struct {
+	Target string `json:"target"`
+	PaneID string `json:"pane_id"`
+	Cursor string `json:"cursor,omitempty"`
+	Lines  int    `json:"lines,omitempty"`
+}
+
+type TerminalResizeRequest struct {
+	Target string `json:"target"`
+	PaneID string `json:"pane_id"`
+	Cols   int    `json:"cols"`
+	Rows   int    `json:"rows"`
+}
+
 type AttachRequest struct {
 	RequestRef      string `json:"request_ref"`
 	Target          string `json:"target"`
@@ -371,6 +385,42 @@ func (c *Client) ListActionEvents(ctx context.Context, actionID string) (api.Act
 		return api.ActionEventsEnvelope{}, fmt.Errorf("decode action events envelope: %w", err)
 	}
 	return env, nil
+}
+
+func (c *Client) ListCapabilities(ctx context.Context) (api.CapabilitiesEnvelope, error) {
+	body, err := c.request(ctx, http.MethodGet, "/v1/capabilities", nil, nil, false)
+	if err != nil {
+		return api.CapabilitiesEnvelope{}, err
+	}
+	var env api.CapabilitiesEnvelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		return api.CapabilitiesEnvelope{}, fmt.Errorf("decode capabilities envelope: %w", err)
+	}
+	return env, nil
+}
+
+func (c *Client) TerminalRead(ctx context.Context, req TerminalReadRequest) (api.TerminalReadEnvelope, error) {
+	body, err := c.request(ctx, http.MethodPost, "/v1/terminal/read", nil, req, false)
+	if err != nil {
+		return api.TerminalReadEnvelope{}, err
+	}
+	var env api.TerminalReadEnvelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		return api.TerminalReadEnvelope{}, fmt.Errorf("decode terminal read envelope: %w", err)
+	}
+	return env, nil
+}
+
+func (c *Client) TerminalResize(ctx context.Context, req TerminalResizeRequest) (api.TerminalResizeResponse, error) {
+	body, err := c.request(ctx, http.MethodPost, "/v1/terminal/resize", nil, req, false)
+	if err != nil {
+		return api.TerminalResizeResponse{}, err
+	}
+	var resp api.TerminalResizeResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return api.TerminalResizeResponse{}, fmt.Errorf("decode terminal resize response: %w", err)
+	}
+	return resp, nil
 }
 
 func (c *Client) ListAdapters(ctx context.Context, enabled *bool) (api.AdaptersEnvelope, error) {

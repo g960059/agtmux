@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -34,6 +36,11 @@ const unmanagedAgentType = "none"
 const defaultLocalTargetName = "local"
 const defaultViewOutputLines = 200
 const defaultActionSnapshotTTL = 30 * time.Second
+const defaultTerminalReadLines = 200
+const maxTerminalReadLines = 2000
+const maxTerminalStateBytes = 256 * 1024
+
+var codexSessionFileIDPattern = regexp.MustCompile(`([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$`)
 
 type Server struct {
 	cfg            config.Config
@@ -49,6 +56,11 @@ type Server struct {
 	mu             sync.Mutex
 	actionMu       sync.Mutex
 	actionLocks    map[string]*actionLockEntry
+	terminalMu     sync.Mutex
+	terminalStates map[string]terminalReadState
+	codexPaneMu    sync.Mutex
+	codexPaneCache map[string]codexPaneCacheEntry
+	codexPaneTTL   time.Duration
 	snapshotTTL    time.Duration
 	auditEventHook func(action model.Action, eventType string) error
 	shutdown       sync.Once
@@ -60,6 +72,11 @@ type actionLockEntry struct {
 	refs int
 }
 
+type terminalReadState struct {
+	seq     int64
+	content string
+}
+
 func NewServer(cfg config.Config) *Server {
 	return NewServerWithDeps(cfg, nil, nil)
 }
@@ -67,12 +84,15 @@ func NewServer(cfg config.Config) *Server {
 func NewServerWithDeps(cfg config.Config, store *db.Store, executor *target.Executor) *Server {
 	mux := http.NewServeMux()
 	s := &Server{
-		cfg:         cfg,
-		store:       store,
-		executor:    executor,
-		streamID:    uuid.NewString(),
-		actionLocks: map[string]*actionLockEntry{},
-		snapshotTTL: defaultActionSnapshotTTL,
+		cfg:            cfg,
+		store:          store,
+		executor:       executor,
+		streamID:       uuid.NewString(),
+		actionLocks:    map[string]*actionLockEntry{},
+		terminalStates: map[string]terminalReadState{},
+		codexPaneCache: map[string]codexPaneCacheEntry{},
+		codexPaneTTL:   20 * time.Second,
+		snapshotTTL:    defaultActionSnapshotTTL,
 		httpSrv: &http.Server{
 			Handler:           mux,
 			ReadHeaderTimeout: 5 * time.Second,
@@ -88,6 +108,7 @@ func NewServerWithDeps(cfg config.Config, store *db.Store, executor *target.Exec
 
 	mux.HandleFunc("/v1/health", s.healthHandler)
 	if store != nil {
+		mux.HandleFunc("/v1/capabilities", s.capabilitiesHandler)
 		mux.HandleFunc("/v1/events", s.eventsHandler)
 		mux.HandleFunc("/v1/targets", s.targetsHandler)
 		mux.HandleFunc("/v1/adapters", s.adaptersHandler)
@@ -97,6 +118,8 @@ func NewServerWithDeps(cfg config.Config, store *db.Store, executor *target.Exec
 		mux.HandleFunc("/v1/windows", s.windowsHandler)
 		mux.HandleFunc("/v1/sessions", s.sessionsHandler)
 		mux.HandleFunc("/v1/watch", s.watchHandler)
+		mux.HandleFunc("/v1/terminal/read", s.terminalReadHandler)
+		mux.HandleFunc("/v1/terminal/resize", s.terminalResizeHandler)
 		mux.HandleFunc("/v1/actions/attach", s.attachActionHandler)
 		mux.HandleFunc("/v1/actions/send", s.sendActionHandler)
 		mux.HandleFunc("/v1/actions/view-output", s.viewOutputActionHandler)
@@ -200,6 +223,26 @@ func (s *Server) healthHandler(w http.ResponseWriter, _ *http.Request) {
 		SchemaVersion: "v1",
 		GeneratedAt:   time.Now().UTC(),
 		Status:        "ok",
+	}
+	s.writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) capabilitiesHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.methodNotAllowed(w, http.MethodGet)
+		return
+	}
+	resp := api.CapabilitiesEnvelope{
+		SchemaVersion: "v1",
+		GeneratedAt:   time.Now().UTC(),
+		Capabilities: api.CapabilityFlags{
+			EmbeddedTerminal:         true,
+			TerminalRead:             true,
+			TerminalResize:           true,
+			TerminalWriteViaAction:   true,
+			TerminalFrameProtocol:    "snapshot-delta-reset",
+			TerminalFrameProtocolVer: "1",
+		},
 	}
 	s.writeJSON(w, http.StatusOK, resp)
 }
@@ -677,6 +720,20 @@ type killActionRequest struct {
 	IfState         string `json:"if_state"`
 	IfUpdatedWithin string `json:"if_updated_within"`
 	ForceStale      bool   `json:"force_stale"`
+}
+
+type terminalReadRequest struct {
+	Target string `json:"target"`
+	PaneID string `json:"pane_id"`
+	Cursor string `json:"cursor"`
+	Lines  int    `json:"lines"`
+}
+
+type terminalResizeRequest struct {
+	Target string `json:"target"`
+	PaneID string `json:"pane_id"`
+	Cols   int    `json:"cols"`
+	Rows   int    `json:"rows"`
 }
 
 type ingestEventRequest struct {
@@ -1425,6 +1482,154 @@ func (s *Server) killActionHandler(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, toActionResponse(action))
 }
 
+func (s *Server) terminalReadHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.methodNotAllowed(w, http.MethodPost)
+		return
+	}
+	var req terminalReadRequest
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, model.ErrRefInvalid, "invalid request body")
+		return
+	}
+	req.Target = strings.TrimSpace(req.Target)
+	req.PaneID = strings.TrimSpace(req.PaneID)
+	req.Cursor = strings.TrimSpace(req.Cursor)
+	if req.Target == "" || req.PaneID == "" {
+		s.writeError(w, http.StatusBadRequest, model.ErrRefInvalid, "target and pane_id are required")
+		return
+	}
+	if req.Lines <= 0 {
+		req.Lines = defaultTerminalReadLines
+	}
+	if req.Lines > maxTerminalReadLines {
+		req.Lines = maxTerminalReadLines
+	}
+	var (
+		cursorStreamID string
+		cursorSeq      int64
+	)
+	if req.Cursor != "" {
+		var cursorErr error
+		cursorStreamID, cursorSeq, _, cursorErr = parseCursor(req.Cursor)
+		if cursorErr != nil {
+			s.writeError(w, http.StatusBadRequest, model.ErrCursorInvalid, "invalid cursor")
+			return
+		}
+	}
+	tg, err := s.resolveTargetAndPane(r.Context(), req.Target, req.PaneID)
+	if err != nil {
+		s.writeActionResolveError(w, err)
+		return
+	}
+	runResult, runErr := s.executor.Run(
+		r.Context(),
+		tg,
+		target.BuildTmuxCommand("capture-pane", "-t", req.PaneID, "-p", "-S", fmt.Sprintf("-%d", req.Lines)),
+	)
+	if runErr != nil {
+		s.writeError(w, http.StatusBadGateway, model.ErrTargetUnreachable, "failed to read pane output")
+		return
+	}
+	frameType := "snapshot"
+	resetReason := ""
+	content := runResult.Output
+	pk := paneKey(tg.TargetID, req.PaneID)
+	s.terminalMu.Lock()
+	state, hasState := s.terminalStates[pk]
+	if req.Cursor != "" {
+		if cursorStreamID != s.streamID {
+			frameType = "reset"
+			resetReason = "cursor_mismatch"
+		} else if !hasState || state.seq != cursorSeq {
+			frameType = "reset"
+			resetReason = "cursor_discontinuity"
+		} else {
+			if delta, ok := deriveTerminalDelta(state.content, runResult.Output); ok {
+				frameType = "delta"
+				content = delta
+			} else {
+				frameType = "reset"
+				resetReason = "content_discontinuity"
+				content = runResult.Output
+			}
+		}
+	}
+	seq := s.sequence.Add(1)
+	s.terminalStates[pk] = terminalReadState{
+		seq:     seq,
+		content: clipTerminalStateContent(runResult.Output),
+	}
+	s.terminalMu.Unlock()
+	cursor := fmt.Sprintf("%s:%d", s.streamID, seq)
+	resp := api.TerminalReadEnvelope{
+		SchemaVersion: "v1",
+		GeneratedAt:   time.Now().UTC(),
+		Frame: api.TerminalFrameItem{
+			FrameType: frameType,
+			StreamID:  s.streamID,
+			Cursor:    cursor,
+			PaneID:    req.PaneID,
+			Target:    req.Target,
+			Lines:     req.Lines,
+			Content:   content,
+		},
+	}
+	if resetReason != "" {
+		resp.Frame.ResetReason = resetReason
+	}
+	s.writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) terminalResizeHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.methodNotAllowed(w, http.MethodPost)
+		return
+	}
+	var req terminalResizeRequest
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, model.ErrRefInvalid, "invalid request body")
+		return
+	}
+	req.Target = strings.TrimSpace(req.Target)
+	req.PaneID = strings.TrimSpace(req.PaneID)
+	if req.Target == "" || req.PaneID == "" {
+		s.writeError(w, http.StatusBadRequest, model.ErrRefInvalid, "target and pane_id are required")
+		return
+	}
+	if req.Cols <= 0 || req.Rows <= 0 {
+		s.writeError(w, http.StatusBadRequest, model.ErrRefInvalid, "cols and rows must be positive")
+		return
+	}
+	tg, err := s.resolveTargetAndPane(r.Context(), req.Target, req.PaneID)
+	if err != nil {
+		s.writeActionResolveError(w, err)
+		return
+	}
+	if _, runErr := s.executor.Run(
+		r.Context(),
+		tg,
+		target.BuildTmuxCommand("resize-pane", "-t", req.PaneID, "-x", strconv.Itoa(req.Cols), "-y", strconv.Itoa(req.Rows)),
+	); runErr != nil {
+		s.writeError(w, http.StatusBadGateway, model.ErrTargetUnreachable, "failed to resize pane")
+		return
+	}
+	resp := api.TerminalResizeResponse{
+		SchemaVersion: "v1",
+		GeneratedAt:   time.Now().UTC(),
+		Target:        req.Target,
+		PaneID:        req.PaneID,
+		Cols:          req.Cols,
+		Rows:          req.Rows,
+		ResultCode:    "completed",
+	}
+	s.writeJSON(w, http.StatusOK, resp)
+}
+
 type actionGuardOptions struct {
 	ifRuntime       string
 	ifState         string
@@ -1807,9 +2012,11 @@ func (s *Server) resolveTargetFilter(ctx context.Context, targetName string) ([]
 
 func (s *Server) buildPaneItems(ctx context.Context, targets []model.Target) ([]api.PaneItem, api.ListSummary, error) {
 	targetNameByID := make(map[string]string, len(targets))
+	targetByID := make(map[string]model.Target, len(targets))
 	requestedIDs := make(map[string]struct{}, len(targets))
 	for _, t := range targets {
 		targetNameByID[t.TargetID] = t.TargetName
+		targetByID[t.TargetID] = t
 		requestedIDs[t.TargetID] = struct{}{}
 	}
 	panes, err := s.store.ListPanes(ctx)
@@ -1913,10 +2120,13 @@ func (s *Server) buildPaneItems(ctx context.Context, targets []model.Target) ([]
 			event:   strings.TrimSpace(event.EventType),
 		}
 	}
-	codexHintsByPath := map[string]codexThreadHint{}
+	codexHintsByPath := map[string][]codexThreadHint{}
+	codexPaneCountByPath := map[string]int{}
+	codexCandidatesByPath := map[string][]codexPaneCandidate{}
 	if s.codexEnricher != nil {
 		workspacePaths := make([]string, 0, len(panes))
 		workspaceSeen := map[string]struct{}{}
+		candidateSeen := map[string]struct{}{}
 		for _, pane := range panes {
 			if _, ok := requestedIDs[pane.TargetID]; !ok {
 				continue
@@ -1927,19 +2137,64 @@ func (s *Server) buildPaneItems(ctx context.Context, targets []model.Target) ([]
 			}
 			key := paneKey(pane.TargetID, pane.PaneID)
 			agent := ""
+			runtimeID := ""
+			runtimeStartedAt := pane.UpdatedAt
 			if st, ok := stateByPane[key]; ok && st.RuntimeID != "" {
+				runtimeID = st.RuntimeID
 				if rt, ok := runtimeByID[st.RuntimeID]; ok {
 					agent = rt.AgentType
+					runtimeStartedAt = rt.StartedAt
 				}
 			}
-			if agent == "" {
+			if agent == "" || runtimeID == "" {
 				if rt, ok := runtimeByPane[key]; ok {
 					agent = rt.AgentType
+					runtimeID = rt.RuntimeID
+					runtimeStartedAt = rt.StartedAt
 				}
 			}
 			cmd := strings.ToLower(strings.TrimSpace(pane.CurrentCmd))
 			if strings.ToLower(strings.TrimSpace(agent)) != "codex" && cmd != "codex" {
 				continue
+			}
+			codexPaneCountByPath[pathKey]++
+			candidateKey := runtimeID
+			if candidateKey == "" {
+				candidateKey = key
+			}
+			dedupeKey := pathKey + "|" + candidateKey
+			if _, ok := candidateSeen[dedupeKey]; !ok {
+				candidateSeen[dedupeKey] = struct{}{}
+				activityAt := pane.UpdatedAt
+				if pane.LastActivityAt != nil && !pane.LastActivityAt.IsZero() {
+					activityAt = pane.LastActivityAt.UTC()
+				}
+				if rid := strings.TrimSpace(runtimeID); rid != "" {
+					if last, ok := runtimeLastInput[rid]; ok && !last.at.IsZero() {
+						activityAt = last.at.UTC()
+					}
+				}
+				if activityAt.IsZero() {
+					activityAt = runtimeStartedAt
+				}
+				labelHint := normalizePaneTitle(pane.PaneTitle, pane.WindowName, pane.SessionName)
+				if rid := strings.TrimSpace(runtimeID); rid != "" {
+					if first, ok := runtimeFirstInput[rid]; ok && first.preview != "" {
+						labelHint = first.preview
+					}
+				}
+				if latest, ok := paneLastInput[key]; ok && latest.preview != "" {
+					labelHint = latest.preview
+				}
+				codexCandidatesByPath[pathKey] = append(codexCandidatesByPath[pathKey], codexPaneCandidate{
+					targetID:   pane.TargetID,
+					paneID:     pane.PaneID,
+					paneKey:    key,
+					runtimeID:  runtimeID,
+					labelHint:  labelHint,
+					startedAt:  runtimeStartedAt,
+					activityAt: activityAt,
+				})
 			}
 			if _, ok := workspaceSeen[pathKey]; ok {
 				continue
@@ -1947,8 +2202,22 @@ func (s *Server) buildPaneItems(ctx context.Context, targets []model.Target) ([]
 			workspaceSeen[pathKey] = struct{}{}
 			workspacePaths = append(workspacePaths, pathKey)
 		}
-		codexHintsByPath = s.codexEnricher.GetMany(ctx, workspacePaths)
+		codexHintsByPath = s.codexEnricher.GetManyRanked(ctx, workspacePaths)
+		codexCandidatesByPath = s.hydrateCodexCandidateThreadIDs(ctx, codexCandidatesByPath, codexHintsByPath, targetByID)
 	}
+	codexHintByRuntimeID := map[string]codexThreadHint{}
+	codexHintByPaneKey := map[string]codexThreadHint{}
+	for pathKey, candidates := range codexCandidatesByPath {
+		hints := codexHintsByPath[pathKey]
+		runtimeAssigned, paneAssigned := assignCodexHintsToCandidates(candidates, hints)
+		for runtimeID, hint := range runtimeAssigned {
+			codexHintByRuntimeID[runtimeID] = hint
+		}
+		for paneKey, hint := range paneAssigned {
+			codexHintByPaneKey[paneKey] = hint
+		}
+	}
+	claudeHintsByRuntimeID := s.collectClaudeSessionHints(ctx, panes, requestedIDs, stateByPane, runtimeByID, runtimeByPane, targetByID)
 
 	summary := api.ListSummary{
 		ByState:    map[string]int{},
@@ -2003,7 +2272,19 @@ func (s *Server) buildPaneItems(ctx context.Context, targets []model.Target) ([]
 		agentPresence, activityState, displayCategory, needsUserAction := derivePanePresentation(agentType, state)
 		awaitingKind := deriveAwaitingResponseKind(state, reason, lastEventType)
 		pathKey := normalizeCodexWorkspacePath(p.CurrentPath)
-		codexHint, hasCodexHint := codexHintsByPath[pathKey]
+		codexHints := codexHintsByPath[pathKey]
+		codexHint := codexThreadHint{}
+		hasCodexHint := false
+		if runtimeHint, ok := codexHintByRuntimeID[strings.TrimSpace(runtimeID)]; ok {
+			codexHint = runtimeHint
+			hasCodexHint = true
+		} else if paneHint, ok := codexHintByPaneKey[key]; ok {
+			codexHint = paneHint
+			hasCodexHint = true
+		} else if shouldUseCodexWorkspaceHint(pathKey, codexPaneCountByPath) && len(codexHints) > 0 {
+			codexHint = codexHints[0]
+			hasCodexHint = true
+		}
 		sessionLabel, sessionLabelSource := derivePaneSessionLabel(
 			agentPresence,
 			p,
@@ -2016,6 +2297,12 @@ func (s *Server) buildPaneItems(ctx context.Context, targets []model.Target) ([]
 			codexHint,
 			hasCodexHint,
 		)
+		if strings.EqualFold(strings.TrimSpace(agentType), "claude") {
+			if hint, ok := claudeHintsByRuntimeID[strings.TrimSpace(runtimeID)]; ok && hint.label != "" {
+				sessionLabel = hint.label
+				sessionLabelSource = hint.source
+			}
+		}
 		lastInteractionAt := derivePaneLastInteractionAt(
 			agentPresence,
 			runtimeID,
@@ -2072,6 +2359,596 @@ func (s *Server) buildPaneItems(ctx context.Context, targets []model.Target) ([]
 		summary.ByCategory[displayCategory]++
 	}
 	return items, summary, nil
+}
+
+func shouldUseCodexWorkspaceHint(pathKey string, codexPaneCountByPath map[string]int) bool {
+	key := normalizeCodexWorkspacePath(pathKey)
+	if key == "" {
+		return false
+	}
+	count := codexPaneCountByPath[key]
+	return count <= 1
+}
+
+func (s *Server) hydrateCodexCandidateThreadIDs(
+	ctx context.Context,
+	candidatesByPath map[string][]codexPaneCandidate,
+	hintsByPath map[string][]codexThreadHint,
+	targetByID map[string]model.Target,
+) map[string][]codexPaneCandidate {
+	if len(candidatesByPath) == 0 {
+		return candidatesByPath
+	}
+	type targetPane struct {
+		targetID string
+		paneID   string
+	}
+	targetPaneSet := map[targetPane]struct{}{}
+	for pathKey, candidates := range candidatesByPath {
+		if len(candidates) <= 1 || len(hintsByPath[pathKey]) == 0 {
+			continue
+		}
+		for _, candidate := range candidates {
+			targetID := strings.TrimSpace(candidate.targetID)
+			paneID := strings.TrimSpace(candidate.paneID)
+			if targetID == "" || paneID == "" {
+				continue
+			}
+			targetPaneSet[targetPane{targetID: targetID, paneID: paneID}] = struct{}{}
+		}
+	}
+	if len(targetPaneSet) == 0 {
+		return candidatesByPath
+	}
+	panesByTarget := map[string][]string{}
+	for tp := range targetPaneSet {
+		panesByTarget[tp.targetID] = append(panesByTarget[tp.targetID], tp.paneID)
+	}
+	threadByTargetPane := map[string]map[string]string{}
+	for targetID, paneIDs := range panesByTarget {
+		targetRecord, ok := targetByID[targetID]
+		if !ok {
+			continue
+		}
+		threadByTargetPane[targetID] = s.resolveCodexThreadIDsForTarget(ctx, targetRecord, paneIDs)
+	}
+	out := make(map[string][]codexPaneCandidate, len(candidatesByPath))
+	for pathKey, candidates := range candidatesByPath {
+		enriched := append([]codexPaneCandidate(nil), candidates...)
+		for idx := range enriched {
+			targetID := strings.TrimSpace(enriched[idx].targetID)
+			paneID := strings.TrimSpace(enriched[idx].paneID)
+			if targetID == "" || paneID == "" {
+				continue
+			}
+			if byPane, ok := threadByTargetPane[targetID]; ok {
+				if threadID, ok := byPane[paneID]; ok && threadID != "" {
+					enriched[idx].threadID = threadID
+				}
+			}
+		}
+		out[pathKey] = enriched
+	}
+	return out
+}
+
+func (s *Server) resolveCodexThreadIDsForTarget(ctx context.Context, targetRecord model.Target, paneIDs []string) map[string]string {
+	out := map[string]string{}
+	deduped := dedupePaneIDs(paneIDs)
+	if len(deduped) == 0 {
+		return out
+	}
+	now := time.Now().UTC()
+	missing := make([]string, 0, len(deduped))
+	s.codexPaneMu.Lock()
+	for _, paneID := range deduped {
+		cacheKey := codexPaneCacheKey(targetRecord.TargetID, paneID)
+		if cached, ok := s.codexPaneCache[cacheKey]; ok && now.Before(cached.expiresAt) {
+			if cached.threadID != "" {
+				out[paneID] = cached.threadID
+			}
+			continue
+		}
+		missing = append(missing, paneID)
+	}
+	s.codexPaneMu.Unlock()
+	if len(missing) == 0 {
+		return out
+	}
+	resolved := s.resolveCodexThreadIDsForTargetUncached(ctx, targetRecord, missing)
+	expiry := time.Now().UTC().Add(s.codexPaneTTL)
+	s.codexPaneMu.Lock()
+	for _, paneID := range missing {
+		threadID := normalizeCodexThreadID(resolved[paneID])
+		s.codexPaneCache[codexPaneCacheKey(targetRecord.TargetID, paneID)] = codexPaneCacheEntry{
+			threadID:  threadID,
+			expiresAt: expiry,
+		}
+		if threadID != "" {
+			out[paneID] = threadID
+		}
+	}
+	s.codexPaneMu.Unlock()
+	return out
+}
+
+func (s *Server) resolveCodexThreadIDsForTargetUncached(ctx context.Context, targetRecord model.Target, paneIDs []string) map[string]string {
+	out := map[string]string{}
+	panePIDByID := s.readPanePIDByID(ctx, targetRecord, paneIDs)
+	if len(panePIDByID) == 0 {
+		return out
+	}
+	processByPID := s.readProcessTable(ctx, targetRecord)
+	if len(processByPID) == 0 {
+		return out
+	}
+	codexPIDByPane := map[string]int{}
+	uniqueCodexPIDs := map[int]struct{}{}
+	for paneID, panePID := range panePIDByID {
+		codexPID := findLikelyCodexDescendantPID(panePID, processByPID)
+		if codexPID <= 0 {
+			continue
+		}
+		codexPIDByPane[paneID] = codexPID
+		uniqueCodexPIDs[codexPID] = struct{}{}
+	}
+	if len(uniqueCodexPIDs) == 0 {
+		return out
+	}
+	threadByPID := map[int]string{}
+	for pid := range uniqueCodexPIDs {
+		threadID := s.readCodexThreadIDFromProcess(ctx, targetRecord, pid)
+		if threadID == "" {
+			continue
+		}
+		threadByPID[pid] = threadID
+	}
+	for paneID, pid := range codexPIDByPane {
+		if threadID, ok := threadByPID[pid]; ok {
+			out[paneID] = threadID
+		}
+	}
+	return out
+}
+
+func (s *Server) readPanePIDByID(ctx context.Context, targetRecord model.Target, paneIDs []string) map[string]int {
+	out := map[string]int{}
+	wanted := map[string]struct{}{}
+	for _, paneID := range paneIDs {
+		id := strings.TrimSpace(paneID)
+		if id == "" {
+			continue
+		}
+		wanted[id] = struct{}{}
+	}
+	if len(wanted) == 0 {
+		return out
+	}
+	res, err := s.executor.Run(ctx, targetRecord, target.BuildTmuxCommand("list-panes", "-a", "-F", "#{pane_id}\t#{pane_pid}"))
+	if err != nil {
+		return out
+	}
+	for _, line := range strings.Split(res.Output, "\n") {
+		parts := strings.Split(strings.TrimSpace(line), "\t")
+		if len(parts) < 2 {
+			continue
+		}
+		paneID := strings.TrimSpace(parts[0])
+		if _, ok := wanted[paneID]; !ok {
+			continue
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+		if err != nil || pid <= 0 {
+			continue
+		}
+		out[paneID] = pid
+	}
+	return out
+}
+
+func (s *Server) readProcessTable(ctx context.Context, targetRecord model.Target) map[int]codexProcessInfo {
+	commands := [][]string{
+		{"ps", "-axo", "pid=,ppid=,command="},
+		{"ps", "-eo", "pid=,ppid=,args="},
+	}
+	for _, command := range commands {
+		res, err := s.executor.Run(ctx, targetRecord, command)
+		if err != nil {
+			continue
+		}
+		parsed := parseProcessTable(res.Output)
+		if len(parsed) > 0 {
+			return parsed
+		}
+	}
+	return map[int]codexProcessInfo{}
+}
+
+func (s *Server) readCodexThreadIDFromProcess(ctx context.Context, targetRecord model.Target, pid int) string {
+	if pid <= 0 {
+		return ""
+	}
+	pidText := strconv.Itoa(pid)
+	commands := [][]string{
+		{"lsof", "-Fn", "-p", pidText},
+		{"lsof", "-p", pidText},
+	}
+	for _, command := range commands {
+		res, err := s.executor.Run(ctx, targetRecord, command)
+		if err != nil {
+			continue
+		}
+		threadID := extractCodexThreadIDFromLsofOutput(res.Output)
+		if threadID != "" {
+			return threadID
+		}
+	}
+	return ""
+}
+
+func assignCodexHintsToCandidates(candidates []codexPaneCandidate, hints []codexThreadHint) (map[string]codexThreadHint, map[string]codexThreadHint) {
+	byRuntime := map[string]codexThreadHint{}
+	byPane := map[string]codexThreadHint{}
+	if len(candidates) <= 1 || len(hints) == 0 {
+		return byRuntime, byPane
+	}
+	assign := func(candidate codexPaneCandidate, hint codexThreadHint) {
+		if candidate.runtimeID != "" {
+			byRuntime[candidate.runtimeID] = hint
+			return
+		}
+		byPane[candidate.paneKey] = hint
+	}
+	candidateIndices := make([]int, 0, len(candidates))
+	for idx := range candidates {
+		candidateIndices = append(candidateIndices, idx)
+	}
+	sort.Slice(candidateIndices, func(i, j int) bool {
+		return codexCandidateComesBefore(candidates[candidateIndices[i]], candidates[candidateIndices[j]])
+	})
+	usedCandidates := map[int]struct{}{}
+	usedHints := map[int]struct{}{}
+
+	hintIndexByThreadID := map[string]int{}
+	for hintIdx, hint := range hints {
+		threadID := normalizeCodexThreadID(hint.id)
+		if threadID == "" {
+			continue
+		}
+		if _, exists := hintIndexByThreadID[threadID]; !exists {
+			hintIndexByThreadID[threadID] = hintIdx
+		}
+	}
+	for _, candidateIdx := range candidateIndices {
+		threadID := normalizeCodexThreadID(candidates[candidateIdx].threadID)
+		if threadID == "" {
+			continue
+		}
+		hintIdx, ok := hintIndexByThreadID[threadID]
+		if !ok {
+			continue
+		}
+		if _, alreadyUsed := usedHints[hintIdx]; alreadyUsed {
+			continue
+		}
+		assign(candidates[candidateIdx], hints[hintIdx])
+		usedCandidates[candidateIdx] = struct{}{}
+		usedHints[hintIdx] = struct{}{}
+	}
+
+	type textMatch struct {
+		candidateIdx int
+		hintIdx      int
+		score        int
+		delta        time.Duration
+	}
+	textMatches := make([]textMatch, 0, len(candidates))
+	for candidateIdx, candidate := range candidates {
+		if _, alreadyUsed := usedCandidates[candidateIdx]; alreadyUsed {
+			continue
+		}
+		for hintIdx, hint := range hints {
+			if _, alreadyUsed := usedHints[hintIdx]; alreadyUsed {
+				continue
+			}
+			score := codexLabelMatchScore(candidate.labelHint, hint.label)
+			if score <= 0 {
+				continue
+			}
+			delta := absDuration(candidate.activityAt.Sub(hint.at))
+			textMatches = append(textMatches, textMatch{
+				candidateIdx: candidateIdx,
+				hintIdx:      hintIdx,
+				score:        score,
+				delta:        delta,
+			})
+		}
+	}
+	sort.Slice(textMatches, func(i, j int) bool {
+		lhs := textMatches[i]
+		rhs := textMatches[j]
+		if lhs.score != rhs.score {
+			return lhs.score > rhs.score
+		}
+		if lhs.delta != rhs.delta {
+			return lhs.delta < rhs.delta
+		}
+		return codexCandidateComesBefore(candidates[lhs.candidateIdx], candidates[rhs.candidateIdx])
+	})
+	for _, match := range textMatches {
+		if _, alreadyUsed := usedCandidates[match.candidateIdx]; alreadyUsed {
+			continue
+		}
+		if _, alreadyUsed := usedHints[match.hintIdx]; alreadyUsed {
+			continue
+		}
+		assign(candidates[match.candidateIdx], hints[match.hintIdx])
+		usedCandidates[match.candidateIdx] = struct{}{}
+		usedHints[match.hintIdx] = struct{}{}
+	}
+
+	remainingCandidates := make([]int, 0, len(candidates))
+	for _, candidateIdx := range candidateIndices {
+		if _, alreadyUsed := usedCandidates[candidateIdx]; alreadyUsed {
+			continue
+		}
+		remainingCandidates = append(remainingCandidates, candidateIdx)
+	}
+	remainingHints := make([]int, 0, len(hints))
+	for hintIdx := range hints {
+		if _, alreadyUsed := usedHints[hintIdx]; alreadyUsed {
+			continue
+		}
+		remainingHints = append(remainingHints, hintIdx)
+	}
+	limit := len(remainingCandidates)
+	if len(remainingHints) < limit {
+		limit = len(remainingHints)
+	}
+	for idx := 0; idx < limit; idx++ {
+		assign(candidates[remainingCandidates[idx]], hints[remainingHints[idx]])
+	}
+	return byRuntime, byPane
+}
+
+func codexCandidateComesBefore(lhs, rhs codexPaneCandidate) bool {
+	if !lhs.activityAt.Equal(rhs.activityAt) {
+		if lhs.activityAt.IsZero() {
+			return false
+		}
+		if rhs.activityAt.IsZero() {
+			return true
+		}
+		return lhs.activityAt.After(rhs.activityAt)
+	}
+	if !lhs.startedAt.Equal(rhs.startedAt) {
+		return lhs.startedAt.After(rhs.startedAt)
+	}
+	if lhs.runtimeID != rhs.runtimeID {
+		return lhs.runtimeID < rhs.runtimeID
+	}
+	return lhs.paneKey < rhs.paneKey
+}
+
+func normalizeCodexThreadID(raw string) string {
+	return strings.ToLower(strings.TrimSpace(raw))
+}
+
+func normalizeCodexHintLabel(raw string) string {
+	normalized := strings.ToLower(strings.TrimSpace(raw))
+	if normalized == "" {
+		return ""
+	}
+	normalized = strings.ReplaceAll(normalized, "…", "")
+	normalized = strings.ReplaceAll(normalized, "...", "")
+	normalized = strings.Join(strings.Fields(normalized), " ")
+	return normalized
+}
+
+func codexLabelMatchScore(candidateLabel, hintLabel string) int {
+	candidate := normalizeCodexHintLabel(candidateLabel)
+	hint := normalizeCodexHintLabel(hintLabel)
+	if candidate == "" || hint == "" {
+		return 0
+	}
+	if candidate == hint {
+		return 1000 + len([]rune(candidate))
+	}
+	shorter := len([]rune(candidate))
+	if value := len([]rune(hint)); value < shorter {
+		shorter = value
+	}
+	prefix := sharedPrefixRuneLen(candidate, hint)
+	if prefix >= 6 {
+		return 800 + prefix
+	}
+	if shorter >= 6 && (strings.Contains(candidate, hint) || strings.Contains(hint, candidate)) {
+		return 600 + shorter
+	}
+	return 0
+}
+
+func sharedPrefixRuneLen(lhs, rhs string) int {
+	left := []rune(lhs)
+	right := []rune(rhs)
+	limit := len(left)
+	if len(right) < limit {
+		limit = len(right)
+	}
+	count := 0
+	for idx := 0; idx < limit; idx++ {
+		if left[idx] != right[idx] {
+			break
+		}
+		count++
+	}
+	return count
+}
+
+func absDuration(v time.Duration) time.Duration {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
+func dedupePaneIDs(paneIDs []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(paneIDs))
+	for _, paneID := range paneIDs {
+		id := strings.TrimSpace(paneID)
+		if id == "" {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}
+
+func codexPaneCacheKey(targetID, paneID string) string {
+	return strings.TrimSpace(targetID) + "|" + strings.TrimSpace(paneID)
+}
+
+func parseProcessTable(raw string) map[int]codexProcessInfo {
+	out := map[int]codexProcessInfo{}
+	for _, line := range strings.Split(raw, "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) < 3 {
+			continue
+		}
+		pid, err := strconv.Atoi(fields[0])
+		if err != nil || pid <= 0 {
+			continue
+		}
+		ppid, err := strconv.Atoi(fields[1])
+		if err != nil || ppid < 0 {
+			continue
+		}
+		out[pid] = codexProcessInfo{
+			pid:     pid,
+			ppid:    ppid,
+			command: strings.Join(fields[2:], " "),
+		}
+	}
+	return out
+}
+
+func findLikelyCodexDescendantPID(rootPID int, processByPID map[int]codexProcessInfo) int {
+	if rootPID <= 0 || len(processByPID) == 0 {
+		return 0
+	}
+	childrenByPID := map[int][]int{}
+	for pid, proc := range processByPID {
+		childrenByPID[proc.ppid] = append(childrenByPID[proc.ppid], pid)
+	}
+	type queueItem struct {
+		pid   int
+		depth int
+	}
+	stack := []queueItem{{pid: rootPID, depth: 0}}
+	visited := map[int]struct{}{}
+	bestPID := 0
+	bestScore := 0
+	bestDepth := -1
+	for len(stack) > 0 {
+		last := len(stack) - 1
+		item := stack[last]
+		stack = stack[:last]
+		if _, seen := visited[item.pid]; seen {
+			continue
+		}
+		visited[item.pid] = struct{}{}
+		proc, ok := processByPID[item.pid]
+		if !ok {
+			continue
+		}
+		score := codexProcessScore(proc.command)
+		if score > bestScore ||
+			(score == bestScore && item.depth > bestDepth) ||
+			(score == bestScore && item.depth == bestDepth && item.pid > bestPID) {
+			bestScore = score
+			bestDepth = item.depth
+			bestPID = item.pid
+		}
+		for _, child := range childrenByPID[item.pid] {
+			stack = append(stack, queueItem{pid: child, depth: item.depth + 1})
+		}
+	}
+	if bestScore <= 0 {
+		return 0
+	}
+	return bestPID
+}
+
+func codexProcessScore(command string) int {
+	normalized := strings.ToLower(strings.TrimSpace(command))
+	switch {
+	case normalized == "":
+		return 0
+	case strings.Contains(normalized, "/codex/codex"):
+		return 3
+	case strings.Contains(normalized, "@openai/codex") && strings.Contains(normalized, "node"):
+		return 2
+	case strings.HasPrefix(normalized, "codex "),
+		strings.Contains(normalized, " codex "),
+		strings.Contains(normalized, "/bin/codex"):
+		return 1
+	default:
+		return 0
+	}
+}
+
+func extractCodexThreadIDFromLsofOutput(raw string) string {
+	candidatePath := ""
+	for _, line := range strings.Split(raw, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		path := ""
+		switch {
+		case strings.HasPrefix(trimmed, "n/"):
+			path = strings.TrimPrefix(trimmed, "n")
+		case strings.HasPrefix(trimmed, "/"):
+			path = trimmed
+		default:
+			fields := strings.Fields(trimmed)
+			if len(fields) > 0 {
+				last := strings.TrimSpace(fields[len(fields)-1])
+				if strings.HasPrefix(last, "/") {
+					path = last
+				}
+			}
+		}
+		if extractCodexThreadIDFromPath(path) == "" {
+			continue
+		}
+		if path > candidatePath {
+			candidatePath = path
+		}
+	}
+	return extractCodexThreadIDFromPath(candidatePath)
+}
+
+func extractCodexThreadIDFromPath(path string) string {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return ""
+	}
+	normalized := strings.ReplaceAll(trimmed, "\\", "/")
+	if !strings.Contains(normalized, "/.codex/sessions/") {
+		return ""
+	}
+	base := strings.ToLower(filepath.Base(normalized))
+	matches := codexSessionFileIDPattern.FindStringSubmatch(base)
+	if len(matches) != 2 {
+		return ""
+	}
+	return strings.ToLower(matches[1])
 }
 
 func buildWindowItems(panes []api.PaneItem) []api.WindowItem {
@@ -2275,6 +3152,28 @@ func paneKey(targetID, paneID string) string {
 	return targetID + "|" + paneID
 }
 
+type codexPaneCandidate struct {
+	targetID   string
+	paneID     string
+	paneKey    string
+	runtimeID  string
+	threadID   string
+	labelHint  string
+	startedAt  time.Time
+	activityAt time.Time
+}
+
+type codexPaneCacheEntry struct {
+	threadID  string
+	expiresAt time.Time
+}
+
+type codexProcessInfo struct {
+	pid     int
+	ppid    int
+	command string
+}
+
 type actionInputHint struct {
 	preview string
 	at      time.Time
@@ -2284,6 +3183,318 @@ type runtimeEventHint struct {
 	preview string
 	at      time.Time
 	event   string
+}
+
+type claudeSessionHint struct {
+	label  string
+	source string
+}
+
+type claudeRuntimeProbe struct {
+	runtimeID   string
+	targetID    string
+	currentPath string
+	pid         int64
+}
+
+func (s *Server) collectClaudeSessionHints(
+	ctx context.Context,
+	panes []model.Pane,
+	requestedIDs map[string]struct{},
+	stateByPane map[string]model.StateRow,
+	runtimeByID map[string]model.Runtime,
+	runtimeByPane map[string]model.Runtime,
+	targetByID map[string]model.Target,
+) map[string]claudeSessionHint {
+	hints := map[string]claudeSessionHint{}
+	probeByRuntimeID := map[string]claudeRuntimeProbe{}
+	pidsByTargetID := map[string][]int64{}
+	pidSeen := map[string]map[int64]struct{}{}
+
+	for _, pane := range panes {
+		if _, ok := requestedIDs[pane.TargetID]; !ok {
+			continue
+		}
+		key := paneKey(pane.TargetID, pane.PaneID)
+		runtimeID := ""
+		rt := model.Runtime{}
+		hasRuntime := false
+
+		if st, ok := stateByPane[key]; ok {
+			if rid := strings.TrimSpace(st.RuntimeID); rid != "" {
+				runtimeID = rid
+				if candidate, ok := runtimeByID[rid]; ok {
+					rt = candidate
+					hasRuntime = true
+				}
+			}
+		}
+		if !hasRuntime {
+			if candidate, ok := runtimeByPane[key]; ok {
+				runtimeID = strings.TrimSpace(candidate.RuntimeID)
+				rt = candidate
+				hasRuntime = true
+			}
+		}
+		if !hasRuntime || runtimeID == "" || rt.PID == nil || *rt.PID <= 0 {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(rt.AgentType), "claude") {
+			continue
+		}
+		if _, exists := probeByRuntimeID[runtimeID]; exists {
+			continue
+		}
+		probeByRuntimeID[runtimeID] = claudeRuntimeProbe{
+			runtimeID:   runtimeID,
+			targetID:    rt.TargetID,
+			currentPath: pane.CurrentPath,
+			pid:         *rt.PID,
+		}
+
+		seenForTarget, ok := pidSeen[rt.TargetID]
+		if !ok {
+			seenForTarget = map[int64]struct{}{}
+			pidSeen[rt.TargetID] = seenForTarget
+		}
+		if _, exists := seenForTarget[*rt.PID]; !exists {
+			seenForTarget[*rt.PID] = struct{}{}
+			pidsByTargetID[rt.TargetID] = append(pidsByTargetID[rt.TargetID], *rt.PID)
+		}
+	}
+	if len(probeByRuntimeID) == 0 {
+		return hints
+	}
+
+	commandByTarget := map[string]map[int64]string{}
+	for targetID, pids := range pidsByTargetID {
+		tg, ok := targetByID[targetID]
+		if !ok || len(pids) == 0 {
+			continue
+		}
+		byPID, err := s.listProcessCommandsByPID(ctx, tg, pids)
+		if err != nil {
+			continue
+		}
+		commandByTarget[targetID] = byPID
+	}
+
+	homeDir, _ := os.UserHomeDir()
+	for runtimeID, probe := range probeByRuntimeID {
+		commands := commandByTarget[probe.targetID]
+		if len(commands) == 0 {
+			continue
+		}
+		cmdline := strings.TrimSpace(commands[probe.pid])
+		if cmdline == "" {
+			continue
+		}
+		resumeID := extractClaudeResumeID(cmdline)
+		if resumeID == "" {
+			continue
+		}
+		label, source := resolveClaudeSessionLabel(homeDir, probe.currentPath, resumeID, targetByID[probe.targetID].Kind)
+		if label == "" {
+			continue
+		}
+		hints[runtimeID] = claudeSessionHint{label: label, source: source}
+	}
+	return hints
+}
+
+func (s *Server) listProcessCommandsByPID(ctx context.Context, tg model.Target, pids []int64) (map[int64]string, error) {
+	out := map[int64]string{}
+	dedup := make([]int64, 0, len(pids))
+	seen := map[int64]struct{}{}
+	for _, pid := range pids {
+		if pid <= 0 {
+			continue
+		}
+		if _, ok := seen[pid]; ok {
+			continue
+		}
+		seen[pid] = struct{}{}
+		dedup = append(dedup, pid)
+	}
+	if len(dedup) == 0 {
+		return out, nil
+	}
+	sort.Slice(dedup, func(i, j int) bool { return dedup[i] < dedup[j] })
+	cmd := []string{"ps", "-o", "pid=", "-o", "command="}
+	for _, pid := range dedup {
+		cmd = append(cmd, "-p", strconv.FormatInt(pid, 10))
+	}
+	res, err := s.executor.Run(ctx, tg, cmd)
+	if err != nil {
+		return out, err
+	}
+	return parsePSPIDCommandOutput(res.Output), nil
+}
+
+func parsePSPIDCommandOutput(output string) map[int64]string {
+	out := map[int64]string{}
+	scanner := bufio.NewScanner(strings.NewReader(output))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		splitIdx := strings.IndexAny(line, " \t")
+		if splitIdx <= 0 || splitIdx >= len(line)-1 {
+			continue
+		}
+		pidStr := strings.TrimSpace(line[:splitIdx])
+		pid, err := strconv.ParseInt(pidStr, 10, 64)
+		if err != nil || pid <= 0 {
+			continue
+		}
+		cmdline := strings.TrimSpace(line[splitIdx+1:])
+		if cmdline == "" {
+			continue
+		}
+		out[pid] = cmdline
+	}
+	return out
+}
+
+func extractClaudeResumeID(cmdline string) string {
+	fields := strings.Fields(strings.TrimSpace(cmdline))
+	if len(fields) == 0 {
+		return ""
+	}
+	for i, token := range fields {
+		switch {
+		case token == "--resume" || token == "-r":
+			if i+1 >= len(fields) {
+				continue
+			}
+			return normalizeSessionID(fields[i+1])
+		case strings.HasPrefix(token, "--resume="):
+			return normalizeSessionID(strings.TrimPrefix(token, "--resume="))
+		}
+	}
+	return ""
+}
+
+func normalizeSessionID(raw string) string {
+	candidate := strings.TrimSpace(strings.Trim(raw, "\"'"))
+	if candidate == "" {
+		return ""
+	}
+	if strings.ContainsAny(candidate, "/\\ \t\r\n") {
+		return ""
+	}
+	return candidate
+}
+
+func resolveClaudeSessionLabel(homeDir, workspacePath, sessionID string, targetKind model.TargetKind) (string, string) {
+	normalizedID := normalizeSessionID(sessionID)
+	if normalizedID == "" {
+		return "", ""
+	}
+	if targetKind == model.TargetKindLocal {
+		if preview := readClaudeSessionPreview(homeDir, workspacePath, normalizedID); preview != "" {
+			return preview, "claude_session_jsonl"
+		}
+	}
+	return "claude " + shortSessionID(normalizedID), "claude_resume_id"
+}
+
+func shortSessionID(sessionID string) string {
+	id := strings.TrimSpace(sessionID)
+	if id == "" {
+		return ""
+	}
+	if len(id) <= 8 {
+		return id
+	}
+	return id[:8]
+}
+
+func readClaudeSessionPreview(homeDir, workspacePath, sessionID string) string {
+	candidates := claudeSessionJSONLCandidates(homeDir, workspacePath, sessionID)
+	for _, path := range candidates {
+		if preview := readFirstClaudeUserPrompt(path); preview != "" {
+			return preview
+		}
+	}
+	return ""
+}
+
+func claudeSessionJSONLCandidates(homeDir, workspacePath, sessionID string) []string {
+	baseDir := filepath.Join(strings.TrimSpace(homeDir), ".claude", "projects")
+	if strings.TrimSpace(homeDir) == "" || strings.TrimSpace(sessionID) == "" {
+		return nil
+	}
+	out := make([]string, 0, 4)
+	seen := map[string]struct{}{}
+	add := func(path string) {
+		normalized := strings.TrimSpace(path)
+		if normalized == "" {
+			return
+		}
+		if _, ok := seen[normalized]; ok {
+			return
+		}
+		seen[normalized] = struct{}{}
+		out = append(out, normalized)
+	}
+
+	if key := claudeProjectKey(workspacePath); key != "" {
+		add(filepath.Join(baseDir, key, sessionID+".jsonl"))
+	}
+	matches, _ := filepath.Glob(filepath.Join(baseDir, "*", sessionID+".jsonl"))
+	sort.Strings(matches)
+	for _, match := range matches {
+		add(match)
+	}
+	return out
+}
+
+func claudeProjectKey(workspacePath string) string {
+	normalized := strings.TrimSpace(workspacePath)
+	if normalized == "" {
+		return ""
+	}
+	return strings.ReplaceAll(normalized, "/", "-")
+}
+
+func readFirstClaudeUserPrompt(path string) string {
+	file, err := os.Open(strings.TrimSpace(path))
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || !strings.HasPrefix(line, "{") {
+			continue
+		}
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(line), &payload); err != nil {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(anyString(payload["type"])), "user") {
+			continue
+		}
+		if msg, ok := payload["message"]; ok {
+			if preview := compactPreview(extractPreviewFromJSON(msg), 72); preview != "" {
+				return preview
+			}
+		}
+		if preview := compactPreview(extractPreviewFromJSON(payload), 72); preview != "" {
+			return preview
+		}
+	}
+	return ""
+}
+
+func anyString(v any) string {
+	s, _ := v.(string)
+	return s
 }
 
 func derivePaneSessionLabel(
@@ -2367,6 +3578,10 @@ func derivePaneLastInteractionAt(
 		lastEventAt != nil &&
 		!isAdministrativeEventType(lastEventType) {
 		v := lastEventAt.UTC()
+		return &v
+	}
+	if strings.ToLower(strings.TrimSpace(stateSource)) == string(model.SourcePoller) && lastActivityAt != nil {
+		v := lastActivityAt.UTC()
 		return &v
 	}
 	if agentPresence != "none" {
@@ -2788,6 +4003,43 @@ func (s *Server) writeResolveTargetError(w http.ResponseWriter, err error) {
 		return
 	}
 	s.writeError(w, http.StatusInternalServerError, model.ErrPreconditionFailed, "failed to resolve target")
+}
+
+func deriveTerminalDelta(previous, current string) (string, bool) {
+	if previous == "" {
+		return current, true
+	}
+	if current == previous {
+		return "", true
+	}
+	if strings.HasPrefix(current, previous) {
+		return current[len(previous):], true
+	}
+	overlap := longestSuffixPrefixOverlap(previous, current)
+	if overlap > 0 {
+		return current[overlap:], true
+	}
+	return "", false
+}
+
+func longestSuffixPrefixOverlap(previous, current string) int {
+	max := len(previous)
+	if len(current) < max {
+		max = len(current)
+	}
+	for n := max; n > 0; n-- {
+		if previous[len(previous)-n:] == current[:n] {
+			return n
+		}
+	}
+	return 0
+}
+
+func clipTerminalStateContent(content string) string {
+	if len(content) <= maxTerminalStateBytes {
+		return content
+	}
+	return content[len(content)-maxTerminalStateBytes:]
 }
 
 func parseCursor(raw string) (string, int64, bool, error) {

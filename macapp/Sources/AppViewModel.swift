@@ -12,6 +12,7 @@ final class AppViewModel: ObservableObject {
     enum ViewMode: String, CaseIterable, Identifiable {
         case bySession
         case byStatus
+        case byChronological
 
         var id: String { rawValue }
 
@@ -21,6 +22,8 @@ final class AppViewModel: ObservableObject {
                 return "By Session"
             case .byStatus:
                 return "By Status"
+            case .byChronological:
+                return "By Chronological"
             }
         }
     }
@@ -92,7 +95,6 @@ final class AppViewModel: ObservableObject {
         let sessionName: String
         let topCategory: String
         let byCategory: [String: Int]
-        let unreadCount: Int
         let panes: [PaneItem]
         let windows: [WindowSection]
     }
@@ -110,6 +112,7 @@ final class AppViewModel: ObservableObject {
         static let viewMode = "ui.view_mode"
         static let windowGrouping = "ui.window_grouping"
         static let showWindowMetadata = "ui.show_window_metadata"
+        static let showWindowGroupBackground = "ui.show_window_group_background"
         static let showSessionMetadataInStatusView = "ui.show_session_metadata_in_status_view"
         static let showEmptyStatusColumns = "ui.show_empty_status_columns"
         static let showTechnicalDetails = "ui.show_technical_details"
@@ -125,7 +128,18 @@ final class AppViewModel: ObservableObject {
     @Published var sessions: [SessionItem] = []
     @Published var windows: [WindowItem] = []
     @Published var panes: [PaneItem] = []
-    @Published var selectedPane: PaneItem?
+    @Published var selectedPane: PaneItem? {
+        didSet {
+            if oldValue?.id != selectedPane?.id {
+                if let paneID = selectedPane?.id {
+                    // Force a fresh snapshot on pane switch to avoid stale-delta cursor reuse.
+                    terminalCursorByPaneID.removeValue(forKey: paneID)
+                }
+                outputPreview = ""
+                restartTerminalStreamForSelectedPane()
+            }
+        }
+    }
     @Published var searchQuery: String = ""
     @Published var sendText: String = ""
     @Published var sendEnter: Bool = true
@@ -145,6 +159,11 @@ final class AppViewModel: ObservableObject {
     @Published var showWindowMetadata: Bool = false {
         didSet {
             defaults.set(showWindowMetadata, forKey: PreferenceKey.showWindowMetadata)
+        }
+    }
+    @Published var showWindowGroupBackground: Bool = true {
+        didSet {
+            defaults.set(showWindowGroupBackground, forKey: PreferenceKey.showWindowGroupBackground)
         }
     }
     @Published var showSessionMetadataInStatusView: Bool = false {
@@ -185,12 +204,20 @@ final class AppViewModel: ObservableObject {
     private var pollingTask: Task<Void, Never>?
     private var paneObservations: [String: PaneObservation] = [:]
     private var queueLastEmitByKey: [String: Date] = [:]
+    private var terminalCapabilities: CapabilityFlags?
+    private var terminalCapabilitiesFetchedAt: Date?
+    private var terminalCursorByPaneID: [String: String] = [:]
+    private var terminalStreamTask: Task<Void, Never>?
+    private var didBootstrap = false
     private var recoveryInFlight = false
     private var lastRecoveryAttemptAt: Date?
     private let queueDedupeWindowSeconds: TimeInterval = 30
     private let recoveryCooldownSeconds: TimeInterval = 6
     private let queueLimit = 250
-    private let currentUIPrefsVersion = 3
+    private let currentUIPrefsVersion = 4
+    private let terminalCapabilitiesCacheTTLSeconds: TimeInterval = 60
+    private let terminalStreamPollIntervalSeconds: TimeInterval = 1.0
+    private let terminalOutputMaxChars = 120_000
 
     init(daemon: DaemonManager, client: AGTMUXCLIClient, defaults: UserDefaults = .standard) {
         self.daemon = daemon
@@ -201,9 +228,14 @@ final class AppViewModel: ObservableObject {
 
     deinit {
         pollingTask?.cancel()
+        terminalStreamTask?.cancel()
     }
 
     func bootstrap() {
+        guard !didBootstrap else {
+            return
+        }
+        didBootstrap = true
         Task {
             await startDaemonAndLoad()
         }
@@ -270,22 +302,44 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    func performViewOutput(lines: Int = 80) {
+    func performViewOutput(lines: Int = 80, forceSnapshot: Bool = false) {
         guard let pane = selectedPane else {
             errorMessage = "Pane を選択してください。"
             return
         }
         Task {
             do {
-                let requestRef = "macapp-view-\(UUID().uuidString)"
-                let resp = try await client.viewOutput(
-                    target: pane.identity.target,
-                    paneID: pane.identity.paneID,
-                    requestRef: requestRef,
-                    lines: lines
-                )
-                outputPreview = resp.output ?? ""
-                infoMessage = "view-output: \(resp.resultCode) (\(resp.actionID))"
+                if await shouldUseTerminalRead() {
+                    if forceSnapshot {
+                        terminalCursorByPaneID.removeValue(forKey: pane.id)
+                    }
+                    let cursor = forceSnapshot ? nil : terminalCursorByPaneID[pane.id]
+                    let resp = try await client.terminalRead(
+                        target: pane.identity.target,
+                        paneID: pane.identity.paneID,
+                        cursor: cursor,
+                        lines: lines
+                    )
+                    terminalCursorByPaneID[pane.id] = resp.frame.cursor
+                    if resp.frame.frameType == "delta", let content = resp.frame.content {
+                        outputPreview = outputPreview + content
+                    } else {
+                        outputPreview = resp.frame.content ?? ""
+                    }
+                    trimOutputPreviewIfNeeded()
+                    infoMessage = "terminal-\(resp.frame.frameType): \(resp.frame.cursor)"
+                } else {
+                    let requestRef = "macapp-view-\(UUID().uuidString)"
+                    let resp = try await client.viewOutput(
+                        target: pane.identity.target,
+                        paneID: pane.identity.paneID,
+                        requestRef: requestRef,
+                        lines: lines
+                    )
+                    outputPreview = resp.output ?? ""
+                    trimOutputPreviewIfNeeded()
+                    infoMessage = "view-output: \(resp.resultCode) (\(resp.actionID))"
+                }
                 errorMessage = ""
             } catch {
                 errorMessage = error.localizedDescription
@@ -293,12 +347,12 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    func performKillKeyINT() {
-        kill(mode: "key", signal: "INT")
+    func performKillKeyINT(for pane: PaneItem? = nil) {
+        kill(mode: "key", signal: "INT", pane: pane)
     }
 
-    func performKillSignalTERM() {
-        kill(mode: "signal", signal: "TERM")
+    func performKillSignalTERM(for pane: PaneItem? = nil) {
+        kill(mode: "signal", signal: "TERM", pane: pane)
     }
 
     var reviewUnreadCount: Int {
@@ -351,14 +405,6 @@ final class AppViewModel: ObservableObject {
             }
             let sorted = sortedPanes(paneList)
             let counts = countByCategory(in: sorted)
-            let unreadCount = reviewQueue.reduce(into: 0) { acc, item in
-                if item.target == first.identity.target &&
-                    item.sessionName == first.identity.sessionName &&
-                    item.acknowledgedAt == nil &&
-                    item.unread {
-                    acc += 1
-                }
-            }
             let topCategory = sessionMeta[key]?.topCategory ?? topCategory(from: counts)
             let windows = shouldGroupByWindow(sorted) ? buildWindowSections(sorted, key: key) : []
             out.append(SessionSection(
@@ -367,7 +413,6 @@ final class AppViewModel: ObservableObject {
                 sessionName: first.identity.sessionName,
                 topCategory: topCategory,
                 byCategory: counts,
-                unreadCount: unreadCount,
                 panes: sorted,
                 windows: windows
             ))
@@ -386,6 +431,36 @@ final class AppViewModel: ObservableObject {
         return out
     }
 
+    var chronologicalPanes: [PaneItem] {
+        filteredPanes.sorted { lhs, rhs in
+            let lDate = paneRecencyDate(for: lhs) ?? Date.distantPast
+            let rDate = paneRecencyDate(for: rhs) ?? Date.distantPast
+            if lDate != rDate {
+                return lDate > rDate
+            }
+            if lhs.identity.target != rhs.identity.target {
+                return lhs.identity.target < rhs.identity.target
+            }
+            if lhs.identity.sessionName != rhs.identity.sessionName {
+                return lhs.identity.sessionName < rhs.identity.sessionName
+            }
+            if lhs.identity.windowID != rhs.identity.windowID {
+                return lhs.identity.windowID < rhs.identity.windowID
+            }
+            return lhs.identity.paneID < rhs.identity.paneID
+        }
+    }
+
+    func paneRecencyDate(for pane: PaneItem) -> Date? {
+        if let lastInteraction = parseTimestamp(pane.lastInteractionAt ?? "") {
+            return lastInteraction
+        }
+        if let lastEvent = parseTimestamp(pane.lastEventAt ?? "") {
+            return lastEvent
+        }
+        return parseTimestamp(pane.updatedAt)
+    }
+
     var summaryCards: [(String, Int)] {
         let panes = filteredPanes
         let counts = countByCategory(in: panes)
@@ -396,7 +471,6 @@ final class AppViewModel: ObservableObject {
             ("Attention", counts["attention", default: 0]),
             ("Running", counts["running", default: 0]),
             ("Idle", counts["idle", default: 0]),
-            ("Queue", reviewUnreadCount),
         ]
     }
 
@@ -517,23 +591,44 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    func paneDisplayTitle(for pane: PaneItem) -> String {
+    func paneDisplayTitle(for pane: PaneItem, among candidates: [PaneItem]? = nil) -> String {
+        let base = basePaneDisplayTitle(for: pane)
+        let source = candidates ?? panes
+        let duplicates = source.filter {
+            $0.identity.target == pane.identity.target &&
+                $0.identity.sessionName == pane.identity.sessionName &&
+                basePaneDisplayTitle(for: $0) == base
+        }
+        guard duplicates.count > 1 else {
+            return base
+        }
+        let ordered = duplicates.sorted { lhs, rhs in
+            lhs.identity.paneID < rhs.identity.paneID
+        }
+        guard let index = ordered.firstIndex(where: { $0.id == pane.id }) else {
+            return base
+        }
+        return "\(base) \(index + 1)"
+    }
+
+    private func basePaneDisplayTitle(for pane: PaneItem) -> String {
         if let label = trimmedNonEmpty(pane.sessionLabel) {
             return label
         }
         if let paneTitle = trimmedNonEmpty(pane.paneTitle) {
             return paneTitle
         }
+        let presence = agentPresence(for: pane)
+        if presence == "managed" {
+            if let agent = normalizedToken(pane.agentType), agent != "none", agent != "unknown" {
+                return "\(agent) session"
+            }
+            return "agent session"
+        }
         if let cmd = trimmedNonEmpty(pane.currentCmd) {
             return cmd
         }
-        if let windowName = trimmedNonEmpty(pane.windowName) {
-            return windowName
-        }
-        if let sessionName = trimmedNonEmpty(pane.identity.sessionName) {
-            return sessionName
-        }
-        return pane.identity.paneID
+        return "terminal pane"
     }
 
     func lastActiveLabel(for pane: PaneItem) -> String {
@@ -541,7 +636,46 @@ final class AppViewModel: ObservableObject {
         guard let updated = anchor else {
             return "last active: -"
         }
-        return "last active: \(relativeFormatter.localizedString(for: updated, relativeTo: Date()))"
+        return "last active: \(compactRelativeTimestamp(since: updated, now: Date()))"
+    }
+
+    func lastActiveShortLabel(for pane: PaneItem) -> String {
+        let anchor = parseTimestamp(pane.lastInteractionAt ?? "")
+        guard let updated = anchor else {
+            return "-"
+        }
+        return compactRelativeTimestamp(since: updated, now: Date())
+    }
+
+    func isStateReasonRedundant(for pane: PaneItem, withinCategory category: String? = nil) -> Bool {
+        let state = activityState(for: pane)
+        let reason = normalizedToken(stateReason(for: pane).replacingOccurrences(of: " ", with: "_"))
+        let cat = normalizedToken(category)
+        switch state {
+        case "running":
+            if reason == "running" || reason == "active" {
+                return true
+            }
+            if cat == "running" {
+                return true
+            }
+        case "idle":
+            if reason == "idle" {
+                return true
+            }
+            if cat == "idle" {
+                return true
+            }
+        case "waiting_input":
+            return false
+        case "waiting_approval":
+            return false
+        case "error":
+            return false
+        default:
+            break
+        }
+        return false
     }
 
     func awaitingResponseKind(for pane: PaneItem) -> String? {
@@ -558,8 +692,8 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    private func kill(mode: String, signal: String) {
-        guard let pane = selectedPane else {
+    private func kill(mode: String, signal: String, pane: PaneItem? = nil) {
+        guard let pane = pane ?? selectedPane else {
             errorMessage = "Pane を選択してください。"
             return
         }
@@ -638,6 +772,8 @@ final class AppViewModel: ObservableObject {
         sessions = snapshot.sessions
         windows = snapshot.windows
         panes = snapshot.panes
+        let paneIDs = Set(panes.map(\.id))
+        terminalCursorByPaneID = terminalCursorByPaneID.filter { paneIDs.contains($0.key) }
         if let current = selectedPane {
             selectedPane = panes.first(where: { $0.id == current.id })
             if selectedPane == nil {
@@ -826,11 +962,15 @@ final class AppViewModel: ObservableObject {
     private func loadPreferences() {
         if let raw = defaults.string(forKey: PreferenceKey.viewMode), let restored = ViewMode(rawValue: raw) {
             viewMode = restored
+        } else {
+            viewMode = .bySession
+            defaults.set(ViewMode.bySession.rawValue, forKey: PreferenceKey.viewMode)
         }
         if let raw = defaults.string(forKey: PreferenceKey.windowGrouping), let restored = WindowGrouping(rawValue: raw) {
             windowGrouping = restored
         }
         showWindowMetadata = readBoolPreference(PreferenceKey.showWindowMetadata, fallback: false)
+        showWindowGroupBackground = readBoolPreference(PreferenceKey.showWindowGroupBackground, fallback: true)
         showSessionMetadataInStatusView = readBoolPreference(PreferenceKey.showSessionMetadataInStatusView, fallback: false)
         showEmptyStatusColumns = readBoolPreference(PreferenceKey.showEmptyStatusColumns, fallback: false)
         showTechnicalDetails = readBoolPreference(PreferenceKey.showTechnicalDetails, fallback: false)
@@ -840,9 +980,10 @@ final class AppViewModel: ObservableObject {
 
         let storedVersion = defaults.integer(forKey: PreferenceKey.uiPrefsVersion)
         if storedVersion < currentUIPrefsVersion {
-            // v3: default to cleaner status cards (hide tmux metadata labels unless opted-in).
+            // v4: keep cleaner cards and enable by-session window group highlight by default.
             showWindowMetadata = false
             showSessionMetadataInStatusView = false
+            showWindowGroupBackground = true
             defaults.set(currentUIPrefsVersion, forKey: PreferenceKey.uiPrefsVersion)
         }
     }
@@ -852,6 +993,104 @@ final class AppViewModel: ObservableObject {
             return fallback
         }
         return defaults.bool(forKey: key)
+    }
+
+    private func restartTerminalStreamForSelectedPane() {
+        terminalStreamTask?.cancel()
+        guard let pane = selectedPane else {
+            return
+        }
+        let paneID = pane.id
+        terminalStreamTask = Task { [weak self] in
+            await self?.terminalStreamLoop(for: paneID)
+        }
+    }
+
+    private func terminalStreamLoop(for paneID: String) async {
+        var cursor = terminalCursorByPaneID[paneID]
+        var consecutiveFailures = 0
+        while !Task.isCancelled {
+            guard selectedPane?.id == paneID else {
+                return
+            }
+            guard let pane = panes.first(where: { $0.id == paneID }) else {
+                return
+            }
+            if await shouldUseTerminalRead() == false {
+                consecutiveFailures += 1
+                let delayMillis = terminalStreamRetryDelayMillis(for: consecutiveFailures)
+                if selectedPane?.id == paneID, consecutiveFailures >= 3 {
+                    infoMessage = "terminal stream waiting for daemon capabilities..."
+                }
+                try? await Task.sleep(for: .milliseconds(delayMillis))
+                continue
+            }
+            do {
+                let resp = try await client.terminalRead(
+                    target: pane.identity.target,
+                    paneID: pane.identity.paneID,
+                    cursor: cursor,
+                    lines: 200
+                )
+                cursor = resp.frame.cursor
+                terminalCursorByPaneID[paneID] = resp.frame.cursor
+                applyTerminalFrame(resp.frame, paneID: paneID)
+                consecutiveFailures = 0
+                try await Task.sleep(for: .milliseconds(Int(terminalStreamPollIntervalSeconds * 1000)))
+            } catch {
+                consecutiveFailures += 1
+                let delayMillis = terminalStreamRetryDelayMillis(for: consecutiveFailures)
+                if selectedPane?.id == paneID, consecutiveFailures >= 3 {
+                    infoMessage = "terminal stream reconnecting..."
+                }
+                try? await Task.sleep(for: .milliseconds(delayMillis))
+            }
+        }
+    }
+
+    private func terminalStreamRetryDelayMillis(for consecutiveFailures: Int) -> Int {
+        let cappedFailure = min(max(consecutiveFailures, 1), 5)
+        return min(4000, Int(Double(250) * pow(2, Double(cappedFailure - 1))))
+    }
+
+    private func applyTerminalFrame(_ frame: TerminalFrame, paneID: String) {
+        guard selectedPane?.id == paneID else {
+            return
+        }
+        let content = frame.content ?? ""
+        if frame.frameType == "delta" {
+            if !content.isEmpty {
+                outputPreview += content
+            }
+        } else {
+            outputPreview = content
+        }
+        trimOutputPreviewIfNeeded()
+    }
+
+    private func trimOutputPreviewIfNeeded() {
+        if outputPreview.count <= terminalOutputMaxChars {
+            return
+        }
+        outputPreview = String(outputPreview.suffix(terminalOutputMaxChars))
+    }
+
+    private func shouldUseTerminalRead() async -> Bool {
+        let now = Date()
+        if let cached = terminalCapabilities,
+           let fetchedAt = terminalCapabilitiesFetchedAt,
+           now.timeIntervalSince(fetchedAt) <= terminalCapabilitiesCacheTTLSeconds {
+            return cached.embeddedTerminal && cached.terminalRead
+        }
+        do {
+            let env = try await client.fetchCapabilities()
+            terminalCapabilities = env.capabilities
+            terminalCapabilitiesFetchedAt = now
+            return env.capabilities.embeddedTerminal && env.capabilities.terminalRead
+        } catch {
+            terminalCapabilitiesFetchedAt = now
+            return false
+        }
     }
 
     private func categoryPrecedence(_ category: String) -> Int {
@@ -966,11 +1205,25 @@ final class AppViewModel: ObservableObject {
         return formatter
     }()
 
-    private let relativeFormatter: RelativeDateTimeFormatter = {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .short
-        return formatter
-    }()
+    private func compactRelativeTimestamp(since date: Date, now: Date) -> String {
+        let elapsed = max(0, now.timeIntervalSince(date))
+        if elapsed < 60 {
+            return "\(Int(elapsed))s"
+        }
+        if elapsed < 3600 {
+            return "\(Int(elapsed / 60))m"
+        }
+        if elapsed < 86_400 {
+            return "\(Int(elapsed / 3600))h"
+        }
+        if elapsed < 2_592_000 {
+            return "\(Int(elapsed / 86_400))d"
+        }
+        if elapsed < 31_536_000 {
+            return "\(Int(elapsed / 2_592_000))mo"
+        }
+        return "\(Int(elapsed / 31_536_000))y"
+    }
 
     private func autoRecoverFromDaemonError(triggeredBy error: Error) async -> Bool {
         guard shouldAttemptAutoRecover(for: error) else {

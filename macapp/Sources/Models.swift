@@ -176,6 +176,68 @@ struct ActionResponse: Decodable {
     }
 }
 
+struct CapabilitiesEnvelope: Decodable {
+    let capabilities: CapabilityFlags
+}
+
+struct CapabilityFlags: Decodable {
+    let embeddedTerminal: Bool
+    let terminalRead: Bool
+    let terminalResize: Bool
+    let terminalWriteViaActionSend: Bool
+    let terminalFrameProtocol: String?
+
+    enum CodingKeys: String, CodingKey {
+        case embeddedTerminal = "embedded_terminal"
+        case terminalRead = "terminal_read"
+        case terminalResize = "terminal_resize"
+        case terminalWriteViaActionSend = "terminal_write_via_action_send"
+        case terminalFrameProtocol = "terminal_frame_protocol"
+    }
+}
+
+struct TerminalReadEnvelope: Decodable {
+    let frame: TerminalFrame
+}
+
+struct TerminalFrame: Decodable {
+    let frameType: String
+    let streamID: String
+    let cursor: String
+    let paneID: String
+    let target: String
+    let lines: Int
+    let content: String?
+    let resetReason: String?
+
+    enum CodingKeys: String, CodingKey {
+        case frameType = "frame_type"
+        case streamID = "stream_id"
+        case cursor
+        case paneID = "pane_id"
+        case target
+        case lines
+        case content
+        case resetReason = "reset_reason"
+    }
+}
+
+struct TerminalResizeResponse: Decodable {
+    let target: String
+    let paneID: String
+    let cols: Int
+    let rows: Int
+    let resultCode: String
+
+    enum CodingKeys: String, CodingKey {
+        case target
+        case paneID = "pane_id"
+        case cols
+        case rows
+        case resultCode = "result_code"
+    }
+}
+
 struct DashboardSnapshot {
     let targets: [TargetItem]
     let sessions: [SessionItem]
