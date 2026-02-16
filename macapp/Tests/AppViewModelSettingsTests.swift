@@ -190,6 +190,110 @@ final class AppViewModelSettingsTests: XCTestCase {
         XCTAssertFalse(labels.contains("Queue"))
     }
 
+    func testShouldUseTerminalProxyRequiresCanonicalValuesAfterNormalization() throws {
+        let model = try makeModel()
+        let valid = CapabilityFlags(
+            embeddedTerminal: true,
+            terminalRead: true,
+            terminalResize: true,
+            terminalWriteViaActionSend: true,
+            terminalAttach: true,
+            terminalWrite: true,
+            terminalStream: true,
+            terminalProxyMode: "daemon-proxy-pty-poc",
+            terminalFrameProtocol: "terminal-stream-v1"
+        )
+        XCTAssertTrue(model.shouldUseTerminalProxy(caps: valid))
+
+        let normalizedValid = CapabilityFlags(
+            embeddedTerminal: true,
+            terminalRead: true,
+            terminalResize: true,
+            terminalWriteViaActionSend: true,
+            terminalAttach: true,
+            terminalWrite: true,
+            terminalStream: true,
+            terminalProxyMode: " DAEMON-PROXY-PTY-POC ",
+            terminalFrameProtocol: " TERMINAL-STREAM-V1 "
+        )
+        XCTAssertTrue(model.shouldUseTerminalProxy(caps: normalizedValid))
+
+        let missingMode = CapabilityFlags(
+            embeddedTerminal: true,
+            terminalRead: true,
+            terminalResize: true,
+            terminalWriteViaActionSend: true,
+            terminalAttach: true,
+            terminalWrite: true,
+            terminalStream: true,
+            terminalProxyMode: nil,
+            terminalFrameProtocol: "terminal-stream-v1"
+        )
+        XCTAssertFalse(model.shouldUseTerminalProxy(caps: missingMode))
+
+        let wrongProtocol = CapabilityFlags(
+            embeddedTerminal: true,
+            terminalRead: true,
+            terminalResize: true,
+            terminalWriteViaActionSend: true,
+            terminalAttach: true,
+            terminalWrite: true,
+            terminalStream: true,
+            terminalProxyMode: "daemon-proxy-pty-poc",
+            terminalFrameProtocol: "snapshot-delta-reset"
+        )
+        XCTAssertFalse(model.shouldUseTerminalProxy(caps: wrongProtocol))
+    }
+
+    func testShouldAcceptTerminalAttachResponseRequiresCompletedAndSessionID() throws {
+        let model = try makeModel()
+        let ok = TerminalAttachResponse(
+            sessionID: "term-s1",
+            target: "local",
+            paneID: "%1",
+            runtimeID: "rt-1",
+            stateVersion: 1,
+            resultCode: "completed"
+        )
+        XCTAssertTrue(model.shouldAcceptTerminalAttachResponse(ok))
+
+        let failed = TerminalAttachResponse(
+            sessionID: "term-s1",
+            target: "local",
+            paneID: "%1",
+            runtimeID: "rt-1",
+            stateVersion: 1,
+            resultCode: "failed"
+        )
+        XCTAssertFalse(model.shouldAcceptTerminalAttachResponse(failed))
+
+        let noSession = TerminalAttachResponse(
+            sessionID: "   ",
+            target: "local",
+            paneID: "%1",
+            runtimeID: nil,
+            stateVersion: nil,
+            resultCode: "completed"
+        )
+        XCTAssertFalse(model.shouldAcceptTerminalAttachResponse(noSession))
+    }
+
+    func testShouldResetTerminalProxySessionMatchesKnownErrors() throws {
+        let model = try makeModel()
+        XCTAssertTrue(model.shouldResetTerminalProxySession(
+            error: RuntimeError.commandFailed("agtmux-app terminal stream", 1, "E_RUNTIME_STALE: runtime guard mismatch")
+        ))
+        XCTAssertTrue(model.shouldResetTerminalProxySession(
+            error: RuntimeError.commandFailed("agtmux-app terminal write", 1, "terminal session not found")
+        ))
+        XCTAssertFalse(model.shouldResetTerminalProxySession(
+            error: RuntimeError.commandFailed("agtmux-app terminal stream", 1, "E_TARGET_UNREACHABLE")
+        ))
+        XCTAssertFalse(model.shouldResetTerminalProxySession(
+            error: RuntimeError.invalidJSON("broken payload")
+        ))
+    }
+
     private func makeModel() throws -> AppViewModel {
         setenv("AGTMUX_DAEMON_BIN", "/usr/bin/true", 1)
         setenv("AGTMUX_APP_BIN", "/usr/bin/true", 1)

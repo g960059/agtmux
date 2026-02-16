@@ -203,6 +203,28 @@ struct CapabilityFlags: Decodable {
         case terminalFrameProtocol = "terminal_frame_protocol"
     }
 
+    init(
+        embeddedTerminal: Bool,
+        terminalRead: Bool,
+        terminalResize: Bool,
+        terminalWriteViaActionSend: Bool,
+        terminalAttach: Bool,
+        terminalWrite: Bool,
+        terminalStream: Bool,
+        terminalProxyMode: String?,
+        terminalFrameProtocol: String?
+    ) {
+        self.embeddedTerminal = embeddedTerminal
+        self.terminalRead = terminalRead
+        self.terminalResize = terminalResize
+        self.terminalWriteViaActionSend = terminalWriteViaActionSend
+        self.terminalAttach = terminalAttach
+        self.terminalWrite = terminalWrite
+        self.terminalStream = terminalStream
+        self.terminalProxyMode = terminalProxyMode
+        self.terminalFrameProtocol = terminalFrameProtocol
+    }
+
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         embeddedTerminal = try container.decodeIfPresent(Bool.self, forKey: .embeddedTerminal) ?? false

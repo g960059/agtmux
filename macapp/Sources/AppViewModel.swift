@@ -299,8 +299,9 @@ final class AppViewModel: ObservableObject {
                 guard selectedPane?.id == pane.id else {
                     return
                 }
+                let streamGeneration = terminalStreamGeneration
                 if await shouldUseTerminalProxy() {
-                    let sessionID = try await ensureTerminalProxySession(for: pane)
+                    let sessionID = try await ensureTerminalProxySession(for: pane, generation: streamGeneration)
                     guard selectedPane?.id == pane.id else {
                         return
                     }
@@ -348,6 +349,9 @@ final class AppViewModel: ObservableObject {
                 }
                 errorMessage = ""
                 sendText = ""
+            } catch is CancellationError {
+                errorMessage = ""
+                return
             } catch {
                 errorMessage = error.localizedDescription
             }
@@ -364,16 +368,18 @@ final class AppViewModel: ObservableObject {
                 guard selectedPane?.id == pane.id else {
                     return
                 }
+                let streamGeneration = terminalStreamGeneration
                 if await shouldUseTerminalProxy() {
                     if forceSnapshot {
                         terminalCursorByPaneID.removeValue(forKey: pane.id)
                     }
                     let cursor = forceSnapshot ? nil : terminalCursorByPaneID[pane.id]
-                    let sessionID = try await ensureTerminalProxySession(for: pane)
+                    let sessionID = try await ensureTerminalProxySession(for: pane, generation: streamGeneration)
                     guard selectedPane?.id == pane.id else {
                         return
                     }
                     let resp = try await client.terminalStream(sessionID: sessionID, cursor: cursor, lines: lines)
+                    var lastFrame = resp.frame
                     terminalCursorByPaneID[pane.id] = resp.frame.cursor
                     applyTerminalStreamFrame(resp.frame, paneID: pane.id)
                     if resp.frame.frameType == "attached" {
@@ -382,10 +388,11 @@ final class AppViewModel: ObservableObject {
                             cursor: resp.frame.cursor,
                             lines: lines
                         )
+                        lastFrame = followResp.frame
                         terminalCursorByPaneID[pane.id] = followResp.frame.cursor
                         applyTerminalStreamFrame(followResp.frame, paneID: pane.id)
                     }
-                    infoMessage = "terminal-\(resp.frame.frameType): \(resp.frame.cursor)"
+                    infoMessage = "terminal-\(lastFrame.frameType): \(lastFrame.cursor)"
                 } else if await shouldUseTerminalRead() {
                     if forceSnapshot {
                         terminalCursorByPaneID.removeValue(forKey: pane.id)
@@ -418,6 +425,9 @@ final class AppViewModel: ObservableObject {
                     infoMessage = "view-output: \(resp.resultCode) (\(resp.actionID))"
                 }
                 errorMessage = ""
+            } catch is CancellationError {
+                errorMessage = ""
+                return
             } catch {
                 errorMessage = error.localizedDescription
             }
@@ -1149,7 +1159,7 @@ final class AppViewModel: ObservableObject {
                 if error is CancellationError || Task.isCancelled || generation != terminalStreamGeneration {
                     return
                 }
-                if shouldResetTerminalProxySession(for: error),
+                if shouldResetTerminalProxySession(error: error),
                    let staleSessionID = terminalProxySessionByPaneID[paneID] {
                     terminalProxySessionByPaneID.removeValue(forKey: paneID)
                     terminalCursorByPaneID.removeValue(forKey: paneID)
@@ -1237,7 +1247,7 @@ final class AppViewModel: ObservableObject {
             forceStale: false
         )
         let sessionID = response.sessionID.trimmingCharacters(in: .whitespacesAndNewlines)
-        if response.resultCode != "completed" || sessionID.isEmpty {
+        if !shouldAcceptTerminalAttachResponse(response) {
             throw RuntimeError.commandFailed(
                 "agtmux-app terminal attach",
                 1,
@@ -1265,6 +1275,10 @@ final class AppViewModel: ObservableObject {
         guard let caps = await fetchTerminalCapabilities() else {
             return false
         }
+        return shouldUseTerminalProxy(caps: caps)
+    }
+
+    func shouldUseTerminalProxy(caps: CapabilityFlags) -> Bool {
         if !(caps.embeddedTerminal &&
             caps.terminalAttach &&
             caps.terminalWrite &&
@@ -1306,14 +1320,20 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    private func shouldResetTerminalProxySession(for error: Error) -> Bool {
+    func shouldResetTerminalProxySession(error: Error) -> Bool {
         guard case let RuntimeError.commandFailed(_, _, stderr) = error else {
             return false
         }
         let normalized = stderr.lowercased()
-        return normalized.contains("e_ref_not_found") ||
-            normalized.contains("session not found") ||
-            normalized.contains("e_runtime_stale")
+        let resetTokens = ["e_ref_not_found", "session not found", "e_runtime_stale"]
+        return resetTokens.contains { normalized.contains($0) }
+    }
+
+    func shouldAcceptTerminalAttachResponse(_ response: TerminalAttachResponse) -> Bool {
+        if response.resultCode != "completed" {
+            return false
+        }
+        return !response.sessionID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private func categoryPrecedence(_ category: String) -> Int {
