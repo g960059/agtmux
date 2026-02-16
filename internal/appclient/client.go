@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -307,6 +308,33 @@ type TerminalResizeRequest struct {
 	Rows   int    `json:"rows"`
 }
 
+type TerminalAttachRequest struct {
+	Target          string `json:"target"`
+	PaneID          string `json:"pane_id"`
+	IfRuntime       string `json:"if_runtime,omitempty"`
+	IfState         string `json:"if_state,omitempty"`
+	IfUpdatedWithin string `json:"if_updated_within,omitempty"`
+	ForceStale      bool   `json:"force_stale,omitempty"`
+}
+
+type TerminalDetachRequest struct {
+	SessionID string `json:"session_id"`
+}
+
+type TerminalWriteRequest struct {
+	SessionID string `json:"session_id"`
+	Text      string `json:"text,omitempty"`
+	Key       string `json:"key,omitempty"`
+	Enter     bool   `json:"enter,omitempty"`
+	Paste     bool   `json:"paste,omitempty"`
+}
+
+type TerminalStreamRequest struct {
+	SessionID string
+	Cursor    string
+	Lines     int
+}
+
 type AttachRequest struct {
 	RequestRef      string `json:"request_ref"`
 	Target          string `json:"target"`
@@ -421,6 +449,64 @@ func (c *Client) TerminalResize(ctx context.Context, req TerminalResizeRequest) 
 		return api.TerminalResizeResponse{}, fmt.Errorf("decode terminal resize response: %w", err)
 	}
 	return resp, nil
+}
+
+func (c *Client) TerminalAttach(ctx context.Context, req TerminalAttachRequest) (api.TerminalAttachResponse, error) {
+	body, err := c.request(ctx, http.MethodPost, "/v1/terminal/attach", nil, req, false)
+	if err != nil {
+		return api.TerminalAttachResponse{}, err
+	}
+	var resp api.TerminalAttachResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return api.TerminalAttachResponse{}, fmt.Errorf("decode terminal attach response: %w", err)
+	}
+	return resp, nil
+}
+
+func (c *Client) TerminalDetach(ctx context.Context, req TerminalDetachRequest) (api.TerminalDetachResponse, error) {
+	body, err := c.request(ctx, http.MethodPost, "/v1/terminal/detach", nil, req, false)
+	if err != nil {
+		return api.TerminalDetachResponse{}, err
+	}
+	var resp api.TerminalDetachResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return api.TerminalDetachResponse{}, fmt.Errorf("decode terminal detach response: %w", err)
+	}
+	return resp, nil
+}
+
+func (c *Client) TerminalWrite(ctx context.Context, req TerminalWriteRequest) (api.TerminalWriteResponse, error) {
+	body, err := c.request(ctx, http.MethodPost, "/v1/terminal/write", nil, req, false)
+	if err != nil {
+		return api.TerminalWriteResponse{}, err
+	}
+	var resp api.TerminalWriteResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return api.TerminalWriteResponse{}, fmt.Errorf("decode terminal write response: %w", err)
+	}
+	return resp, nil
+}
+
+func (c *Client) TerminalStream(ctx context.Context, req TerminalStreamRequest) (api.TerminalStreamEnvelope, error) {
+	query := url.Values{}
+	if sessionID := strings.TrimSpace(req.SessionID); sessionID != "" {
+		query.Set("session_id", sessionID)
+	}
+	if cursor := strings.TrimSpace(req.Cursor); cursor != "" {
+		query.Set("cursor", cursor)
+	}
+	if req.Lines > 0 {
+		query.Set("lines", strconv.Itoa(req.Lines))
+	}
+	body, err := c.request(ctx, http.MethodGet, "/v1/terminal/stream", query, nil, true)
+	if err != nil {
+		return api.TerminalStreamEnvelope{}, err
+	}
+	var env api.TerminalStreamEnvelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		return api.TerminalStreamEnvelope{}, fmt.Errorf("decode terminal stream envelope: %w", err)
+	}
+	return env, nil
 }
 
 func (c *Client) ListAdapters(ctx context.Context, enabled *bool) (api.AdaptersEnvelope, error) {

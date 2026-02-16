@@ -37,6 +37,7 @@ const defaultLocalTargetName = "local"
 const defaultViewOutputLines = 200
 const defaultActionSnapshotTTL = 30 * time.Second
 const defaultTerminalReadLines = 200
+const defaultTerminalStreamLines = 200
 const maxTerminalReadLines = 2000
 const maxTerminalStateBytes = 256 * 1024
 
@@ -58,6 +59,7 @@ type Server struct {
 	actionLocks    map[string]*actionLockEntry
 	terminalMu     sync.Mutex
 	terminalStates map[string]terminalReadState
+	terminalProxy  map[string]terminalProxySession
 	codexPaneMu    sync.Mutex
 	codexPaneCache map[string]codexPaneCacheEntry
 	codexPaneTTL   time.Duration
@@ -77,6 +79,20 @@ type terminalReadState struct {
 	content string
 }
 
+type terminalProxySession struct {
+	SessionID    string
+	TargetName   string
+	TargetID     string
+	PaneID       string
+	RuntimeID    string
+	StateVersion int64
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+	AttachedSent bool
+	LastContent  string
+	LastSeq      int64
+}
+
 func NewServer(cfg config.Config) *Server {
 	return NewServerWithDeps(cfg, nil, nil)
 }
@@ -90,6 +106,7 @@ func NewServerWithDeps(cfg config.Config, store *db.Store, executor *target.Exec
 		streamID:       uuid.NewString(),
 		actionLocks:    map[string]*actionLockEntry{},
 		terminalStates: map[string]terminalReadState{},
+		terminalProxy:  map[string]terminalProxySession{},
 		codexPaneCache: map[string]codexPaneCacheEntry{},
 		codexPaneTTL:   20 * time.Second,
 		snapshotTTL:    defaultActionSnapshotTTL,
@@ -118,6 +135,10 @@ func NewServerWithDeps(cfg config.Config, store *db.Store, executor *target.Exec
 		mux.HandleFunc("/v1/windows", s.windowsHandler)
 		mux.HandleFunc("/v1/sessions", s.sessionsHandler)
 		mux.HandleFunc("/v1/watch", s.watchHandler)
+		mux.HandleFunc("/v1/terminal/attach", s.terminalAttachHandler)
+		mux.HandleFunc("/v1/terminal/detach", s.terminalDetachHandler)
+		mux.HandleFunc("/v1/terminal/write", s.terminalWriteHandler)
+		mux.HandleFunc("/v1/terminal/stream", s.terminalStreamHandler)
 		mux.HandleFunc("/v1/terminal/read", s.terminalReadHandler)
 		mux.HandleFunc("/v1/terminal/resize", s.terminalResizeHandler)
 		mux.HandleFunc("/v1/actions/attach", s.attachActionHandler)
@@ -240,7 +261,11 @@ func (s *Server) capabilitiesHandler(w http.ResponseWriter, r *http.Request) {
 			TerminalRead:             true,
 			TerminalResize:           true,
 			TerminalWriteViaAction:   true,
-			TerminalFrameProtocol:    "snapshot-delta-reset",
+			TerminalAttach:           true,
+			TerminalWrite:            true,
+			TerminalStream:           true,
+			TerminalProxyMode:        "daemon-proxy-pty-poc",
+			TerminalFrameProtocol:    "terminal-stream-v1",
 			TerminalFrameProtocolVer: "1",
 		},
 	}
@@ -734,6 +759,27 @@ type terminalResizeRequest struct {
 	PaneID string `json:"pane_id"`
 	Cols   int    `json:"cols"`
 	Rows   int    `json:"rows"`
+}
+
+type terminalAttachRequest struct {
+	Target          string `json:"target"`
+	PaneID          string `json:"pane_id"`
+	IfRuntime       string `json:"if_runtime"`
+	IfState         string `json:"if_state"`
+	IfUpdatedWithin string `json:"if_updated_within"`
+	ForceStale      bool   `json:"force_stale"`
+}
+
+type terminalDetachRequest struct {
+	SessionID string `json:"session_id"`
+}
+
+type terminalWriteRequest struct {
+	SessionID string `json:"session_id"`
+	Text      string `json:"text"`
+	Key       string `json:"key"`
+	Enter     bool   `json:"enter"`
+	Paste     bool   `json:"paste"`
 }
 
 type ingestEventRequest struct {
@@ -1480,6 +1526,381 @@ func (s *Server) killActionHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeJSON(w, http.StatusOK, toActionResponse(action))
+}
+
+func (s *Server) terminalAttachHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.methodNotAllowed(w, http.MethodPost)
+		return
+	}
+	var req terminalAttachRequest
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, model.ErrRefInvalid, "invalid request body")
+		return
+	}
+	req.Target = strings.TrimSpace(req.Target)
+	req.PaneID = strings.TrimSpace(req.PaneID)
+	req.IfRuntime = strings.TrimSpace(req.IfRuntime)
+	req.IfState = strings.TrimSpace(strings.ToLower(req.IfState))
+	req.IfUpdatedWithin = strings.TrimSpace(req.IfUpdatedWithin)
+	if req.Target == "" || req.PaneID == "" {
+		s.writeError(w, http.StatusBadRequest, model.ErrRefInvalid, "target and pane_id are required")
+		return
+	}
+
+	tg, err := s.resolveTargetAndPane(r.Context(), req.Target, req.PaneID)
+	if err != nil {
+		s.writeActionResolveError(w, err)
+		return
+	}
+	guards, guardErr := parseActionGuardOptions(req.IfRuntime, req.IfState, req.IfUpdatedWithin, req.ForceStale)
+	if guardErr != nil {
+		guardErr.write(s, w)
+		return
+	}
+	snapshot, preErr := s.prepareActionSnapshot(r.Context(), tg.TargetID, req.PaneID, guards)
+	if preErr != nil {
+		preErr.write(s, w)
+		return
+	}
+
+	sessionID := uuid.NewString()
+	now := time.Now().UTC()
+	session := terminalProxySession{
+		SessionID:  sessionID,
+		TargetName: req.Target,
+		TargetID:   tg.TargetID,
+		PaneID:     req.PaneID,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	if snapshot != nil {
+		session.RuntimeID = strings.TrimSpace(snapshot.RuntimeID)
+		session.StateVersion = snapshot.StateVersion
+	}
+
+	s.terminalMu.Lock()
+	s.terminalProxy[sessionID] = session
+	s.terminalMu.Unlock()
+
+	resp := api.TerminalAttachResponse{
+		SchemaVersion: "v1",
+		GeneratedAt:   now,
+		SessionID:     sessionID,
+		Target:        req.Target,
+		PaneID:        req.PaneID,
+		RuntimeID:     session.RuntimeID,
+		StateVersion:  session.StateVersion,
+		ResultCode:    "completed",
+	}
+	s.writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) terminalDetachHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.methodNotAllowed(w, http.MethodPost)
+		return
+	}
+	var req terminalDetachRequest
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, model.ErrRefInvalid, "invalid request body")
+		return
+	}
+	req.SessionID = strings.TrimSpace(req.SessionID)
+	if req.SessionID == "" {
+		s.writeError(w, http.StatusBadRequest, model.ErrRefInvalid, "session_id is required")
+		return
+	}
+
+	s.terminalMu.Lock()
+	_, ok := s.terminalProxy[req.SessionID]
+	if ok {
+		delete(s.terminalProxy, req.SessionID)
+	}
+	s.terminalMu.Unlock()
+	if !ok {
+		s.writeError(w, http.StatusNotFound, model.ErrRefNotFound, "terminal session not found")
+		return
+	}
+
+	resp := api.TerminalDetachResponse{
+		SchemaVersion: "v1",
+		GeneratedAt:   time.Now().UTC(),
+		SessionID:     req.SessionID,
+		ResultCode:    "completed",
+	}
+	s.writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) terminalWriteHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.methodNotAllowed(w, http.MethodPost)
+		return
+	}
+	var req terminalWriteRequest
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, model.ErrRefInvalid, "invalid request body")
+		return
+	}
+	req.SessionID = strings.TrimSpace(req.SessionID)
+	req.Key = strings.TrimSpace(req.Key)
+	if req.SessionID == "" {
+		s.writeError(w, http.StatusBadRequest, model.ErrRefInvalid, "session_id is required")
+		return
+	}
+	if req.Text == "" && req.Key == "" {
+		s.writeError(w, http.StatusBadRequest, model.ErrRefInvalid, "either text or key is required")
+		return
+	}
+	if req.Text != "" && req.Key != "" {
+		s.writeError(w, http.StatusBadRequest, model.ErrRefInvalid, "text and key are mutually exclusive")
+		return
+	}
+
+	s.terminalMu.Lock()
+	session, ok := s.terminalProxy[req.SessionID]
+	s.terminalMu.Unlock()
+	if !ok {
+		s.writeError(w, http.StatusNotFound, model.ErrRefNotFound, "terminal session not found")
+		return
+	}
+	if guardErr := s.validateTerminalProxySession(r.Context(), session); guardErr != nil {
+		s.dropTerminalProxySession(req.SessionID)
+		guardErr.write(s, w)
+		return
+	}
+
+	tg, err := s.resolveTargetAndPane(r.Context(), session.TargetName, session.PaneID)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			s.dropTerminalProxySession(req.SessionID)
+		}
+		s.writeActionResolveError(w, err)
+		return
+	}
+	cmd := []string{"send-keys", "-t", session.PaneID}
+	if req.Text != "" {
+		if req.Paste {
+			cmd = append(cmd, "-l")
+		}
+		cmd = append(cmd, req.Text)
+	} else {
+		cmd = append(cmd, req.Key)
+	}
+	if req.Enter {
+		cmd = append(cmd, "Enter")
+	}
+	resultCode := "completed"
+	errorCode := ""
+	if _, runErr := s.executor.Run(r.Context(), tg, target.BuildTmuxCommand(cmd...)); runErr != nil {
+		resultCode = "failed"
+		errorCode = model.ErrTargetUnreachable
+	}
+
+	if resultCode == "completed" {
+		s.terminalMu.Lock()
+		if current, exists := s.terminalProxy[req.SessionID]; exists {
+			current.UpdatedAt = time.Now().UTC()
+			s.terminalProxy[req.SessionID] = current
+		}
+		s.terminalMu.Unlock()
+	}
+
+	resp := api.TerminalWriteResponse{
+		SchemaVersion: "v1",
+		GeneratedAt:   time.Now().UTC(),
+		SessionID:     req.SessionID,
+		ResultCode:    resultCode,
+		ErrorCode:     errorCode,
+	}
+	s.writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) terminalStreamHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.methodNotAllowed(w, http.MethodGet)
+		return
+	}
+	sessionID := strings.TrimSpace(r.URL.Query().Get("session_id"))
+	if sessionID == "" {
+		s.writeError(w, http.StatusBadRequest, model.ErrRefInvalid, "session_id is required")
+		return
+	}
+	lines := defaultTerminalStreamLines
+	if rawLines := strings.TrimSpace(r.URL.Query().Get("lines")); rawLines != "" {
+		parsed, err := strconv.Atoi(rawLines)
+		if err != nil {
+			s.writeError(w, http.StatusBadRequest, model.ErrRefInvalid, "lines must be numeric")
+			return
+		}
+		lines = parsed
+	}
+	if lines <= 0 {
+		lines = defaultTerminalStreamLines
+	}
+	if lines > maxTerminalReadLines {
+		lines = maxTerminalReadLines
+	}
+	cursorStreamID, cursorSeq, _, err := parseCursor(r.URL.Query().Get("cursor"))
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, model.ErrCursorInvalid, "invalid cursor")
+		return
+	}
+
+	s.terminalMu.Lock()
+	session, ok := s.terminalProxy[sessionID]
+	s.terminalMu.Unlock()
+	if !ok {
+		s.writeError(w, http.StatusNotFound, model.ErrRefNotFound, "terminal session not found")
+		return
+	}
+
+	now := time.Now().UTC()
+	if !session.AttachedSent {
+		seq := s.sequence.Add(1)
+		cursor := fmt.Sprintf("%s:%d", s.streamID, seq)
+		session.AttachedSent = true
+		session.LastSeq = seq
+		session.UpdatedAt = now
+		if !s.updateTerminalProxySession(sessionID, session) {
+			s.writeError(w, http.StatusNotFound, model.ErrRefNotFound, "terminal session not found")
+			return
+		}
+		resp := api.TerminalStreamEnvelope{
+			SchemaVersion: "v1",
+			GeneratedAt:   now,
+			Frame: api.TerminalStreamFrame{
+				FrameType: "attached",
+				StreamID:  s.streamID,
+				Cursor:    cursor,
+				SessionID: sessionID,
+				Target:    session.TargetName,
+				PaneID:    session.PaneID,
+			},
+		}
+		s.writeJSON(w, http.StatusOK, resp)
+		return
+	}
+	if guardErr := s.validateTerminalProxySession(r.Context(), session); guardErr != nil {
+		s.dropTerminalProxySession(sessionID)
+		guardErr.write(s, w)
+		return
+	}
+
+	tg, resolveErr := s.resolveTargetAndPane(r.Context(), session.TargetName, session.PaneID)
+	if resolveErr != nil {
+		if errors.Is(resolveErr, db.ErrNotFound) {
+			s.dropTerminalProxySession(sessionID)
+		}
+		s.writeActionResolveError(w, resolveErr)
+		return
+	}
+	runResult, runErr := s.executor.Run(
+		r.Context(),
+		tg,
+		target.BuildTmuxCommand("capture-pane", "-t", session.PaneID, "-p", "-S", fmt.Sprintf("-%d", lines)),
+	)
+	if runErr != nil {
+		s.writeError(w, http.StatusBadGateway, model.ErrTargetUnreachable, "failed to read terminal stream output")
+		return
+	}
+
+	frameType := "output"
+	content := runResult.Output
+	resetReason := ""
+	if rawCursor := strings.TrimSpace(r.URL.Query().Get("cursor")); rawCursor != "" {
+		if cursorStreamID != s.streamID {
+			frameType = "reset"
+			resetReason = "cursor_mismatch"
+		} else if session.LastSeq != cursorSeq {
+			frameType = "reset"
+			resetReason = "cursor_discontinuity"
+		} else if delta, ok := deriveTerminalDelta(session.LastContent, runResult.Output); ok {
+			content = delta
+		} else {
+			frameType = "reset"
+			resetReason = "content_discontinuity"
+			content = runResult.Output
+		}
+	}
+
+	seq := s.sequence.Add(1)
+	cursor := fmt.Sprintf("%s:%d", s.streamID, seq)
+	session.LastSeq = seq
+	session.LastContent = clipTerminalStateContent(runResult.Output)
+	session.UpdatedAt = now
+	if !s.updateTerminalProxySession(sessionID, session) {
+		s.writeError(w, http.StatusNotFound, model.ErrRefNotFound, "terminal session not found")
+		return
+	}
+
+	resp := api.TerminalStreamEnvelope{
+		SchemaVersion: "v1",
+		GeneratedAt:   now,
+		Frame: api.TerminalStreamFrame{
+			FrameType:   frameType,
+			StreamID:    s.streamID,
+			Cursor:      cursor,
+			SessionID:   sessionID,
+			Target:      session.TargetName,
+			PaneID:      session.PaneID,
+			Content:     content,
+			ResetReason: resetReason,
+		},
+	}
+	s.writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) validateTerminalProxySession(ctx context.Context, session terminalProxySession) *apiError {
+	runtimeID := strings.TrimSpace(session.RuntimeID)
+	if runtimeID == "" {
+		return nil
+	}
+	state, err := s.store.GetState(ctx, session.TargetID, session.PaneID)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			return &apiError{
+				status:  http.StatusConflict,
+				code:    model.ErrRuntimeStale,
+				message: "runtime/state unavailable",
+			}
+		}
+		return &apiError{
+			status:  http.StatusInternalServerError,
+			code:    model.ErrPreconditionFailed,
+			message: "failed to resolve state",
+		}
+	}
+	if strings.TrimSpace(state.RuntimeID) != runtimeID {
+		return &apiError{
+			status:  http.StatusConflict,
+			code:    model.ErrRuntimeStale,
+			message: "runtime guard mismatch",
+		}
+	}
+	return nil
+}
+
+func (s *Server) updateTerminalProxySession(sessionID string, next terminalProxySession) bool {
+	s.terminalMu.Lock()
+	defer s.terminalMu.Unlock()
+	if _, ok := s.terminalProxy[sessionID]; !ok {
+		return false
+	}
+	s.terminalProxy[sessionID] = next
+	return true
+}
+
+func (s *Server) dropTerminalProxySession(sessionID string) {
+	s.terminalMu.Lock()
+	delete(s.terminalProxy, sessionID)
+	s.terminalMu.Unlock()
 }
 
 func (s *Server) terminalReadHandler(w http.ResponseWriter, r *http.Request) {

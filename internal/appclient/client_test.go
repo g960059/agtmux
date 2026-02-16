@@ -375,7 +375,56 @@ func TestTerminalAndCapabilitiesEndpoints(t *testing.T) {
 		if r.Method != http.MethodGet {
 			t.Fatalf("expected GET, got %s", r.Method)
 		}
-		_, _ = io.WriteString(w, `{"schema_version":"v1","generated_at":"2026-02-13T00:00:00Z","capabilities":{"embedded_terminal":true,"terminal_read":true,"terminal_resize":true,"terminal_write_via_action_send":true,"terminal_frame_protocol":"snapshot-delta-reset","terminal_frame_protocol_version":"1"}}`)
+		_, _ = io.WriteString(w, `{"schema_version":"v1","generated_at":"2026-02-13T00:00:00Z","capabilities":{"embedded_terminal":true,"terminal_read":true,"terminal_resize":true,"terminal_write_via_action_send":true,"terminal_attach":true,"terminal_write":true,"terminal_stream":true,"terminal_proxy_mode":"daemon-proxy-pty-poc","terminal_frame_protocol":"terminal-stream-v1","terminal_frame_protocol_version":"1"}}`)
+	})
+	mux.HandleFunc("/v1/terminal/attach", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("expected POST, got %s", r.Method)
+		}
+		var req TerminalAttachRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode terminal attach request: %v", err)
+		}
+		if req.Target != "t1" || req.PaneID != "%1" {
+			t.Fatalf("unexpected terminal attach request: %+v", req)
+		}
+		_, _ = io.WriteString(w, `{"schema_version":"v1","generated_at":"2026-02-13T00:00:00Z","session_id":"sess-1","target":"t1","pane_id":"%1","runtime_id":"rt-1","state_version":2,"result_code":"completed"}`)
+	})
+	mux.HandleFunc("/v1/terminal/write", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("expected POST, got %s", r.Method)
+		}
+		var req TerminalWriteRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode terminal write request: %v", err)
+		}
+		if req.SessionID != "sess-1" || req.Text != "hello" || req.Enter {
+			t.Fatalf("unexpected terminal write request: %+v", req)
+		}
+		_, _ = io.WriteString(w, `{"schema_version":"v1","generated_at":"2026-02-13T00:00:00Z","session_id":"sess-1","result_code":"completed"}`)
+	})
+	mux.HandleFunc("/v1/terminal/detach", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("expected POST, got %s", r.Method)
+		}
+		var req TerminalDetachRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode terminal detach request: %v", err)
+		}
+		if req.SessionID != "sess-1" {
+			t.Fatalf("unexpected terminal detach request: %+v", req)
+		}
+		_, _ = io.WriteString(w, `{"schema_version":"v1","generated_at":"2026-02-13T00:00:00Z","session_id":"sess-1","result_code":"completed"}`)
+	})
+	mux.HandleFunc("/v1/terminal/stream", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("expected GET, got %s", r.Method)
+		}
+		q := r.URL.Query()
+		if q.Get("session_id") != "sess-1" || q.Get("cursor") != "stream-1:1" || q.Get("lines") != "120" {
+			t.Fatalf("unexpected stream query: %v", q)
+		}
+		_, _ = io.WriteString(w, `{"schema_version":"v1","generated_at":"2026-02-13T00:00:00Z","frame":{"frame_type":"output","stream_id":"stream-1","cursor":"stream-1:2","session_id":"sess-1","target":"t1","pane_id":"%1","content":"hello"}}`)
 	})
 	mux.HandleFunc("/v1/terminal/read", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -411,8 +460,42 @@ func TestTerminalAndCapabilitiesEndpoints(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list capabilities: %v", err)
 	}
-	if !caps.Capabilities.EmbeddedTerminal || caps.Capabilities.TerminalFrameProtocol != "snapshot-delta-reset" {
+	if !caps.Capabilities.EmbeddedTerminal || caps.Capabilities.TerminalFrameProtocol != "terminal-stream-v1" || !caps.Capabilities.TerminalStream {
 		t.Fatalf("unexpected capabilities response: %+v", caps.Capabilities)
+	}
+
+	attachResp, err := client.TerminalAttach(context.Background(), TerminalAttachRequest{
+		Target: "t1",
+		PaneID: "%1",
+	})
+	if err != nil {
+		t.Fatalf("terminal attach: %v", err)
+	}
+	if attachResp.SessionID != "sess-1" || attachResp.ResultCode != "completed" {
+		t.Fatalf("unexpected terminal attach response: %+v", attachResp)
+	}
+
+	writeResp, err := client.TerminalWrite(context.Background(), TerminalWriteRequest{
+		SessionID: "sess-1",
+		Text:      "hello",
+	})
+	if err != nil {
+		t.Fatalf("terminal write: %v", err)
+	}
+	if writeResp.ResultCode != "completed" || writeResp.SessionID != "sess-1" {
+		t.Fatalf("unexpected terminal write response: %+v", writeResp)
+	}
+
+	streamResp, err := client.TerminalStream(context.Background(), TerminalStreamRequest{
+		SessionID: "sess-1",
+		Cursor:    "stream-1:1",
+		Lines:     120,
+	})
+	if err != nil {
+		t.Fatalf("terminal stream: %v", err)
+	}
+	if streamResp.Frame.FrameType != "output" || streamResp.Frame.Cursor != "stream-1:2" {
+		t.Fatalf("unexpected terminal stream response: %+v", streamResp.Frame)
 	}
 
 	readResp, err := client.TerminalRead(context.Background(), TerminalReadRequest{
@@ -439,6 +522,16 @@ func TestTerminalAndCapabilitiesEndpoints(t *testing.T) {
 	}
 	if resizeResp.ResultCode != "completed" || resizeResp.Cols != 120 || resizeResp.Rows != 40 {
 		t.Fatalf("unexpected terminal resize response: %+v", resizeResp)
+	}
+
+	detachResp, err := client.TerminalDetach(context.Background(), TerminalDetachRequest{
+		SessionID: "sess-1",
+	})
+	if err != nil {
+		t.Fatalf("terminal detach: %v", err)
+	}
+	if detachResp.ResultCode != "completed" || detachResp.SessionID != "sess-1" {
+		t.Fatalf("unexpected terminal detach response: %+v", detachResp)
 	}
 }
 

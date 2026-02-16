@@ -188,6 +188,10 @@ type CapabilityFlags struct {
 	TerminalRead             bool   `json:"terminal_read"`
 	TerminalResize           bool   `json:"terminal_resize"`
 	TerminalWriteViaAction   bool   `json:"terminal_write_via_action_send"`
+	TerminalAttach           bool   `json:"terminal_attach,omitempty"`
+	TerminalWrite            bool   `json:"terminal_write,omitempty"`
+	TerminalStream           bool   `json:"terminal_stream,omitempty"`
+	TerminalProxyMode        string `json:"terminal_proxy_mode,omitempty"`
 	TerminalFrameProtocol    string `json:"terminal_frame_protocol"`
 	TerminalFrameProtocolVer string `json:"terminal_frame_protocol_version,omitempty"`
 }
@@ -223,4 +227,49 @@ type TerminalResizeResponse struct {
 	Cols          int       `json:"cols"`
 	Rows          int       `json:"rows"`
 	ResultCode    string    `json:"result_code"`
+}
+
+type TerminalAttachResponse struct {
+	SchemaVersion string    `json:"schema_version"`
+	GeneratedAt   time.Time `json:"generated_at"`
+	SessionID     string    `json:"session_id"`
+	Target        string    `json:"target"`
+	PaneID        string    `json:"pane_id"`
+	RuntimeID     string    `json:"runtime_id,omitempty"`
+	StateVersion  int64     `json:"state_version,omitempty"`
+	ResultCode    string    `json:"result_code"`
+}
+
+type TerminalDetachResponse struct {
+	SchemaVersion string    `json:"schema_version"`
+	GeneratedAt   time.Time `json:"generated_at"`
+	SessionID     string    `json:"session_id"`
+	ResultCode    string    `json:"result_code"`
+}
+
+type TerminalWriteResponse struct {
+	SchemaVersion string    `json:"schema_version"`
+	GeneratedAt   time.Time `json:"generated_at"`
+	SessionID     string    `json:"session_id"`
+	ResultCode    string    `json:"result_code"`
+	ErrorCode     string    `json:"error_code,omitempty"`
+}
+
+type TerminalStreamFrame struct {
+	FrameType   string `json:"frame_type"`
+	StreamID    string `json:"stream_id"`
+	Cursor      string `json:"cursor"`
+	SessionID   string `json:"session_id"`
+	Target      string `json:"target"`
+	PaneID      string `json:"pane_id"`
+	Content     string `json:"content,omitempty"`
+	ResetReason string `json:"reset_reason,omitempty"`
+	ErrorCode   string `json:"error_code,omitempty"`
+	Message     string `json:"message,omitempty"`
+}
+
+type TerminalStreamEnvelope struct {
+	SchemaVersion string              `json:"schema_version"`
+	GeneratedAt   time.Time           `json:"generated_at"`
+	Frame         TerminalStreamFrame `json:"frame"`
 }

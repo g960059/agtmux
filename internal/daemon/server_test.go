@@ -3160,8 +3160,398 @@ func TestCapabilitiesEndpoint(t *testing.T) {
 	if !resp.Capabilities.EmbeddedTerminal || !resp.Capabilities.TerminalRead || !resp.Capabilities.TerminalResize {
 		t.Fatalf("unexpected capabilities payload: %+v", resp.Capabilities)
 	}
-	if resp.Capabilities.TerminalFrameProtocol != "snapshot-delta-reset" {
+	if !resp.Capabilities.TerminalAttach || !resp.Capabilities.TerminalWrite || !resp.Capabilities.TerminalStream {
+		t.Fatalf("expected interactive terminal capabilities, got %+v", resp.Capabilities)
+	}
+	if resp.Capabilities.TerminalFrameProtocol != "terminal-stream-v1" {
 		t.Fatalf("unexpected terminal frame protocol: %+v", resp.Capabilities)
+	}
+}
+
+func TestTerminalAttachWriteStreamDetachLifecycle(t *testing.T) {
+	runner := &scriptedRunner{
+		outputs: [][]byte{
+			[]byte("prompt> "),
+			[]byte("prompt> a"),
+		},
+	}
+	srv, store := newAPITestServer(t, runner)
+	seedTarget(t, store, "t1", "t1")
+	now := time.Now().UTC()
+	pid := int64(1234)
+	seedPaneRuntimeState(t, store,
+		model.Pane{
+			TargetID:    "t1",
+			PaneID:      "%1",
+			SessionName: "s1",
+			WindowID:    "@1",
+			WindowName:  "w1",
+			CurrentCmd:  "codex",
+			UpdatedAt:   now,
+		},
+		model.Runtime{
+			RuntimeID:        "rt-1",
+			TargetID:         "t1",
+			PaneID:           "%1",
+			TmuxServerBootID: "boot-1",
+			PaneEpoch:        1,
+			AgentType:        "codex",
+			PID:              &pid,
+			StartedAt:        now,
+		},
+		model.StateRow{
+			TargetID:     "t1",
+			PaneID:       "%1",
+			RuntimeID:    "rt-1",
+			State:        model.StateIdle,
+			ReasonCode:   "idle",
+			Confidence:   "high",
+			StateVersion: 2,
+			LastSeenAt:   now,
+			UpdatedAt:    now,
+		},
+	)
+
+	attachRec := doJSONRequest(t, srv.httpSrv.Handler, http.MethodPost, "/v1/terminal/attach", map[string]any{
+		"target":  "t1",
+		"pane_id": "%1",
+	})
+	if attachRec.Code != http.StatusOK {
+		t.Fatalf("attach expected 200, got %d body=%s", attachRec.Code, attachRec.Body.String())
+	}
+	attachResp := decodeJSON[api.TerminalAttachResponse](t, attachRec)
+	if attachResp.SessionID == "" || attachResp.ResultCode != "completed" || attachResp.RuntimeID != "rt-1" {
+		t.Fatalf("unexpected attach response: %+v", attachResp)
+	}
+
+	firstStream := doJSONRequest(t, srv.httpSrv.Handler, http.MethodGet, "/v1/terminal/stream?session_id="+url.QueryEscape(attachResp.SessionID), nil)
+	if firstStream.Code != http.StatusOK {
+		t.Fatalf("stream expected 200, got %d body=%s", firstStream.Code, firstStream.Body.String())
+	}
+	firstFrame := decodeJSON[api.TerminalStreamEnvelope](t, firstStream)
+	if firstFrame.Frame.FrameType != "attached" {
+		t.Fatalf("expected attached frame, got %+v", firstFrame.Frame)
+	}
+
+	secondStream := doJSONRequest(
+		t,
+		srv.httpSrv.Handler,
+		http.MethodGet,
+		"/v1/terminal/stream?session_id="+url.QueryEscape(attachResp.SessionID)+"&cursor="+url.QueryEscape(firstFrame.Frame.Cursor)+"&lines=120",
+		nil,
+	)
+	if secondStream.Code != http.StatusOK {
+		t.Fatalf("stream expected 200, got %d body=%s", secondStream.Code, secondStream.Body.String())
+	}
+	secondFrame := decodeJSON[api.TerminalStreamEnvelope](t, secondStream)
+	if secondFrame.Frame.FrameType != "output" || !strings.Contains(secondFrame.Frame.Content, "prompt>") {
+		t.Fatalf("expected output frame with pane content, got %+v", secondFrame.Frame)
+	}
+
+	writeRec := doJSONRequest(t, srv.httpSrv.Handler, http.MethodPost, "/v1/terminal/write", map[string]any{
+		"session_id": attachResp.SessionID,
+		"text":       "a",
+	})
+	if writeRec.Code != http.StatusOK {
+		t.Fatalf("write expected 200, got %d body=%s", writeRec.Code, writeRec.Body.String())
+	}
+	writeResp := decodeJSON[api.TerminalWriteResponse](t, writeRec)
+	if writeResp.ResultCode != "completed" {
+		t.Fatalf("unexpected write response: %+v", writeResp)
+	}
+	lastCall := runner.calls[len(runner.calls)-1]
+	if lastCall.name != "tmux" || strings.Join(lastCall.args, " ") != "send-keys -t %1 a" {
+		t.Fatalf("expected send-keys call, got %+v", lastCall)
+	}
+
+	thirdStream := doJSONRequest(
+		t,
+		srv.httpSrv.Handler,
+		http.MethodGet,
+		"/v1/terminal/stream?session_id="+url.QueryEscape(attachResp.SessionID)+"&cursor="+url.QueryEscape(secondFrame.Frame.Cursor)+"&lines=120",
+		nil,
+	)
+	if thirdStream.Code != http.StatusOK {
+		t.Fatalf("stream expected 200, got %d body=%s", thirdStream.Code, thirdStream.Body.String())
+	}
+	thirdFrame := decodeJSON[api.TerminalStreamEnvelope](t, thirdStream)
+	if thirdFrame.Frame.FrameType != "output" || thirdFrame.Frame.Content != "a" {
+		t.Fatalf("expected output delta frame, got %+v", thirdFrame.Frame)
+	}
+
+	detachRec := doJSONRequest(t, srv.httpSrv.Handler, http.MethodPost, "/v1/terminal/detach", map[string]any{
+		"session_id": attachResp.SessionID,
+	})
+	if detachRec.Code != http.StatusOK {
+		t.Fatalf("detach expected 200, got %d body=%s", detachRec.Code, detachRec.Body.String())
+	}
+	detachResp := decodeJSON[api.TerminalDetachResponse](t, detachRec)
+	if detachResp.ResultCode != "completed" {
+		t.Fatalf("unexpected detach response: %+v", detachResp)
+	}
+
+	missingStream := doJSONRequest(t, srv.httpSrv.Handler, http.MethodGet, "/v1/terminal/stream?session_id="+url.QueryEscape(attachResp.SessionID), nil)
+	if missingStream.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 after detach, got %d body=%s", missingStream.Code, missingStream.Body.String())
+	}
+}
+
+func TestTerminalWriteSupportsKeyMode(t *testing.T) {
+	runner := &stubRunner{}
+	srv, store := newAPITestServer(t, runner)
+	seedTarget(t, store, "t1", "t1")
+	now := time.Now().UTC()
+	pid := int64(2222)
+	seedPaneRuntimeState(t, store,
+		model.Pane{
+			TargetID:    "t1",
+			PaneID:      "%1",
+			SessionName: "s1",
+			WindowID:    "@1",
+			WindowName:  "w1",
+			CurrentCmd:  "codex",
+			UpdatedAt:   now,
+		},
+		model.Runtime{
+			RuntimeID:        "rt-1",
+			TargetID:         "t1",
+			PaneID:           "%1",
+			TmuxServerBootID: "boot-1",
+			PaneEpoch:        1,
+			AgentType:        "codex",
+			PID:              &pid,
+			StartedAt:        now,
+		},
+		model.StateRow{
+			TargetID:     "t1",
+			PaneID:       "%1",
+			RuntimeID:    "rt-1",
+			State:        model.StateIdle,
+			ReasonCode:   "idle",
+			Confidence:   "high",
+			StateVersion: 1,
+			LastSeenAt:   now,
+			UpdatedAt:    now,
+		},
+	)
+
+	attachRec := doJSONRequest(t, srv.httpSrv.Handler, http.MethodPost, "/v1/terminal/attach", map[string]any{
+		"target":  "t1",
+		"pane_id": "%1",
+	})
+	if attachRec.Code != http.StatusOK {
+		t.Fatalf("attach expected 200, got %d body=%s", attachRec.Code, attachRec.Body.String())
+	}
+	attachResp := decodeJSON[api.TerminalAttachResponse](t, attachRec)
+
+	writeRec := doJSONRequest(t, srv.httpSrv.Handler, http.MethodPost, "/v1/terminal/write", map[string]any{
+		"session_id": attachResp.SessionID,
+		"key":        "C-c",
+	})
+	if writeRec.Code != http.StatusOK {
+		t.Fatalf("write expected 200, got %d body=%s", writeRec.Code, writeRec.Body.String())
+	}
+	lastCall := runner.calls[len(runner.calls)-1]
+	if lastCall.name != "tmux" || strings.Join(lastCall.args, " ") != "send-keys -t %1 C-c" {
+		t.Fatalf("expected key send-keys call, got %+v", lastCall)
+	}
+}
+
+func TestTerminalWriteRejectsStaleRuntimeGuard(t *testing.T) {
+	runner := &stubRunner{}
+	srv, store := newAPITestServer(t, runner)
+	seedTarget(t, store, "t1", "t1")
+	now := time.Now().UTC()
+	pid := int64(3333)
+	seedPaneRuntimeState(t, store,
+		model.Pane{
+			TargetID:    "t1",
+			PaneID:      "%1",
+			SessionName: "s1",
+			WindowID:    "@1",
+			WindowName:  "w1",
+			CurrentCmd:  "codex",
+			UpdatedAt:   now,
+		},
+		model.Runtime{
+			RuntimeID:        "rt-1",
+			TargetID:         "t1",
+			PaneID:           "%1",
+			TmuxServerBootID: "boot-1",
+			PaneEpoch:        1,
+			AgentType:        "codex",
+			PID:              &pid,
+			StartedAt:        now,
+		},
+		model.StateRow{
+			TargetID:     "t1",
+			PaneID:       "%1",
+			RuntimeID:    "rt-1",
+			State:        model.StateIdle,
+			ReasonCode:   "idle",
+			Confidence:   "high",
+			StateVersion: 1,
+			LastSeenAt:   now,
+			UpdatedAt:    now,
+		},
+	)
+
+	attachRec := doJSONRequest(t, srv.httpSrv.Handler, http.MethodPost, "/v1/terminal/attach", map[string]any{
+		"target":  "t1",
+		"pane_id": "%1",
+	})
+	if attachRec.Code != http.StatusOK {
+		t.Fatalf("attach expected 200, got %d body=%s", attachRec.Code, attachRec.Body.String())
+	}
+	attachResp := decodeJSON[api.TerminalAttachResponse](t, attachRec)
+	if attachResp.SessionID == "" {
+		t.Fatalf("missing session id in attach response: %+v", attachResp)
+	}
+
+	if err := store.EndRuntime(context.Background(), "rt-1", now.Add(2*time.Second)); err != nil {
+		t.Fatalf("end old runtime: %v", err)
+	}
+	if err := store.InsertRuntime(context.Background(), model.Runtime{
+		RuntimeID:        "rt-2",
+		TargetID:         "t1",
+		PaneID:           "%1",
+		TmuxServerBootID: "boot-2",
+		PaneEpoch:        2,
+		AgentType:        "codex",
+		StartedAt:        now.Add(3 * time.Second),
+	}); err != nil {
+		t.Fatalf("insert new runtime: %v", err)
+	}
+	if err := store.UpsertState(context.Background(), model.StateRow{
+		TargetID:     "t1",
+		PaneID:       "%1",
+		RuntimeID:    "rt-2",
+		State:        model.StateRunning,
+		ReasonCode:   "running",
+		Confidence:   "high",
+		StateVersion: 2,
+		LastSeenAt:   now.Add(5 * time.Second),
+		UpdatedAt:    now.Add(5 * time.Second),
+	}); err != nil {
+		t.Fatalf("upsert stale state: %v", err)
+	}
+
+	writeRec := doJSONRequest(t, srv.httpSrv.Handler, http.MethodPost, "/v1/terminal/write", map[string]any{
+		"session_id": attachResp.SessionID,
+		"text":       "hello",
+	})
+	if writeRec.Code != http.StatusConflict {
+		t.Fatalf("expected 409 on stale write, got %d body=%s", writeRec.Code, writeRec.Body.String())
+	}
+	errResp := decodeJSON[api.ErrorResponse](t, writeRec)
+	if errResp.Error.Code != model.ErrRuntimeStale {
+		t.Fatalf("expected runtime stale error, got %+v", errResp.Error)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("expected no tmux write call on stale guard failure, got %+v", runner.calls)
+	}
+
+	retryRec := doJSONRequest(t, srv.httpSrv.Handler, http.MethodPost, "/v1/terminal/write", map[string]any{
+		"session_id": attachResp.SessionID,
+		"text":       "hello",
+	})
+	if retryRec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 after stale session drop, got %d body=%s", retryRec.Code, retryRec.Body.String())
+	}
+}
+
+func TestTerminalStreamDoesNotResurrectDetachedSession(t *testing.T) {
+	runner := newBlockingFirstCallRunner()
+	srv, store := newAPITestServer(t, runner)
+	seedTarget(t, store, "t1", "t1")
+	now := time.Now().UTC()
+	pid := int64(4444)
+	seedPaneRuntimeState(t, store,
+		model.Pane{
+			TargetID:    "t1",
+			PaneID:      "%1",
+			SessionName: "s1",
+			WindowID:    "@1",
+			WindowName:  "w1",
+			CurrentCmd:  "codex",
+			UpdatedAt:   now,
+		},
+		model.Runtime{
+			RuntimeID:        "rt-1",
+			TargetID:         "t1",
+			PaneID:           "%1",
+			TmuxServerBootID: "boot-1",
+			PaneEpoch:        1,
+			AgentType:        "codex",
+			PID:              &pid,
+			StartedAt:        now,
+		},
+		model.StateRow{
+			TargetID:     "t1",
+			PaneID:       "%1",
+			RuntimeID:    "rt-1",
+			State:        model.StateIdle,
+			ReasonCode:   "idle",
+			Confidence:   "high",
+			StateVersion: 1,
+			LastSeenAt:   now,
+			UpdatedAt:    now,
+		},
+	)
+
+	attachRec := doJSONRequest(t, srv.httpSrv.Handler, http.MethodPost, "/v1/terminal/attach", map[string]any{
+		"target":  "t1",
+		"pane_id": "%1",
+	})
+	if attachRec.Code != http.StatusOK {
+		t.Fatalf("attach expected 200, got %d body=%s", attachRec.Code, attachRec.Body.String())
+	}
+	attachResp := decodeJSON[api.TerminalAttachResponse](t, attachRec)
+
+	firstStream := doJSONRequest(t, srv.httpSrv.Handler, http.MethodGet, "/v1/terminal/stream?session_id="+url.QueryEscape(attachResp.SessionID), nil)
+	if firstStream.Code != http.StatusOK {
+		t.Fatalf("stream expected 200, got %d body=%s", firstStream.Code, firstStream.Body.String())
+	}
+	firstFrame := decodeJSON[api.TerminalStreamEnvelope](t, firstStream)
+
+	secondDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		rec := doJSONRequest(
+			t,
+			srv.httpSrv.Handler,
+			http.MethodGet,
+			"/v1/terminal/stream?session_id="+url.QueryEscape(attachResp.SessionID)+"&cursor="+url.QueryEscape(firstFrame.Frame.Cursor)+"&lines=120",
+			nil,
+		)
+		secondDone <- rec
+	}()
+
+	select {
+	case <-runner.firstCallStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timeout waiting for blocking runner")
+	}
+
+	detachRec := doJSONRequest(t, srv.httpSrv.Handler, http.MethodPost, "/v1/terminal/detach", map[string]any{
+		"session_id": attachResp.SessionID,
+	})
+	if detachRec.Code != http.StatusOK {
+		t.Fatalf("detach expected 200, got %d body=%s", detachRec.Code, detachRec.Body.String())
+	}
+	close(runner.releaseFirstCall)
+
+	select {
+	case rec := <-secondDone:
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("expected in-flight stream to fail with 404 after detach, got %d body=%s", rec.Code, rec.Body.String())
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timeout waiting for stream completion")
+	}
+
+	missingStream := doJSONRequest(t, srv.httpSrv.Handler, http.MethodGet, "/v1/terminal/stream?session_id="+url.QueryEscape(attachResp.SessionID), nil)
+	if missingStream.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 after detach, got %d body=%s", missingStream.Code, missingStream.Body.String())
 	}
 }
 
