@@ -72,3 +72,32 @@ A task is Done only when:
 - Manual+CI tests include reproducible execution evidence in PR.
 - Any API/contract changes are reflected in spec and test catalog.
 - Operational logging/error surfaces are documented when behavior changed.
+
+## 4. Phase 9 Backlog (Interactive TTY)
+
+Source Strategy:
+- `docs/implementation-records/phase9-main-interactive-tty-strategy-2026-02-16.md`
+- `docs/implementation-records/phase9-task-decomposition-and-tdd-2026-02-16.md`
+
+| ID | Phase | Priority | Task | FR/NFR | Depends On | Acceptance Criteria | Test IDs | Status |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| TASK-901 | 9 | P0 | Define terminal streaming API contract (`attach/detach/write/resize/stream`) | FR-1, FR-2, FR-9 | - | API draft reviewed and approved | TC-901 | Todo |
+| TASK-902 | 9 | P0 | Build daemon proxy PTY PoC for local target | FR-1, FR-2 | TASK-901 | key-by-key input and output stream proven | TC-902, TC-903 | Todo |
+| TASK-903 | 9 | P0 | Evaluate terminal emulator integration for macapp (SwiftTerm-first) | FR-2, FR-4 | TASK-902 | key/IME/resize feasibility documented | TC-902, TC-908 | Todo |
+| TASK-904 | 9 | P0 | Measure Step0 SLO feasibility (`input/switch` latency) | NFR-1, NFR-2 | TASK-902 | p95 feasibility report produced | TC-916 | Todo |
+| TASK-911 | 9 | P0 | Implement daemon `TerminalSessionManager` with lifecycle and GC | FR-7, NFR-3 | TASK-904 | attach/detach lifecycle + TTL/GC pass | TC-902, TC-915 | Todo |
+| TASK-912 | 9 | P0 | Implement `/v1/terminal/attach|detach|write|resize` endpoints | FR-1, FR-2, FR-9 | TASK-911 | endpoints pass contract and stale guard checks | TC-902, TC-903, TC-907 | Todo |
+| TASK-913 | 9 | P0 | Implement `/v1/terminal/stream` long-lived endpoint | FR-2, FR-7 | TASK-912 | streaming frames are contract-compatible | TC-902, TC-905 | Todo |
+| TASK-921 | 9 | P0 | Implement persistent UDS terminal client in macapp | FR-2, NFR-1 | TASK-913 | no per-key CLI process launch in primary path | TC-902 | Todo |
+| TASK-922 | 9 | P0 | Implement `TerminalSessionController` (interactive + snapshot backend) | FR-7, FR-8 | TASK-921 | attach/retry/degrade flows pass tests | TC-904, TC-905 | Todo |
+| TASK-923 | 9 | P1 | Integrate stale runtime/state guard in all write paths | FR-9 | TASK-922 | stale writes rejected with recovery path | TC-907 | Todo |
+| TASK-924 | 9 | P0 | Implement resize conflict policy for multi-client tmux sessions | FR-6 | TASK-923 | resize behavior matches documented policy under concurrent clients | TC-909 | Todo |
+| TASK-931 | 9 | P0 | Add interactive terminal view with feature-flagged rollout | FR-1, FR-4 | TASK-924 | interactive/snapshot UI switch works | TC-904, TC-908 | Todo |
+| TASK-932 | 9 | P1 | Add always-available external terminal fallback action | FR-8 | TASK-931 | fallback command is reachable and works | TC-906, TC-917 | Todo |
+| TASK-941 | 9 | P0 | Implement terminal recovery and automatic snapshot degrade | FR-7, FR-8 | TASK-932 | consecutive attach failures degrade safely | TC-905 | Todo |
+| TASK-942 | 9 | P1 | Implement interactive kill switch and rollback path | FR-8 | TASK-941 | one switch reverts to snapshot mode | TC-914 | Todo |
+| TASK-951 | 9 | P0 | Add daemon contract/integration tests for terminal APIs | FR-2, FR-9 | TASK-942 | Go contract suite stable in CI | TC-902, TC-903, TC-907, TC-915 | Todo |
+| TASK-952 | 9 | P0 | Add macapp unit/UI tests for switching/recovery/fallback | FR-5, FR-7, FR-8 | TASK-951 | Swift tests cover race and degrade paths | TC-904, TC-905, TC-917 | Todo |
+| TASK-953 | 9 | P1 | Add performance/leak tests and dashboards | NFR-1, NFR-2, NFR-3 | TASK-952 | latency/leak gates are measurable and enforced | TC-910, TC-911, TC-912 | Todo |
+| TASK-961 | 9 | P0 | Rollout local target as default interactive mode | Goal | TASK-953 | local satisfies AC set | TC-911, TC-912 | Todo |
+| TASK-962 | 9 | P1 | Rollout ssh targets in staged mode | Goal | TASK-961 | ssh parity and fallback confirmed | TC-913 | Todo |

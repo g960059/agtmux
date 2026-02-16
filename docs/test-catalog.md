@@ -131,3 +131,32 @@ Every PR affecting runtime/API/action behavior must include:
 - Referenced task IDs from `docs/tasks.md`.
 - Referenced test IDs from this catalog.
 - Gate impact statement (`which phase gate is affected`).
+
+## 9. Phase 9 Test Matrix (Interactive TTY)
+
+| Test ID | Layer | Contract | Source Requirement | Scenario | Pass Criteria | Automation |
+| --- | --- | --- | --- | --- | --- | --- |
+| TC-901 | Contract | Terminal streaming API draft completeness | FR-1, FR-2, FR-9 | Validate request/response/frame schema for `attach/detach/write/resize/stream` | required fields, error codes, lifecycle states defined | CI |
+| TC-902 | Integration | Attach + stream lifecycle | FR-1, FR-2, FR-7 | attach -> output stream -> detach | lifecycle frames emitted in order without leak | CI |
+| TC-903 | Integration | key-by-key write round-trip | FR-2 | send control/printable keys through write endpoint | tmux pane output reflects intended keys | CI |
+| TC-904 | E2E | Pane switching race safety | FR-5 | switch panes 100 times at 50ms interval | selected pane and rendered pane never diverge | CI |
+| TC-905 | Integration | Recovery and degrade policy | FR-7, FR-8 | force attach failures repeatedly | exponential retry then snapshot degrade | CI |
+| TC-906 | E2E | External terminal fallback action | FR-8 | invoke fallback from app while interactive fails | external terminal attach command launches correctly | Manual+CI |
+| TC-907 | Contract | Write stale guard enforcement | FR-9 | write with stale runtime/state refs | `E_RUNTIME_STALE` or equivalent rejection | CI |
+| TC-908 | E2E | IME and modifier key behavior | FR-2, FR-4 | Japanese IME compose/commit + modifiers | no key loss/corruption during interactive session | Manual+CI |
+| TC-909 | Integration | Resize conflict behavior | FR-6 | resize with concurrent external clients | behavior matches documented tmux policy | CI |
+| TC-910 | Resilience | Long-run terminal session leak check | NFR-3 | 8-hour attach/detach workload | memory/fd growth stays within threshold | Nightly |
+| TC-911 | Performance | Input latency SLO | NFR-1 | measure key event -> echo latency (local) | p95 <= 150ms | Nightly |
+| TC-912 | Performance | Pane switch latency SLO | NFR-2 | measure selection -> first correct frame (local) | p95 <= 500ms | Nightly |
+| TC-913 | E2E | SSH target parity and fallback | Goal | run interactive on ssh target with degradation path | parity or documented fallback without breakage | Manual+CI |
+| TC-914 | Integration | Interactive kill switch rollback | FR-8 | toggle interactive off during runtime | app returns to snapshot mode safely | CI |
+| TC-915 | Integration | Terminal state/session GC | NFR-3 | churn sessions and stale stream states | stale state entries removed by TTL/GC | CI |
+| TC-916 | Performance | Step0 SLO feasibility smoke | NFR-1, NFR-2 | short-run local PoC latency check | feasibility threshold reported in CI artifact | CI |
+| TC-917 | Unit | External fallback command resolution | FR-8 | build and validate fallback command parameters | command target/pane binding is deterministic and safe | CI |
+
+### Phase 9 Gate Bundle
+
+| Gate | Required Tests |
+| --- | --- |
+| Phase 9 Step0 gate | TC-901, TC-902, TC-903, TC-916 |
+| Phase 9 close | Phase 9 Step0 gate + TC-905, TC-906, TC-907, TC-908, TC-909, TC-910, TC-913, TC-914, TC-915 |
