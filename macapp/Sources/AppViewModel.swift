@@ -131,8 +131,19 @@ final class AppViewModel: ObservableObject {
     @Published var selectedPane: PaneItem? {
         didSet {
             if oldValue?.id != selectedPane?.id {
+                terminalStreamTask?.cancel()
+                if let oldPaneID = oldValue?.id {
+                    if let oldSessionID = terminalProxySessionByPaneID.removeValue(forKey: oldPaneID) {
+                        terminalCursorByPaneID.removeValue(forKey: oldPaneID)
+                        Task { [weak self] in
+                            await self?.detachTerminalProxySession(sessionID: oldSessionID)
+                        }
+                    } else {
+                        terminalCursorByPaneID.removeValue(forKey: oldPaneID)
+                    }
+                }
                 if let paneID = selectedPane?.id {
-                    // Force a fresh snapshot on pane switch to avoid stale-delta cursor reuse.
+                    // Force a fresh snapshot/stream sync on pane switch.
                     terminalCursorByPaneID.removeValue(forKey: paneID)
                 }
                 outputPreview = ""
@@ -207,7 +218,9 @@ final class AppViewModel: ObservableObject {
     private var terminalCapabilities: CapabilityFlags?
     private var terminalCapabilitiesFetchedAt: Date?
     private var terminalCursorByPaneID: [String: String] = [:]
+    private var terminalProxySessionByPaneID: [String: String] = [:]
     private var terminalStreamTask: Task<Void, Never>?
+    private var terminalStreamGeneration: Int = 0
     private var didBootstrap = false
     private var recoveryInFlight = false
     private var lastRecoveryAttemptAt: Date?
@@ -283,19 +296,58 @@ final class AppViewModel: ObservableObject {
 
         Task {
             do {
-                let requestRef = "macapp-send-\(UUID().uuidString)"
-                let resp = try await client.sendText(
-                    target: pane.identity.target,
-                    paneID: pane.identity.paneID,
-                    text: sendText,
-                    requestRef: requestRef,
-                    enter: sendEnter,
-                    paste: sendPaste
-                )
-                infoMessage = "send: \(resp.resultCode) (\(resp.actionID))"
+                guard selectedPane?.id == pane.id else {
+                    return
+                }
+                if await shouldUseTerminalProxy() {
+                    let sessionID = try await ensureTerminalProxySession(for: pane)
+                    guard selectedPane?.id == pane.id else {
+                        return
+                    }
+                    let resp = try await client.terminalWrite(
+                        sessionID: sessionID,
+                        text: sendText,
+                        key: nil,
+                        enter: sendEnter,
+                        paste: sendPaste
+                    )
+                    if resp.resultCode != "completed" {
+                        let reason = resp.errorCode ?? "unknown"
+                        errorMessage = "terminal-write failed: \(reason)"
+                        return
+                    }
+                    let streamResp = try await client.terminalStream(
+                        sessionID: sessionID,
+                        cursor: terminalCursorByPaneID[pane.id],
+                        lines: 200
+                    )
+                    terminalCursorByPaneID[pane.id] = streamResp.frame.cursor
+                    applyTerminalStreamFrame(streamResp.frame, paneID: pane.id)
+                    if streamResp.frame.frameType == "attached" {
+                        let followResp = try await client.terminalStream(
+                            sessionID: sessionID,
+                            cursor: streamResp.frame.cursor,
+                            lines: 200
+                        )
+                        terminalCursorByPaneID[pane.id] = followResp.frame.cursor
+                        applyTerminalStreamFrame(followResp.frame, paneID: pane.id)
+                    }
+                    infoMessage = "terminal-write: \(resp.resultCode)"
+                } else {
+                    let requestRef = "macapp-send-\(UUID().uuidString)"
+                    let resp = try await client.sendText(
+                        target: pane.identity.target,
+                        paneID: pane.identity.paneID,
+                        text: sendText,
+                        requestRef: requestRef,
+                        enter: sendEnter,
+                        paste: sendPaste
+                    )
+                    infoMessage = "send: \(resp.resultCode) (\(resp.actionID))"
+                    await refresh()
+                }
                 errorMessage = ""
                 sendText = ""
-                await refresh()
             } catch {
                 errorMessage = error.localizedDescription
             }
@@ -309,7 +361,32 @@ final class AppViewModel: ObservableObject {
         }
         Task {
             do {
-                if await shouldUseTerminalRead() {
+                guard selectedPane?.id == pane.id else {
+                    return
+                }
+                if await shouldUseTerminalProxy() {
+                    if forceSnapshot {
+                        terminalCursorByPaneID.removeValue(forKey: pane.id)
+                    }
+                    let cursor = forceSnapshot ? nil : terminalCursorByPaneID[pane.id]
+                    let sessionID = try await ensureTerminalProxySession(for: pane)
+                    guard selectedPane?.id == pane.id else {
+                        return
+                    }
+                    let resp = try await client.terminalStream(sessionID: sessionID, cursor: cursor, lines: lines)
+                    terminalCursorByPaneID[pane.id] = resp.frame.cursor
+                    applyTerminalStreamFrame(resp.frame, paneID: pane.id)
+                    if resp.frame.frameType == "attached" {
+                        let followResp = try await client.terminalStream(
+                            sessionID: sessionID,
+                            cursor: resp.frame.cursor,
+                            lines: lines
+                        )
+                        terminalCursorByPaneID[pane.id] = followResp.frame.cursor
+                        applyTerminalStreamFrame(followResp.frame, paneID: pane.id)
+                    }
+                    infoMessage = "terminal-\(resp.frame.frameType): \(resp.frame.cursor)"
+                } else if await shouldUseTerminalRead() {
                     if forceSnapshot {
                         terminalCursorByPaneID.removeValue(forKey: pane.id)
                     }
@@ -773,7 +850,16 @@ final class AppViewModel: ObservableObject {
         windows = snapshot.windows
         panes = snapshot.panes
         let paneIDs = Set(panes.map(\.id))
+        let staleSessions = terminalProxySessionByPaneID.filter { !paneIDs.contains($0.key) }
         terminalCursorByPaneID = terminalCursorByPaneID.filter { paneIDs.contains($0.key) }
+        terminalProxySessionByPaneID = terminalProxySessionByPaneID.filter { paneIDs.contains($0.key) }
+        if !staleSessions.isEmpty {
+            for (_, sessionID) in staleSessions {
+                Task { [weak self] in
+                    await self?.detachTerminalProxySession(sessionID: sessionID)
+                }
+            }
+        }
         if let current = selectedPane {
             selectedPane = panes.first(where: { $0.id == current.id })
             if selectedPane == nil {
@@ -1000,44 +1086,76 @@ final class AppViewModel: ObservableObject {
         guard let pane = selectedPane else {
             return
         }
+        terminalStreamGeneration += 1
+        let generation = terminalStreamGeneration
         let paneID = pane.id
         terminalStreamTask = Task { [weak self] in
-            await self?.terminalStreamLoop(for: paneID)
+            await self?.terminalStreamLoop(for: paneID, generation: generation)
         }
     }
 
-    private func terminalStreamLoop(for paneID: String) async {
+    private func terminalStreamLoop(for paneID: String, generation: Int) async {
         var cursor = terminalCursorByPaneID[paneID]
         var consecutiveFailures = 0
         while !Task.isCancelled {
+            guard generation == terminalStreamGeneration else {
+                return
+            }
             guard selectedPane?.id == paneID else {
                 return
             }
             guard let pane = panes.first(where: { $0.id == paneID }) else {
                 return
             }
-            if await shouldUseTerminalRead() == false {
-                consecutiveFailures += 1
-                let delayMillis = terminalStreamRetryDelayMillis(for: consecutiveFailures)
-                if selectedPane?.id == paneID, consecutiveFailures >= 3 {
-                    infoMessage = "terminal stream waiting for daemon capabilities..."
-                }
-                try? await Task.sleep(for: .milliseconds(delayMillis))
-                continue
-            }
             do {
-                let resp = try await client.terminalRead(
-                    target: pane.identity.target,
-                    paneID: pane.identity.paneID,
-                    cursor: cursor,
-                    lines: 200
-                )
-                cursor = resp.frame.cursor
-                terminalCursorByPaneID[paneID] = resp.frame.cursor
-                applyTerminalFrame(resp.frame, paneID: paneID)
+                if await shouldUseTerminalProxy() {
+                    let sessionID = try await ensureTerminalProxySession(for: pane, generation: generation)
+                    let resp = try await client.terminalStream(
+                        sessionID: sessionID,
+                        cursor: cursor,
+                        lines: 200
+                    )
+                    guard generation == terminalStreamGeneration, selectedPane?.id == paneID else {
+                        return
+                    }
+                    cursor = resp.frame.cursor
+                    terminalCursorByPaneID[paneID] = resp.frame.cursor
+                    applyTerminalStreamFrame(resp.frame, paneID: paneID)
+                } else if await shouldUseTerminalRead() {
+                    let resp = try await client.terminalRead(
+                        target: pane.identity.target,
+                        paneID: pane.identity.paneID,
+                        cursor: cursor,
+                        lines: 200
+                    )
+                    guard generation == terminalStreamGeneration, selectedPane?.id == paneID else {
+                        return
+                    }
+                    cursor = resp.frame.cursor
+                    terminalCursorByPaneID[paneID] = resp.frame.cursor
+                    applyTerminalFrame(resp.frame, paneID: paneID)
+                } else {
+                    consecutiveFailures += 1
+                    let delayMillis = terminalStreamRetryDelayMillis(for: consecutiveFailures)
+                    if selectedPane?.id == paneID, consecutiveFailures >= 3 {
+                        infoMessage = "terminal stream waiting for daemon capabilities..."
+                    }
+                    try? await Task.sleep(for: .milliseconds(delayMillis))
+                    continue
+                }
                 consecutiveFailures = 0
                 try await Task.sleep(for: .milliseconds(Int(terminalStreamPollIntervalSeconds * 1000)))
             } catch {
+                if error is CancellationError || Task.isCancelled || generation != terminalStreamGeneration {
+                    return
+                }
+                if shouldResetTerminalProxySession(for: error),
+                   let staleSessionID = terminalProxySessionByPaneID[paneID] {
+                    terminalProxySessionByPaneID.removeValue(forKey: paneID)
+                    terminalCursorByPaneID.removeValue(forKey: paneID)
+                    cursor = nil
+                    await detachTerminalProxySession(sessionID: staleSessionID)
+                }
                 consecutiveFailures += 1
                 let delayMillis = terminalStreamRetryDelayMillis(for: consecutiveFailures)
                 if selectedPane?.id == paneID, consecutiveFailures >= 3 {
@@ -1068,6 +1186,37 @@ final class AppViewModel: ObservableObject {
         trimOutputPreviewIfNeeded()
     }
 
+    private func applyTerminalStreamFrame(_ frame: TerminalStreamFrame, paneID: String) {
+        guard selectedPane?.id == paneID else {
+            return
+        }
+        switch frame.frameType {
+        case "attached":
+            return
+        case "output":
+            let content = frame.content ?? ""
+            if !content.isEmpty {
+                outputPreview += content
+            }
+        case "reset":
+            outputPreview = frame.content ?? ""
+        case "error":
+            let reason = frame.errorCode ?? frame.message ?? "unknown"
+            errorMessage = "terminal-stream error: \(reason)"
+            if let sessionID = terminalProxySessionByPaneID[paneID] {
+                terminalProxySessionByPaneID.removeValue(forKey: paneID)
+                terminalCursorByPaneID.removeValue(forKey: paneID)
+                Task { [weak self] in
+                    await self?.detachTerminalProxySession(sessionID: sessionID)
+                }
+            }
+            return
+        default:
+            return
+        }
+        trimOutputPreviewIfNeeded()
+    }
+
     private func trimOutputPreviewIfNeeded() {
         if outputPreview.count <= terminalOutputMaxChars {
             return
@@ -1075,22 +1224,96 @@ final class AppViewModel: ObservableObject {
         outputPreview = String(outputPreview.suffix(terminalOutputMaxChars))
     }
 
+    private func ensureTerminalProxySession(for pane: PaneItem, generation: Int? = nil) async throws -> String {
+        if let sessionID = terminalProxySessionByPaneID[pane.id], !sessionID.isEmpty {
+            return sessionID
+        }
+        let response = try await client.terminalAttach(
+            target: pane.identity.target,
+            paneID: pane.identity.paneID,
+            ifRuntime: trimmedNonEmpty(pane.runtimeID),
+            ifState: nil,
+            ifUpdatedWithin: nil,
+            forceStale: false
+        )
+        let sessionID = response.sessionID.trimmingCharacters(in: .whitespacesAndNewlines)
+        if response.resultCode != "completed" || sessionID.isEmpty {
+            throw RuntimeError.commandFailed(
+                "agtmux-app terminal attach",
+                1,
+                "terminal attach failed: \(response.resultCode)"
+            )
+        }
+        if let generation {
+            guard generation == terminalStreamGeneration, selectedPane?.id == pane.id else {
+                await detachTerminalProxySession(sessionID: sessionID)
+                throw CancellationError()
+            }
+        }
+        terminalProxySessionByPaneID[pane.id] = sessionID
+        return sessionID
+    }
+
+    private func detachTerminalProxySession(sessionID: String) async {
+        guard !sessionID.isEmpty else {
+            return
+        }
+        _ = try? await client.terminalDetach(sessionID: sessionID)
+    }
+
+    private func shouldUseTerminalProxy() async -> Bool {
+        guard let caps = await fetchTerminalCapabilities() else {
+            return false
+        }
+        if !(caps.embeddedTerminal &&
+            caps.terminalAttach &&
+            caps.terminalWrite &&
+            caps.terminalStream) {
+            return false
+        }
+        guard normalizedToken(caps.terminalProxyMode) == "daemon-proxy-pty-poc" else {
+            return false
+        }
+        guard normalizedToken(caps.terminalFrameProtocol) == "terminal-stream-v1" else {
+            return false
+        }
+        return true
+    }
+
     private func shouldUseTerminalRead() async -> Bool {
+        guard let caps = await fetchTerminalCapabilities() else {
+            return false
+        }
+        return caps.embeddedTerminal && caps.terminalRead
+    }
+
+    private func fetchTerminalCapabilities() async -> CapabilityFlags? {
         let now = Date()
         if let cached = terminalCapabilities,
            let fetchedAt = terminalCapabilitiesFetchedAt,
            now.timeIntervalSince(fetchedAt) <= terminalCapabilitiesCacheTTLSeconds {
-            return cached.embeddedTerminal && cached.terminalRead
+            return cached
         }
         do {
             let env = try await client.fetchCapabilities()
             terminalCapabilities = env.capabilities
             terminalCapabilitiesFetchedAt = now
-            return env.capabilities.embeddedTerminal && env.capabilities.terminalRead
+            return env.capabilities
         } catch {
+            terminalCapabilities = nil
             terminalCapabilitiesFetchedAt = now
+            return nil
+        }
+    }
+
+    private func shouldResetTerminalProxySession(for error: Error) -> Bool {
+        guard case let RuntimeError.commandFailed(_, _, stderr) = error else {
             return false
         }
+        let normalized = stderr.lowercased()
+        return normalized.contains("e_ref_not_found") ||
+            normalized.contains("session not found") ||
+            normalized.contains("e_runtime_stale")
     }
 
     private func categoryPrecedence(_ category: String) -> Int {

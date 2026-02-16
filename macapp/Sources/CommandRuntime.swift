@@ -176,6 +176,97 @@ struct AGTMUXCLIClient {
         return try decodeSingleJSONLine(out, as: TerminalResizeResponse.self)
     }
 
+    func terminalAttach(
+        target: String,
+        paneID: String,
+        ifRuntime: String? = nil,
+        ifState: String? = nil,
+        ifUpdatedWithin: String? = nil,
+        forceStale: Bool = false
+    ) async throws -> TerminalAttachResponse {
+        var args = [
+            "terminal", "attach",
+            "--target", target,
+            "--pane", paneID,
+            "--json",
+        ]
+        if let ifRuntime, !ifRuntime.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            args += ["--if-runtime", ifRuntime.trimmingCharacters(in: .whitespacesAndNewlines)]
+        }
+        if let ifState, !ifState.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            args += ["--if-state", ifState.trimmingCharacters(in: .whitespacesAndNewlines)]
+        }
+        if let ifUpdatedWithin, !ifUpdatedWithin.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            args += ["--if-updated-within", ifUpdatedWithin.trimmingCharacters(in: .whitespacesAndNewlines)]
+        }
+        if forceStale {
+            args.append("--force-stale")
+        }
+        let out = try await runAppCommand(args)
+        return try decodeSingleJSONLine(out, as: TerminalAttachResponse.self)
+    }
+
+    func terminalDetach(sessionID: String) async throws -> TerminalDetachResponse {
+        let out = try await runAppCommand([
+            "terminal", "detach",
+            "--session", sessionID,
+            "--json",
+        ])
+        return try decodeSingleJSONLine(out, as: TerminalDetachResponse.self)
+    }
+
+    func terminalWrite(
+        sessionID: String,
+        text: String? = nil,
+        key: String? = nil,
+        enter: Bool = false,
+        paste: Bool = false
+    ) async throws -> TerminalWriteResponse {
+        let hasText = (text?.isEmpty == false)
+        let normalizedKey = key?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let hasKey = !normalizedKey.isEmpty
+        if hasText == hasKey {
+            throw RuntimeError.commandFailed(
+                "agtmux-app terminal write",
+                2,
+                "either text or key must be set, and both cannot be set together"
+            )
+        }
+
+        var args = [
+            "terminal", "write",
+            "--session", sessionID,
+            "--json",
+        ]
+        if let text, !text.isEmpty {
+            args += ["--text", text]
+        } else {
+            args += ["--key", normalizedKey]
+        }
+        if enter {
+            args.append("--enter")
+        }
+        if paste {
+            args.append("--paste")
+        }
+        let out = try await runAppCommand(args)
+        return try decodeSingleJSONLine(out, as: TerminalWriteResponse.self)
+    }
+
+    func terminalStream(sessionID: String, cursor: String?, lines: Int) async throws -> TerminalStreamEnvelope {
+        var args = [
+            "terminal", "stream",
+            "--session", sessionID,
+            "--lines", String(lines),
+            "--json",
+        ]
+        if let cursor, !cursor.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            args += ["--cursor", cursor.trimmingCharacters(in: .whitespacesAndNewlines)]
+        }
+        let out = try await runAppCommand(args)
+        return try decodeSingleJSONLine(out, as: TerminalStreamEnvelope.self)
+    }
+
     func sendText(target: String, paneID: String, text: String, requestRef: String, enter: Bool, paste: Bool) async throws -> ActionResponse {
         var args = [
             "action", "send",

@@ -30,6 +30,10 @@ type service interface {
 	ListCapabilities(ctx context.Context) (api.CapabilitiesEnvelope, error)
 	TerminalRead(ctx context.Context, req appclient.TerminalReadRequest) (api.TerminalReadEnvelope, error)
 	TerminalResize(ctx context.Context, req appclient.TerminalResizeRequest) (api.TerminalResizeResponse, error)
+	TerminalAttach(ctx context.Context, req appclient.TerminalAttachRequest) (api.TerminalAttachResponse, error)
+	TerminalDetach(ctx context.Context, req appclient.TerminalDetachRequest) (api.TerminalDetachResponse, error)
+	TerminalWrite(ctx context.Context, req appclient.TerminalWriteRequest) (api.TerminalWriteResponse, error)
+	TerminalStream(ctx context.Context, req appclient.TerminalStreamRequest) (api.TerminalStreamEnvelope, error)
 	ListTargets(ctx context.Context) (api.TargetsEnvelope, error)
 	CreateTarget(ctx context.Context, req appclient.CreateTargetRequest) (api.TargetsEnvelope, error)
 	ConnectTarget(ctx context.Context, targetName string) (api.TargetsEnvelope, error)
@@ -480,7 +484,7 @@ func runAction(ctx context.Context, args []string, out, errOut io.Writer, svc se
 
 func runTerminal(ctx context.Context, args []string, out, errOut io.Writer, svc service) int {
 	if len(args) == 0 {
-		_, _ = fmt.Fprintln(errOut, "usage: agtmux-app terminal <capabilities|read|resize> ...")
+		_, _ = fmt.Fprintln(errOut, "usage: agtmux-app terminal <capabilities|attach|detach|write|stream|read|resize> ...")
 		return 2
 	}
 	switch args[0] {
@@ -504,12 +508,178 @@ func runTerminal(ctx context.Context, args []string, out, errOut io.Writer, svc 
 		if *jsonOut {
 			return writeJSONResponse(out, errOut, resp)
 		}
-		if _, err := fmt.Fprintf(out, "embedded_terminal=%t terminal_read=%t terminal_resize=%t write_via_send=%t protocol=%s\n",
+		if _, err := fmt.Fprintf(out, "embedded_terminal=%t terminal_read=%t terminal_resize=%t write_via_send=%t terminal_attach=%t terminal_write=%t terminal_stream=%t proxy_mode=%s protocol=%s\n",
 			resp.Capabilities.EmbeddedTerminal,
 			resp.Capabilities.TerminalRead,
 			resp.Capabilities.TerminalResize,
 			resp.Capabilities.TerminalWriteViaAction,
+			resp.Capabilities.TerminalAttach,
+			resp.Capabilities.TerminalWrite,
+			resp.Capabilities.TerminalStream,
+			resp.Capabilities.TerminalProxyMode,
 			resp.Capabilities.TerminalFrameProtocol,
+		); err != nil {
+			_, _ = fmt.Fprintf(errOut, "error: %v\n", err)
+			return 1
+		}
+		return 0
+	case "attach":
+		fs := flag.NewFlagSet("terminal attach", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		target := fs.String("target", "", "target name")
+		paneID := fs.String("pane", "", "pane id")
+		ifRuntime := fs.String("if-runtime", "", "runtime guard")
+		ifState := fs.String("if-state", "", "state guard")
+		ifUpdatedWithin := fs.String("if-updated-within", "", "freshness guard duration")
+		forceStale := fs.Bool("force-stale", false, "disable stale guard")
+		jsonOut := fs.Bool("json", false, "output JSON")
+		if err := fs.Parse(args[1:]); err != nil {
+			_, _ = fmt.Fprintf(errOut, "error: %v\n", err)
+			return 2
+		}
+		if fs.NArg() > 0 {
+			_, _ = fmt.Fprintln(errOut, "usage: agtmux-app terminal attach --target <name> --pane <id> [--if-runtime <id>] [--if-state <state>] [--if-updated-within <duration>] [--force-stale] [--json]")
+			return 2
+		}
+		if strings.TrimSpace(*target) == "" || strings.TrimSpace(*paneID) == "" {
+			_, _ = fmt.Fprintln(errOut, "usage: agtmux-app terminal attach --target <name> --pane <id> [--if-runtime <id>] [--if-state <state>] [--if-updated-within <duration>] [--force-stale] [--json]")
+			return 2
+		}
+		resp, err := svc.TerminalAttach(ctx, appclient.TerminalAttachRequest{
+			Target:          strings.TrimSpace(*target),
+			PaneID:          strings.TrimSpace(*paneID),
+			IfRuntime:       strings.TrimSpace(*ifRuntime),
+			IfState:         strings.TrimSpace(*ifState),
+			IfUpdatedWithin: strings.TrimSpace(*ifUpdatedWithin),
+			ForceStale:      *forceStale,
+		})
+		if err != nil {
+			_, _ = fmt.Fprintf(errOut, "error: %v\n", err)
+			return 1
+		}
+		if *jsonOut {
+			return writeJSONResponse(out, errOut, resp)
+		}
+		if _, err := fmt.Fprintf(out, "terminal attach session=%s target=%s pane=%s result=%s\n",
+			resp.SessionID,
+			resp.Target,
+			resp.PaneID,
+			resp.ResultCode,
+		); err != nil {
+			_, _ = fmt.Fprintf(errOut, "error: %v\n", err)
+			return 1
+		}
+		return 0
+	case "detach":
+		fs := flag.NewFlagSet("terminal detach", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		sessionID := fs.String("session", "", "terminal session id")
+		jsonOut := fs.Bool("json", false, "output JSON")
+		if err := fs.Parse(args[1:]); err != nil {
+			_, _ = fmt.Fprintf(errOut, "error: %v\n", err)
+			return 2
+		}
+		if fs.NArg() > 0 {
+			_, _ = fmt.Fprintln(errOut, "usage: agtmux-app terminal detach --session <id> [--json]")
+			return 2
+		}
+		if strings.TrimSpace(*sessionID) == "" {
+			_, _ = fmt.Fprintln(errOut, "usage: agtmux-app terminal detach --session <id> [--json]")
+			return 2
+		}
+		resp, err := svc.TerminalDetach(ctx, appclient.TerminalDetachRequest{
+			SessionID: strings.TrimSpace(*sessionID),
+		})
+		if err != nil {
+			_, _ = fmt.Fprintf(errOut, "error: %v\n", err)
+			return 1
+		}
+		if *jsonOut {
+			return writeJSONResponse(out, errOut, resp)
+		}
+		if _, err := fmt.Fprintf(out, "terminal detach session=%s result=%s\n", resp.SessionID, resp.ResultCode); err != nil {
+			_, _ = fmt.Fprintf(errOut, "error: %v\n", err)
+			return 1
+		}
+		return 0
+	case "write":
+		fs := flag.NewFlagSet("terminal write", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		sessionID := fs.String("session", "", "terminal session id")
+		text := fs.String("text", "", "text payload")
+		key := fs.String("key", "", "tmux key payload")
+		enter := fs.Bool("enter", false, "append Enter key")
+		paste := fs.Bool("paste", false, "send as literal text")
+		jsonOut := fs.Bool("json", false, "output JSON")
+		if err := fs.Parse(args[1:]); err != nil {
+			_, _ = fmt.Fprintf(errOut, "error: %v\n", err)
+			return 2
+		}
+		if fs.NArg() > 0 {
+			_, _ = fmt.Fprintln(errOut, "usage: agtmux-app terminal write --session <id> [--text <payload> | --key <tmux-key>] [--enter] [--paste] [--json]")
+			return 2
+		}
+		textVal := *text
+		keyVal := strings.TrimSpace(*key)
+		if strings.TrimSpace(*sessionID) == "" || (textVal == "" && keyVal == "") || (textVal != "" && keyVal != "") {
+			_, _ = fmt.Fprintln(errOut, "usage: agtmux-app terminal write --session <id> [--text <payload> | --key <tmux-key>] [--enter] [--paste] [--json]")
+			return 2
+		}
+		resp, err := svc.TerminalWrite(ctx, appclient.TerminalWriteRequest{
+			SessionID: strings.TrimSpace(*sessionID),
+			Text:      textVal,
+			Key:       keyVal,
+			Enter:     *enter,
+			Paste:     *paste,
+		})
+		if err != nil {
+			_, _ = fmt.Fprintf(errOut, "error: %v\n", err)
+			return 1
+		}
+		if *jsonOut {
+			return writeJSONResponse(out, errOut, resp)
+		}
+		if _, err := fmt.Fprintf(out, "terminal write session=%s result=%s\n", resp.SessionID, resp.ResultCode); err != nil {
+			_, _ = fmt.Fprintf(errOut, "error: %v\n", err)
+			return 1
+		}
+		return 0
+	case "stream":
+		fs := flag.NewFlagSet("terminal stream", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		sessionID := fs.String("session", "", "terminal session id")
+		cursor := fs.String("cursor", "", "terminal cursor")
+		lines := fs.Int("lines", 200, "line count")
+		jsonOut := fs.Bool("json", false, "output JSON")
+		if err := fs.Parse(args[1:]); err != nil {
+			_, _ = fmt.Fprintf(errOut, "error: %v\n", err)
+			return 2
+		}
+		if fs.NArg() > 0 {
+			_, _ = fmt.Fprintln(errOut, "usage: agtmux-app terminal stream --session <id> [--cursor <cursor>] [--lines <n>] [--json]")
+			return 2
+		}
+		if strings.TrimSpace(*sessionID) == "" || *lines <= 0 {
+			_, _ = fmt.Fprintln(errOut, "usage: agtmux-app terminal stream --session <id> [--cursor <cursor>] [--lines <n>] [--json]")
+			return 2
+		}
+		resp, err := svc.TerminalStream(ctx, appclient.TerminalStreamRequest{
+			SessionID: strings.TrimSpace(*sessionID),
+			Cursor:    strings.TrimSpace(*cursor),
+			Lines:     *lines,
+		})
+		if err != nil {
+			_, _ = fmt.Fprintf(errOut, "error: %v\n", err)
+			return 1
+		}
+		if *jsonOut {
+			return writeJSONResponse(out, errOut, resp)
+		}
+		if _, err := fmt.Fprintf(out, "terminal stream frame=%s cursor=%s stream=%s session=%s\n",
+			resp.Frame.FrameType,
+			resp.Frame.Cursor,
+			resp.Frame.StreamID,
+			resp.Frame.SessionID,
 		); err != nil {
 			_, _ = fmt.Fprintf(errOut, "error: %v\n", err)
 			return 1
@@ -1386,7 +1556,7 @@ func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "       agtmux-app view <snapshot|global|sessions|windows|panes|targets> ...")
 	_, _ = fmt.Fprintln(w, "       agtmux-app target <list|add|connect|remove> ...")
 	_, _ = fmt.Fprintln(w, "       agtmux-app action <attach|send|view-output|kill|events> ...")
-	_, _ = fmt.Fprintln(w, "       agtmux-app terminal <capabilities|read|resize> ...")
+	_, _ = fmt.Fprintln(w, "       agtmux-app terminal <capabilities|attach|detach|write|stream|read|resize> ...")
 	_, _ = fmt.Fprintln(w, "       agtmux-app adapter <list|enable|disable> ...")
 }
 

@@ -28,6 +28,10 @@ type fakeService struct {
 	actionEventsErr error
 	terminalReadReq appclient.TerminalReadRequest
 	terminalResize  appclient.TerminalResizeRequest
+	terminalAttach  appclient.TerminalAttachRequest
+	terminalDetach  appclient.TerminalDetachRequest
+	terminalWrite   appclient.TerminalWriteRequest
+	terminalStream  appclient.TerminalStreamRequest
 
 	listPanesOpts     appclient.ListOptions
 	listWindowsOpts   appclient.ListOptions
@@ -137,7 +141,11 @@ func (f *fakeService) ListCapabilities(_ context.Context) (api.CapabilitiesEnvel
 			TerminalRead:           true,
 			TerminalResize:         true,
 			TerminalWriteViaAction: true,
-			TerminalFrameProtocol:  "snapshot-delta-reset",
+			TerminalAttach:         true,
+			TerminalWrite:          true,
+			TerminalStream:         true,
+			TerminalProxyMode:      "daemon-proxy-pty-poc",
+			TerminalFrameProtocol:  "terminal-stream-v1",
 		},
 	}, nil
 }
@@ -167,6 +175,53 @@ func (f *fakeService) TerminalResize(_ context.Context, req appclient.TerminalRe
 		Cols:          req.Cols,
 		Rows:          req.Rows,
 		ResultCode:    "completed",
+	}, nil
+}
+
+func (f *fakeService) TerminalAttach(_ context.Context, req appclient.TerminalAttachRequest) (api.TerminalAttachResponse, error) {
+	f.terminalAttach = req
+	return api.TerminalAttachResponse{
+		SchemaVersion: "v1",
+		SessionID:     "term-s1",
+		Target:        req.Target,
+		PaneID:        req.PaneID,
+		RuntimeID:     "rt-1",
+		StateVersion:  42,
+		ResultCode:    "completed",
+	}, nil
+}
+
+func (f *fakeService) TerminalDetach(_ context.Context, req appclient.TerminalDetachRequest) (api.TerminalDetachResponse, error) {
+	f.terminalDetach = req
+	return api.TerminalDetachResponse{
+		SchemaVersion: "v1",
+		SessionID:     req.SessionID,
+		ResultCode:    "completed",
+	}, nil
+}
+
+func (f *fakeService) TerminalWrite(_ context.Context, req appclient.TerminalWriteRequest) (api.TerminalWriteResponse, error) {
+	f.terminalWrite = req
+	return api.TerminalWriteResponse{
+		SchemaVersion: "v1",
+		SessionID:     req.SessionID,
+		ResultCode:    "completed",
+	}, nil
+}
+
+func (f *fakeService) TerminalStream(_ context.Context, req appclient.TerminalStreamRequest) (api.TerminalStreamEnvelope, error) {
+	f.terminalStream = req
+	return api.TerminalStreamEnvelope{
+		SchemaVersion: "v1",
+		Frame: api.TerminalStreamFrame{
+			FrameType: "output",
+			StreamID:  "stream-1",
+			Cursor:    "stream-1:3",
+			SessionID: req.SessionID,
+			Target:    "t1",
+			PaneID:    "%1",
+			Content:   "hello",
+		},
 	}, nil
 }
 
@@ -443,7 +498,12 @@ func TestRunTerminalCapabilitiesJSON(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &resp); err != nil {
 		t.Fatalf("decode output json: %v output=%s", err, out.String())
 	}
-	if !resp.Capabilities.EmbeddedTerminal || !resp.Capabilities.TerminalRead || !resp.Capabilities.TerminalResize {
+	if !resp.Capabilities.EmbeddedTerminal ||
+		!resp.Capabilities.TerminalRead ||
+		!resp.Capabilities.TerminalResize ||
+		!resp.Capabilities.TerminalAttach ||
+		!resp.Capabilities.TerminalWrite ||
+		!resp.Capabilities.TerminalStream {
 		t.Fatalf("unexpected capabilities response: %+v", resp.Capabilities)
 	}
 }
@@ -472,6 +532,193 @@ func TestRunTerminalReadJSON(t *testing.T) {
 	}
 	if resp.Frame.PaneID != "%1" || resp.Frame.Target != "t1" {
 		t.Fatalf("unexpected terminal read response: %+v", resp.Frame)
+	}
+}
+
+func TestRunTerminalAttachJSON(t *testing.T) {
+	svc := &fakeService{}
+	out := &bytes.Buffer{}
+	errOut := &bytes.Buffer{}
+	code := run(context.Background(), []string{
+		"terminal", "attach",
+		"--target", "t1",
+		"--pane", "%1",
+		"--if-runtime", "rt-1",
+		"--if-state", "idle",
+		"--if-updated-within", "10s",
+		"--json",
+	}, out, errOut, svc)
+	if code != 0 {
+		t.Fatalf("expected code 0, got %d stderr=%s", code, errOut.String())
+	}
+	if svc.terminalAttach.Target != "t1" || svc.terminalAttach.PaneID != "%1" || svc.terminalAttach.IfRuntime != "rt-1" {
+		t.Fatalf("unexpected terminal attach request: %+v", svc.terminalAttach)
+	}
+	var resp api.TerminalAttachResponse
+	if err := json.Unmarshal(out.Bytes(), &resp); err != nil {
+		t.Fatalf("decode output json: %v output=%s", err, out.String())
+	}
+	if resp.SessionID != "term-s1" || resp.Target != "t1" || resp.PaneID != "%1" {
+		t.Fatalf("unexpected terminal attach response: %+v", resp)
+	}
+}
+
+func TestRunTerminalAttachUsageErrorWhenRequiredArgsMissing(t *testing.T) {
+	svc := &fakeService{}
+	out := &bytes.Buffer{}
+	errOut := &bytes.Buffer{}
+	code := run(context.Background(), []string{
+		"terminal", "attach",
+		"--target", "t1",
+	}, out, errOut, svc)
+	if code != 2 {
+		t.Fatalf("expected code 2, got %d stderr=%s", code, errOut.String())
+	}
+	if !bytes.Contains(errOut.Bytes(), []byte("usage: agtmux-app terminal attach")) {
+		t.Fatalf("expected usage output, got %s", errOut.String())
+	}
+}
+
+func TestRunTerminalWriteJSON(t *testing.T) {
+	svc := &fakeService{}
+	out := &bytes.Buffer{}
+	errOut := &bytes.Buffer{}
+	code := run(context.Background(), []string{
+		"terminal", "write",
+		"--session", "term-s1",
+		"--text", "hello",
+		"--enter",
+		"--paste",
+		"--json",
+	}, out, errOut, svc)
+	if code != 0 {
+		t.Fatalf("expected code 0, got %d stderr=%s", code, errOut.String())
+	}
+	if svc.terminalWrite.SessionID != "term-s1" || svc.terminalWrite.Text != "hello" || !svc.terminalWrite.Enter || !svc.terminalWrite.Paste {
+		t.Fatalf("unexpected terminal write request: %+v", svc.terminalWrite)
+	}
+	var resp api.TerminalWriteResponse
+	if err := json.Unmarshal(out.Bytes(), &resp); err != nil {
+		t.Fatalf("decode output json: %v output=%s", err, out.String())
+	}
+	if resp.SessionID != "term-s1" || resp.ResultCode != "completed" {
+		t.Fatalf("unexpected terminal write response: %+v", resp)
+	}
+}
+
+func TestRunTerminalWriteUsageErrorWhenPayloadMissing(t *testing.T) {
+	svc := &fakeService{}
+	out := &bytes.Buffer{}
+	errOut := &bytes.Buffer{}
+	code := run(context.Background(), []string{
+		"terminal", "write",
+		"--session", "term-s1",
+	}, out, errOut, svc)
+	if code != 2 {
+		t.Fatalf("expected code 2, got %d stderr=%s", code, errOut.String())
+	}
+	if !bytes.Contains(errOut.Bytes(), []byte("usage: agtmux-app terminal write")) {
+		t.Fatalf("expected usage output, got %s", errOut.String())
+	}
+}
+
+func TestRunTerminalWriteUsageErrorWhenTextAndKeyProvided(t *testing.T) {
+	svc := &fakeService{}
+	out := &bytes.Buffer{}
+	errOut := &bytes.Buffer{}
+	code := run(context.Background(), []string{
+		"terminal", "write",
+		"--session", "term-s1",
+		"--text", "hello",
+		"--key", "C-c",
+	}, out, errOut, svc)
+	if code != 2 {
+		t.Fatalf("expected code 2, got %d stderr=%s", code, errOut.String())
+	}
+	if !bytes.Contains(errOut.Bytes(), []byte("usage: agtmux-app terminal write")) {
+		t.Fatalf("expected usage output, got %s", errOut.String())
+	}
+}
+
+func TestRunTerminalStreamJSON(t *testing.T) {
+	svc := &fakeService{}
+	out := &bytes.Buffer{}
+	errOut := &bytes.Buffer{}
+	code := run(context.Background(), []string{
+		"terminal", "stream",
+		"--session", "term-s1",
+		"--cursor", "stream-1:2",
+		"--lines", "180",
+		"--json",
+	}, out, errOut, svc)
+	if code != 0 {
+		t.Fatalf("expected code 0, got %d stderr=%s", code, errOut.String())
+	}
+	if svc.terminalStream.SessionID != "term-s1" || svc.terminalStream.Cursor != "stream-1:2" || svc.terminalStream.Lines != 180 {
+		t.Fatalf("unexpected terminal stream request: %+v", svc.terminalStream)
+	}
+	var resp api.TerminalStreamEnvelope
+	if err := json.Unmarshal(out.Bytes(), &resp); err != nil {
+		t.Fatalf("decode output json: %v output=%s", err, out.String())
+	}
+	if resp.Frame.SessionID != "term-s1" || resp.Frame.FrameType != "output" {
+		t.Fatalf("unexpected terminal stream response: %+v", resp.Frame)
+	}
+}
+
+func TestRunTerminalStreamUsageErrorWhenLinesNonPositive(t *testing.T) {
+	svc := &fakeService{}
+	out := &bytes.Buffer{}
+	errOut := &bytes.Buffer{}
+	code := run(context.Background(), []string{
+		"terminal", "stream",
+		"--session", "term-s1",
+		"--lines", "0",
+	}, out, errOut, svc)
+	if code != 2 {
+		t.Fatalf("expected code 2, got %d stderr=%s", code, errOut.String())
+	}
+	if !bytes.Contains(errOut.Bytes(), []byte("usage: agtmux-app terminal stream")) {
+		t.Fatalf("expected usage output, got %s", errOut.String())
+	}
+}
+
+func TestRunTerminalDetachJSON(t *testing.T) {
+	svc := &fakeService{}
+	out := &bytes.Buffer{}
+	errOut := &bytes.Buffer{}
+	code := run(context.Background(), []string{
+		"terminal", "detach",
+		"--session", "term-s1",
+		"--json",
+	}, out, errOut, svc)
+	if code != 0 {
+		t.Fatalf("expected code 0, got %d stderr=%s", code, errOut.String())
+	}
+	if svc.terminalDetach.SessionID != "term-s1" {
+		t.Fatalf("unexpected terminal detach request: %+v", svc.terminalDetach)
+	}
+	var resp api.TerminalDetachResponse
+	if err := json.Unmarshal(out.Bytes(), &resp); err != nil {
+		t.Fatalf("decode output json: %v output=%s", err, out.String())
+	}
+	if resp.SessionID != "term-s1" || resp.ResultCode != "completed" {
+		t.Fatalf("unexpected terminal detach response: %+v", resp)
+	}
+}
+
+func TestRunTerminalDetachUsageErrorWhenSessionMissing(t *testing.T) {
+	svc := &fakeService{}
+	out := &bytes.Buffer{}
+	errOut := &bytes.Buffer{}
+	code := run(context.Background(), []string{
+		"terminal", "detach",
+	}, out, errOut, svc)
+	if code != 2 {
+		t.Fatalf("expected code 2, got %d stderr=%s", code, errOut.String())
+	}
+	if !bytes.Contains(errOut.Bytes(), []byte("usage: agtmux-app terminal detach")) {
+		t.Fatalf("expected usage output, got %s", errOut.String())
 	}
 }
 

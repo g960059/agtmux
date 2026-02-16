@@ -185,6 +185,10 @@ struct CapabilityFlags: Decodable {
     let terminalRead: Bool
     let terminalResize: Bool
     let terminalWriteViaActionSend: Bool
+    let terminalAttach: Bool
+    let terminalWrite: Bool
+    let terminalStream: Bool
+    let terminalProxyMode: String?
     let terminalFrameProtocol: String?
 
     enum CodingKeys: String, CodingKey {
@@ -192,7 +196,24 @@ struct CapabilityFlags: Decodable {
         case terminalRead = "terminal_read"
         case terminalResize = "terminal_resize"
         case terminalWriteViaActionSend = "terminal_write_via_action_send"
+        case terminalAttach = "terminal_attach"
+        case terminalWrite = "terminal_write"
+        case terminalStream = "terminal_stream"
+        case terminalProxyMode = "terminal_proxy_mode"
         case terminalFrameProtocol = "terminal_frame_protocol"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        embeddedTerminal = try container.decodeIfPresent(Bool.self, forKey: .embeddedTerminal) ?? false
+        terminalRead = try container.decodeIfPresent(Bool.self, forKey: .terminalRead) ?? false
+        terminalResize = try container.decodeIfPresent(Bool.self, forKey: .terminalResize) ?? false
+        terminalWriteViaActionSend = try container.decodeIfPresent(Bool.self, forKey: .terminalWriteViaActionSend) ?? false
+        terminalAttach = try container.decodeIfPresent(Bool.self, forKey: .terminalAttach) ?? false
+        terminalWrite = try container.decodeIfPresent(Bool.self, forKey: .terminalWrite) ?? false
+        terminalStream = try container.decodeIfPresent(Bool.self, forKey: .terminalStream) ?? false
+        terminalProxyMode = try container.decodeIfPresent(String.self, forKey: .terminalProxyMode)
+        terminalFrameProtocol = try container.decodeIfPresent(String.self, forKey: .terminalFrameProtocol)
     }
 }
 
@@ -235,6 +256,76 @@ struct TerminalResizeResponse: Decodable {
         case cols
         case rows
         case resultCode = "result_code"
+    }
+}
+
+struct TerminalAttachResponse: Decodable {
+    let sessionID: String
+    let target: String
+    let paneID: String
+    let runtimeID: String?
+    let stateVersion: Int64?
+    let resultCode: String
+
+    enum CodingKeys: String, CodingKey {
+        case sessionID = "session_id"
+        case target
+        case paneID = "pane_id"
+        case runtimeID = "runtime_id"
+        case stateVersion = "state_version"
+        case resultCode = "result_code"
+    }
+}
+
+struct TerminalDetachResponse: Decodable {
+    let sessionID: String
+    let resultCode: String
+
+    enum CodingKeys: String, CodingKey {
+        case sessionID = "session_id"
+        case resultCode = "result_code"
+    }
+}
+
+struct TerminalWriteResponse: Decodable {
+    let sessionID: String
+    let resultCode: String
+    let errorCode: String?
+
+    enum CodingKeys: String, CodingKey {
+        case sessionID = "session_id"
+        case resultCode = "result_code"
+        case errorCode = "error_code"
+    }
+}
+
+struct TerminalStreamEnvelope: Decodable {
+    let frame: TerminalStreamFrame
+}
+
+struct TerminalStreamFrame: Decodable {
+    let frameType: String
+    let streamID: String
+    let cursor: String
+    let sessionID: String
+    let target: String
+    let paneID: String
+    let content: String?
+    let resetReason: String?
+    let errorCode: String?
+    let message: String?
+
+    enum CodingKeys: String, CodingKey {
+        case frameType = "frame_type"
+        case streamID = "stream_id"
+        case cursor
+        case sessionID = "session_id"
+        case target
+        case paneID = "pane_id"
+        case content
+        case resetReason = "reset_reason"
+        case errorCode = "error_code"
+        case message
     }
 }
 
