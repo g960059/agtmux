@@ -325,6 +325,7 @@ type TerminalWriteRequest struct {
 	SessionID string `json:"session_id"`
 	Text      string `json:"text,omitempty"`
 	Key       string `json:"key,omitempty"`
+	BytesB64  string `json:"bytes_b64,omitempty"`
 	Enter     bool   `json:"enter,omitempty"`
 	Paste     bool   `json:"paste,omitempty"`
 }

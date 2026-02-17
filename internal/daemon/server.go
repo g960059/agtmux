@@ -3,6 +3,7 @@ package daemon
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,33 +41,41 @@ const defaultTerminalReadLines = 200
 const defaultTerminalStreamLines = 200
 const maxTerminalReadLines = 2000
 const maxTerminalStateBytes = 256 * 1024
+const defaultTerminalStateTTL = 5 * time.Minute
+const defaultTerminalProxySessionTTL = 5 * time.Minute
+const resizePolicySingleClientApply = "single_client_apply"
+const resizePolicyMultiClientSkip = "multi_client_skip"
+const resizePolicyInspectionFallbackSkip = "inspection_fallback_skip"
+const terminalCursorMarkerPrefix = "__AGTMUX_CURSOR_POSITION__"
 
 var codexSessionFileIDPattern = regexp.MustCompile(`([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$`)
 
 type Server struct {
-	cfg            config.Config
-	httpSrv        *http.Server
-	listener       net.Listener
-	lockFile       *os.File
-	store          *db.Store
-	executor       *target.Executor
-	engine         *ingest.Engine
-	codexEnricher  *codexSessionEnricher
-	streamID       string
-	sequence       atomic.Int64
-	mu             sync.Mutex
-	actionMu       sync.Mutex
-	actionLocks    map[string]*actionLockEntry
-	terminalMu     sync.Mutex
-	terminalStates map[string]terminalReadState
-	terminalProxy  map[string]terminalProxySession
-	codexPaneMu    sync.Mutex
-	codexPaneCache map[string]codexPaneCacheEntry
-	codexPaneTTL   time.Duration
-	snapshotTTL    time.Duration
-	auditEventHook func(action model.Action, eventType string) error
-	shutdown       sync.Once
-	shutdownErr    error
+	cfg              config.Config
+	httpSrv          *http.Server
+	listener         net.Listener
+	lockFile         *os.File
+	store            *db.Store
+	executor         *target.Executor
+	engine           *ingest.Engine
+	codexEnricher    *codexSessionEnricher
+	streamID         string
+	sequence         atomic.Int64
+	mu               sync.Mutex
+	actionMu         sync.Mutex
+	actionLocks      map[string]*actionLockEntry
+	terminalMu       sync.Mutex
+	terminalStates   map[string]terminalReadState
+	terminalProxy    map[string]terminalProxySession
+	terminalStateTTL time.Duration
+	terminalProxyTTL time.Duration
+	codexPaneMu      sync.Mutex
+	codexPaneCache   map[string]codexPaneCacheEntry
+	codexPaneTTL     time.Duration
+	snapshotTTL      time.Duration
+	auditEventHook   func(action model.Action, eventType string) error
+	shutdown         sync.Once
+	shutdownErr      error
 }
 
 type actionLockEntry struct {
@@ -75,8 +84,9 @@ type actionLockEntry struct {
 }
 
 type terminalReadState struct {
-	seq     int64
-	content string
+	seq       int64
+	content   string
+	updatedAt time.Time
 }
 
 type terminalProxySession struct {
@@ -100,16 +110,18 @@ func NewServer(cfg config.Config) *Server {
 func NewServerWithDeps(cfg config.Config, store *db.Store, executor *target.Executor) *Server {
 	mux := http.NewServeMux()
 	s := &Server{
-		cfg:            cfg,
-		store:          store,
-		executor:       executor,
-		streamID:       uuid.NewString(),
-		actionLocks:    map[string]*actionLockEntry{},
-		terminalStates: map[string]terminalReadState{},
-		terminalProxy:  map[string]terminalProxySession{},
-		codexPaneCache: map[string]codexPaneCacheEntry{},
-		codexPaneTTL:   20 * time.Second,
-		snapshotTTL:    defaultActionSnapshotTTL,
+		cfg:              cfg,
+		store:            store,
+		executor:         executor,
+		streamID:         uuid.NewString(),
+		actionLocks:      map[string]*actionLockEntry{},
+		terminalStates:   map[string]terminalReadState{},
+		terminalProxy:    map[string]terminalProxySession{},
+		terminalStateTTL: defaultTerminalStateTTL,
+		terminalProxyTTL: defaultTerminalProxySessionTTL,
+		codexPaneCache:   map[string]codexPaneCacheEntry{},
+		codexPaneTTL:     20 * time.Second,
+		snapshotTTL:      defaultActionSnapshotTTL,
 		httpSrv: &http.Server{
 			Handler:           mux,
 			ReadHeaderTimeout: 5 * time.Second,
@@ -778,6 +790,7 @@ type terminalWriteRequest struct {
 	SessionID string `json:"session_id"`
 	Text      string `json:"text"`
 	Key       string `json:"key"`
+	BytesB64  string `json:"bytes_b64"`
 	Enter     bool   `json:"enter"`
 	Paste     bool   `json:"paste"`
 }
@@ -1549,6 +1562,7 @@ func (s *Server) terminalAttachHandler(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, model.ErrRefInvalid, "target and pane_id are required")
 		return
 	}
+	s.pruneExpiredTerminalCaches(time.Now().UTC())
 
 	tg, err := s.resolveTargetAndPane(r.Context(), req.Target, req.PaneID)
 	if err != nil {
@@ -1615,6 +1629,7 @@ func (s *Server) terminalDetachHandler(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, model.ErrRefInvalid, "session_id is required")
 		return
 	}
+	s.pruneExpiredTerminalCaches(time.Now().UTC())
 
 	s.terminalMu.Lock()
 	_, ok := s.terminalProxy[req.SessionID]
@@ -1650,18 +1665,33 @@ func (s *Server) terminalWriteHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	req.SessionID = strings.TrimSpace(req.SessionID)
 	req.Key = strings.TrimSpace(req.Key)
+	req.BytesB64 = strings.TrimSpace(req.BytesB64)
 	if req.SessionID == "" {
 		s.writeError(w, http.StatusBadRequest, model.ErrRefInvalid, "session_id is required")
 		return
 	}
-	if req.Text == "" && req.Key == "" {
-		s.writeError(w, http.StatusBadRequest, model.ErrRefInvalid, "either text or key is required")
+	hasText := req.Text != ""
+	hasKey := req.Key != ""
+	hasBytes := req.BytesB64 != ""
+	inputModeCount := 0
+	if hasText {
+		inputModeCount++
+	}
+	if hasKey {
+		inputModeCount++
+	}
+	if hasBytes {
+		inputModeCount++
+	}
+	if inputModeCount == 0 {
+		s.writeError(w, http.StatusBadRequest, model.ErrRefInvalid, "either text, key, or bytes_b64 is required")
 		return
 	}
-	if req.Text != "" && req.Key != "" {
-		s.writeError(w, http.StatusBadRequest, model.ErrRefInvalid, "text and key are mutually exclusive")
+	if inputModeCount > 1 {
+		s.writeError(w, http.StatusBadRequest, model.ErrRefInvalid, "text, key, and bytes_b64 are mutually exclusive")
 		return
 	}
+	s.pruneExpiredTerminalCaches(time.Now().UTC())
 
 	s.terminalMu.Lock()
 	session, ok := s.terminalProxy[req.SessionID]
@@ -1685,16 +1715,32 @@ func (s *Server) terminalWriteHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cmd := []string{"send-keys", "-t", session.PaneID}
-	if req.Text != "" {
+	if hasText {
 		if req.Paste {
 			cmd = append(cmd, "-l")
 		}
 		cmd = append(cmd, req.Text)
-	} else {
+	} else if hasKey {
 		cmd = append(cmd, req.Key)
+	} else {
+		decoded, decodeErr := base64.StdEncoding.DecodeString(req.BytesB64)
+		if decodeErr != nil {
+			s.writeError(w, http.StatusBadRequest, model.ErrRefInvalid, "bytes_b64 must be valid base64")
+			return
+		}
+		if len(decoded) > 0 {
+			cmd = append(cmd, "-H")
+			for _, b := range decoded {
+				cmd = append(cmd, fmt.Sprintf("%02x", b))
+			}
+		}
 	}
 	if req.Enter {
 		cmd = append(cmd, "Enter")
+	}
+	if len(cmd) <= 3 {
+		s.writeError(w, http.StatusBadRequest, model.ErrRefInvalid, "terminal write payload is empty")
+		return
 	}
 	resultCode := "completed"
 	errorCode := ""
@@ -1747,6 +1793,7 @@ func (s *Server) terminalStreamHandler(w http.ResponseWriter, r *http.Request) {
 	if lines > maxTerminalReadLines {
 		lines = maxTerminalReadLines
 	}
+	s.pruneExpiredTerminalCaches(time.Now().UTC())
 	cursorStreamID, cursorSeq, _, err := parseCursor(r.URL.Query().Get("cursor"))
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, model.ErrCursorInvalid, "invalid cursor")
@@ -1801,18 +1848,22 @@ func (s *Server) terminalStreamHandler(w http.ResponseWriter, r *http.Request) {
 		s.writeActionResolveError(w, resolveErr)
 		return
 	}
-	runResult, runErr := s.executor.Run(
+	captureOutput, cursorX, cursorY, paneCols, paneRows, runErr := s.capturePaneSnapshotWithCursor(
 		r.Context(),
 		tg,
-		target.BuildTmuxCommand("capture-pane", "-t", session.PaneID, "-p", "-S", fmt.Sprintf("-%d", lines)),
+		session.PaneID,
+		lines,
 	)
 	if runErr != nil {
 		s.writeError(w, http.StatusBadGateway, model.ErrTargetUnreachable, "failed to read terminal stream output")
 		return
 	}
+	// Stream endpoint is consumed by the embedded interactive terminal.
+	// Keep only the current viewport rows so cursor metadata and visible content stay aligned.
+	captureOutput = trimSnapshotToVisibleRows(captureOutput, paneRows)
 
 	frameType := "output"
-	content := runResult.Output
+	content := captureOutput
 	resetReason := ""
 	if rawCursor := strings.TrimSpace(r.URL.Query().Get("cursor")); rawCursor != "" {
 		if cursorStreamID != s.streamID {
@@ -1821,19 +1872,13 @@ func (s *Server) terminalStreamHandler(w http.ResponseWriter, r *http.Request) {
 		} else if session.LastSeq != cursorSeq {
 			frameType = "reset"
 			resetReason = "cursor_discontinuity"
-		} else if delta, ok := deriveTerminalDelta(session.LastContent, runResult.Output); ok {
-			content = delta
-		} else {
-			frameType = "reset"
-			resetReason = "content_discontinuity"
-			content = runResult.Output
 		}
 	}
 
 	seq := s.sequence.Add(1)
 	cursor := fmt.Sprintf("%s:%d", s.streamID, seq)
 	session.LastSeq = seq
-	session.LastContent = clipTerminalStateContent(runResult.Output)
+	session.LastContent = clipTerminalStateContent(captureOutput)
 	session.UpdatedAt = now
 	if !s.updateTerminalProxySession(sessionID, session) {
 		s.writeError(w, http.StatusNotFound, model.ErrRefNotFound, "terminal session not found")
@@ -1847,6 +1892,10 @@ func (s *Server) terminalStreamHandler(w http.ResponseWriter, r *http.Request) {
 			FrameType:   frameType,
 			StreamID:    s.streamID,
 			Cursor:      cursor,
+			CursorX:     cursorX,
+			CursorY:     cursorY,
+			PaneCols:    paneCols,
+			PaneRows:    paneRows,
 			SessionID:   sessionID,
 			Target:      session.TargetName,
 			PaneID:      session.PaneID,
@@ -1903,6 +1952,37 @@ func (s *Server) dropTerminalProxySession(sessionID string) {
 	s.terminalMu.Unlock()
 }
 
+func (s *Server) pruneExpiredTerminalCaches(now time.Time) {
+	s.terminalMu.Lock()
+	defer s.terminalMu.Unlock()
+
+	if s.terminalProxyTTL > 0 {
+		for sessionID, session := range s.terminalProxy {
+			anchor := session.UpdatedAt
+			if anchor.IsZero() {
+				anchor = session.CreatedAt
+			}
+			if anchor.IsZero() {
+				continue
+			}
+			if now.Sub(anchor) > s.terminalProxyTTL {
+				delete(s.terminalProxy, sessionID)
+			}
+		}
+	}
+
+	if s.terminalStateTTL > 0 {
+		for key, state := range s.terminalStates {
+			if state.updatedAt.IsZero() {
+				continue
+			}
+			if now.Sub(state.updatedAt) > s.terminalStateTTL {
+				delete(s.terminalStates, key)
+			}
+		}
+	}
+}
+
 func (s *Server) terminalReadHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		s.methodNotAllowed(w, http.MethodPost)
@@ -1928,6 +2008,7 @@ func (s *Server) terminalReadHandler(w http.ResponseWriter, r *http.Request) {
 	if req.Lines > maxTerminalReadLines {
 		req.Lines = maxTerminalReadLines
 	}
+	s.pruneExpiredTerminalCaches(time.Now().UTC())
 	var (
 		cursorStreamID string
 		cursorSeq      int64
@@ -1945,10 +2026,11 @@ func (s *Server) terminalReadHandler(w http.ResponseWriter, r *http.Request) {
 		s.writeActionResolveError(w, err)
 		return
 	}
-	runResult, runErr := s.executor.Run(
+	captureOutput, cursorX, cursorY, paneCols, paneRows, runErr := s.capturePaneSnapshotWithCursor(
 		r.Context(),
 		tg,
-		target.BuildTmuxCommand("capture-pane", "-t", req.PaneID, "-p", "-S", fmt.Sprintf("-%d", req.Lines)),
+		req.PaneID,
+		req.Lines,
 	)
 	if runErr != nil {
 		s.writeError(w, http.StatusBadGateway, model.ErrTargetUnreachable, "failed to read pane output")
@@ -1956,7 +2038,7 @@ func (s *Server) terminalReadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	frameType := "snapshot"
 	resetReason := ""
-	content := runResult.Output
+	content := captureOutput
 	pk := paneKey(tg.TargetID, req.PaneID)
 	s.terminalMu.Lock()
 	state, hasState := s.terminalStates[pk]
@@ -1968,20 +2050,21 @@ func (s *Server) terminalReadHandler(w http.ResponseWriter, r *http.Request) {
 			frameType = "reset"
 			resetReason = "cursor_discontinuity"
 		} else {
-			if delta, ok := deriveTerminalDelta(state.content, runResult.Output); ok {
+			if delta, ok := deriveTerminalDelta(state.content, captureOutput); ok {
 				frameType = "delta"
 				content = delta
 			} else {
 				frameType = "reset"
 				resetReason = "content_discontinuity"
-				content = runResult.Output
+				content = captureOutput
 			}
 		}
 	}
 	seq := s.sequence.Add(1)
 	s.terminalStates[pk] = terminalReadState{
-		seq:     seq,
-		content: clipTerminalStateContent(runResult.Output),
+		seq:       seq,
+		content:   clipTerminalStateContent(captureOutput),
+		updatedAt: time.Now().UTC(),
 	}
 	s.terminalMu.Unlock()
 	cursor := fmt.Sprintf("%s:%d", s.streamID, seq)
@@ -1992,6 +2075,10 @@ func (s *Server) terminalReadHandler(w http.ResponseWriter, r *http.Request) {
 			FrameType: frameType,
 			StreamID:  s.streamID,
 			Cursor:    cursor,
+			CursorX:   cursorX,
+			CursorY:   cursorY,
+			PaneCols:  paneCols,
+			PaneRows:  paneRows,
 			PaneID:    req.PaneID,
 			Target:    req.Target,
 			Lines:     req.Lines,
@@ -2031,12 +2118,9 @@ func (s *Server) terminalResizeHandler(w http.ResponseWriter, r *http.Request) {
 		s.writeActionResolveError(w, err)
 		return
 	}
-	if _, runErr := s.executor.Run(
-		r.Context(),
-		tg,
-		target.BuildTmuxCommand("resize-pane", "-t", req.PaneID, "-x", strconv.Itoa(req.Cols), "-y", strconv.Itoa(req.Rows)),
-	); runErr != nil {
-		s.writeError(w, http.StatusBadGateway, model.ErrTargetUnreachable, "failed to resize pane")
+	pane, paneErr := s.resolvePaneByTargetIDPaneID(r.Context(), tg.TargetID, req.PaneID)
+	if paneErr != nil {
+		s.writeActionResolveError(w, paneErr)
 		return
 	}
 	resp := api.TerminalResizeResponse{
@@ -2047,6 +2131,34 @@ func (s *Server) terminalResizeHandler(w http.ResponseWriter, r *http.Request) {
 		Cols:          req.Cols,
 		Rows:          req.Rows,
 		ResultCode:    "completed",
+		Policy:        resizePolicySingleClientApply,
+	}
+	if sessionName := strings.TrimSpace(pane.SessionName); sessionName != "" {
+		clientCount, countErr := s.tmuxClientCount(r.Context(), tg, sessionName)
+		if countErr == nil {
+			resp.ClientCount = clientCount
+			if clientCount > 1 {
+				resp.ResultCode = "skipped_conflict"
+				resp.Policy = resizePolicyMultiClientSkip
+				resp.Reason = "multiple_clients_attached"
+				s.writeJSON(w, http.StatusOK, resp)
+				return
+			}
+		} else {
+			resp.ResultCode = "skipped_conflict"
+			resp.Policy = resizePolicyInspectionFallbackSkip
+			resp.Reason = "client_inspection_failed"
+			s.writeJSON(w, http.StatusOK, resp)
+			return
+		}
+	}
+	if _, runErr := s.executor.Run(
+		r.Context(),
+		tg,
+		target.BuildTmuxCommand("resize-pane", "-t", req.PaneID, "-x", strconv.Itoa(req.Cols), "-y", strconv.Itoa(req.Rows)),
+	); runErr != nil {
+		s.writeError(w, http.StatusBadGateway, model.ErrTargetUnreachable, "failed to resize pane")
+		return
 	}
 	s.writeJSON(w, http.StatusOK, resp)
 }
@@ -2249,6 +2361,41 @@ func (s *Server) resolveTargetAndPane(ctx context.Context, targetName, paneID st
 		}
 	}
 	return model.Target{}, db.ErrNotFound
+}
+
+func (s *Server) resolvePaneByTargetIDPaneID(ctx context.Context, targetID, paneID string) (model.Pane, error) {
+	panes, err := s.store.ListPanes(ctx)
+	if err != nil {
+		return model.Pane{}, err
+	}
+	for _, pane := range panes {
+		if pane.TargetID == targetID && pane.PaneID == paneID {
+			return pane, nil
+		}
+	}
+	return model.Pane{}, db.ErrNotFound
+}
+
+func (s *Server) tmuxClientCount(ctx context.Context, tg model.Target, sessionName string) (int, error) {
+	run, err := s.executor.Run(
+		ctx,
+		tg,
+		target.BuildTmuxCommand("list-clients", "-t", sessionName, "-F", "#{client_tty}"),
+	)
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	scanner := bufio.NewScanner(strings.NewReader(run.Output))
+	for scanner.Scan() {
+		if strings.TrimSpace(scanner.Text()) != "" {
+			count++
+		}
+	}
+	if scanErr := scanner.Err(); scanErr != nil {
+		return 0, scanErr
+	}
+	return count, nil
 }
 
 func (s *Server) writeActionResolveError(w http.ResponseWriter, err error) {
@@ -2647,6 +2794,7 @@ func (s *Server) buildPaneItems(ctx context.Context, targets []model.Target) ([]
 		ByCategory: map[string]int{},
 	}
 	items := make([]api.PaneItem, 0, len(panes))
+	presentationNow := time.Now().UTC()
 	for _, p := range panes {
 		if _, ok := requestedIDs[p.TargetID]; !ok {
 			continue
@@ -2718,10 +2866,16 @@ func (s *Server) buildPaneItems(ctx context.Context, targets []model.Target) ([]
 			codexHint,
 			hasCodexHint,
 		)
+		claudeHint := claudeSessionHint{}
+		hasClaudeHint := false
 		if strings.EqualFold(strings.TrimSpace(agentType), "claude") {
-			if hint, ok := claudeHintsByRuntimeID[strings.TrimSpace(runtimeID)]; ok && hint.label != "" {
-				sessionLabel = hint.label
-				sessionLabelSource = hint.source
+			if hint, ok := claudeHintsByRuntimeID[strings.TrimSpace(runtimeID)]; ok {
+				claudeHint = hint
+				hasClaudeHint = true
+				if hint.label != "" {
+					sessionLabel = hint.label
+					sessionLabelSource = hint.source
+				}
 			}
 		}
 		lastInteractionAt := derivePaneLastInteractionAt(
@@ -2739,6 +2893,20 @@ func (s *Server) buildPaneItems(ctx context.Context, targets []model.Target) ([]
 			st.LastEventAt,
 			p.LastActivityAt,
 			updatedAt,
+		)
+		if hasClaudeHint && !claudeHint.at.IsZero() {
+			if lastInteractionAt == nil || claudeHint.at.After(*lastInteractionAt) {
+				v := claudeHint.at.UTC()
+				lastInteractionAt = &v
+			}
+		}
+		agentPresence, activityState, displayCategory, needsUserAction = refinePanePresentationWithSignals(
+			agentPresence,
+			activityState,
+			reason,
+			lastEventType,
+			lastInteractionAt,
+			presentationNow,
 		)
 		var lastInteractionAtStr *string
 		if lastInteractionAt != nil {
@@ -3609,6 +3777,7 @@ type runtimeEventHint struct {
 type claudeSessionHint struct {
 	label  string
 	source string
+	at     time.Time
 }
 
 type claudeRuntimeProbe struct {
@@ -3714,11 +3883,11 @@ func (s *Server) collectClaudeSessionHints(
 		if resumeID == "" {
 			continue
 		}
-		label, source := resolveClaudeSessionLabel(homeDir, probe.currentPath, resumeID, targetByID[probe.targetID].Kind)
-		if label == "" {
+		hint := resolveClaudeSessionHint(homeDir, probe.currentPath, resumeID, targetByID[probe.targetID].Kind)
+		if hint.label == "" {
 			continue
 		}
-		hints[runtimeID] = claudeSessionHint{label: label, source: source}
+		hints[runtimeID] = hint
 	}
 	return hints
 }
@@ -3808,17 +3977,24 @@ func normalizeSessionID(raw string) string {
 	return candidate
 }
 
-func resolveClaudeSessionLabel(homeDir, workspacePath, sessionID string, targetKind model.TargetKind) (string, string) {
+func resolveClaudeSessionHint(homeDir, workspacePath, sessionID string, targetKind model.TargetKind) claudeSessionHint {
 	normalizedID := normalizeSessionID(sessionID)
 	if normalizedID == "" {
-		return "", ""
+		return claudeSessionHint{}
 	}
 	if targetKind == model.TargetKindLocal {
-		if preview := readClaudeSessionPreview(homeDir, workspacePath, normalizedID); preview != "" {
-			return preview, "claude_session_jsonl"
+		if preview, at, ok := readClaudeSessionPreview(homeDir, workspacePath, normalizedID); ok && preview != "" {
+			return claudeSessionHint{
+				label:  preview,
+				source: "claude_session_jsonl",
+				at:     at,
+			}
 		}
 	}
-	return "claude " + shortSessionID(normalizedID), "claude_resume_id"
+	return claudeSessionHint{
+		label:  "claude " + shortSessionID(normalizedID),
+		source: "claude_resume_id",
+	}
 }
 
 func shortSessionID(sessionID string) string {
@@ -3832,14 +4008,17 @@ func shortSessionID(sessionID string) string {
 	return id[:8]
 }
 
-func readClaudeSessionPreview(homeDir, workspacePath, sessionID string) string {
+func readClaudeSessionPreview(homeDir, workspacePath, sessionID string) (string, time.Time, bool) {
 	candidates := claudeSessionJSONLCandidates(homeDir, workspacePath, sessionID)
 	for _, path := range candidates {
 		if preview := readFirstClaudeUserPrompt(path); preview != "" {
-			return preview
+			if stat, err := os.Stat(path); err == nil {
+				return preview, stat.ModTime().UTC(), true
+			}
+			return preview, time.Time{}, true
 		}
 	}
-	return ""
+	return "", time.Time{}, false
 }
 
 func claudeSessionJSONLCandidates(homeDir, workspacePath, sessionID string) []string {
@@ -4223,6 +4402,76 @@ func derivePanePresentation(agentType, state string) (agentPresence, activitySta
 	return agentPresence, activityState, displayCategory, needsUserAction
 }
 
+func refinePanePresentationWithSignals(
+	agentPresence string,
+	activityState string,
+	reasonCode string,
+	lastEventType string,
+	lastInteractionAt *time.Time,
+	now time.Time,
+) (string, string, string, bool) {
+	state := strings.ToLower(strings.TrimSpace(activityState))
+	reason := strings.ToLower(strings.TrimSpace(reasonCode))
+
+	if state == "" || state == string(model.StateUnknown) || state == string(model.StateIdle) {
+		switch {
+		case strings.Contains(reason, "waiting_approval"), strings.Contains(reason, "approval_required"), reason == "approval":
+			state = string(model.StateWaitingApproval)
+		case strings.Contains(reason, "waiting_input"), strings.Contains(reason, "needs_input"), reason == "input":
+			state = string(model.StateWaitingInput)
+		case strings.Contains(reason, "error"), strings.Contains(reason, "failed"):
+			state = string(model.StateError)
+		}
+	}
+
+	if agentPresence == "managed" &&
+		(state == string(model.StateIdle) || state == string(model.StateUnknown)) &&
+		lastInteractionAt != nil &&
+		!lastInteractionAt.IsZero() &&
+		!strings.Contains(reason, "idle") &&
+		!strings.Contains(reason, "complete") &&
+		!isCompletionLikeEventType(lastEventType) {
+		at := lastInteractionAt.UTC()
+		if now.Sub(at) <= 8*time.Second {
+			state = string(model.StateRunning)
+		}
+	}
+
+	var category string
+	switch {
+	case agentPresence == "none":
+		category = "unmanaged"
+	case state == string(model.StateWaitingInput),
+		state == string(model.StateWaitingApproval),
+		state == string(model.StateError):
+		category = "attention"
+	case state == string(model.StateRunning):
+		category = "running"
+	case state == string(model.StateIdle):
+		category = "idle"
+	default:
+		category = "unknown"
+	}
+
+	needsUserAction := state == string(model.StateWaitingInput) ||
+		state == string(model.StateWaitingApproval) ||
+		state == string(model.StateError)
+	return agentPresence, state, category, needsUserAction
+}
+
+func isCompletionLikeEventType(eventType string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(eventType))
+	if normalized == "" {
+		return false
+	}
+	if strings.Contains(normalized, "input") || strings.Contains(normalized, "approval") {
+		return false
+	}
+	return strings.Contains(normalized, "complete") ||
+		strings.Contains(normalized, "finished") ||
+		strings.Contains(normalized, "exit")
+}
+
 func deriveAwaitingResponseKind(state, reasonCode, lastEventType string) string {
 	switch model.CanonicalState(state) {
 	case model.StateWaitingInput:
@@ -4424,6 +4673,78 @@ func (s *Server) writeResolveTargetError(w http.ResponseWriter, err error) {
 		return
 	}
 	s.writeError(w, http.StatusInternalServerError, model.ErrPreconditionFailed, "failed to resolve target")
+}
+
+func (s *Server) capturePaneSnapshotWithCursor(
+	ctx context.Context,
+	tg model.Target,
+	paneID string,
+	lines int,
+) (string, *int, *int, *int, *int, error) {
+	result, runErr := s.executor.Run(
+		ctx,
+		tg,
+		target.BuildTmuxCommand(
+			"capture-pane", "-t", paneID, "-p", "-S", fmt.Sprintf("-%d", lines),
+			";",
+			"display-message", "-p", "-t", paneID,
+			terminalCursorMarkerPrefix+"#{cursor_x},#{cursor_y},#{pane_width},#{pane_height}",
+		),
+	)
+	if runErr != nil {
+		return "", nil, nil, nil, nil, runErr
+	}
+	content, cursorX, cursorY, paneCols, paneRows := parseTerminalSnapshotWithCursor(result.Output)
+	return content, cursorX, cursorY, paneCols, paneRows, nil
+}
+
+func parseTerminalSnapshotWithCursor(raw string) (string, *int, *int, *int, *int) {
+	markerPos := strings.LastIndex(raw, terminalCursorMarkerPrefix)
+	if markerPos < 0 {
+		return raw, nil, nil, nil, nil
+	}
+	cursorLine := raw[markerPos:]
+	if idx := strings.IndexByte(cursorLine, '\n'); idx >= 0 {
+		cursorLine = cursorLine[:idx]
+	}
+	payload := strings.TrimSpace(strings.TrimPrefix(cursorLine, terminalCursorMarkerPrefix))
+	parts := strings.Split(payload, ",")
+	if len(parts) != 4 {
+		return raw, nil, nil, nil, nil
+	}
+	x, errX := strconv.Atoi(strings.TrimSpace(parts[0]))
+	y, errY := strconv.Atoi(strings.TrimSpace(parts[1]))
+	cols, errCols := strconv.Atoi(strings.TrimSpace(parts[2]))
+	rows, errRows := strconv.Atoi(strings.TrimSpace(parts[3]))
+	if errX != nil || errY != nil || errCols != nil || errRows != nil {
+		return raw, nil, nil, nil, nil
+	}
+	content := raw[:markerPos]
+	return content, intPtr(x), intPtr(y), intPtr(cols), intPtr(rows)
+}
+
+func trimSnapshotToVisibleRows(content string, paneRows *int) string {
+	if content == "" {
+		return content
+	}
+	normalized := strings.ReplaceAll(content, "\r\n", "\n")
+	normalized = strings.ReplaceAll(normalized, "\r", "\n")
+	if strings.HasSuffix(normalized, "\n") {
+		normalized = normalized[:len(normalized)-1]
+	}
+	if paneRows == nil || *paneRows <= 0 {
+		return normalized
+	}
+	lines := strings.Split(normalized, "\n")
+	if len(lines) <= *paneRows {
+		return normalized
+	}
+	start := len(lines) - *paneRows
+	return strings.Join(lines[start:], "\n")
+}
+
+func intPtr(v int) *int {
+	return &v
 }
 
 func deriveTerminalDelta(previous, current string) (string, bool) {

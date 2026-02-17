@@ -608,6 +608,7 @@ func runTerminal(ctx context.Context, args []string, out, errOut io.Writer, svc 
 		sessionID := fs.String("session", "", "terminal session id")
 		text := fs.String("text", "", "text payload")
 		key := fs.String("key", "", "tmux key payload")
+		bytesB64 := fs.String("bytes-b64", "", "raw bytes payload in base64")
 		enter := fs.Bool("enter", false, "append Enter key")
 		paste := fs.Bool("paste", false, "send as literal text")
 		jsonOut := fs.Bool("json", false, "output JSON")
@@ -616,19 +617,31 @@ func runTerminal(ctx context.Context, args []string, out, errOut io.Writer, svc 
 			return 2
 		}
 		if fs.NArg() > 0 {
-			_, _ = fmt.Fprintln(errOut, "usage: agtmux-app terminal write --session <id> [--text <payload> | --key <tmux-key>] [--enter] [--paste] [--json]")
+			_, _ = fmt.Fprintln(errOut, "usage: agtmux-app terminal write --session <id> [--text <payload> | --key <tmux-key> | --bytes-b64 <payload>] [--enter] [--paste] [--json]")
 			return 2
 		}
 		textVal := *text
 		keyVal := strings.TrimSpace(*key)
-		if strings.TrimSpace(*sessionID) == "" || (textVal == "" && keyVal == "") || (textVal != "" && keyVal != "") {
-			_, _ = fmt.Fprintln(errOut, "usage: agtmux-app terminal write --session <id> [--text <payload> | --key <tmux-key>] [--enter] [--paste] [--json]")
+		bytesVal := strings.TrimSpace(*bytesB64)
+		modeCount := 0
+		if textVal != "" {
+			modeCount++
+		}
+		if keyVal != "" {
+			modeCount++
+		}
+		if bytesVal != "" {
+			modeCount++
+		}
+		if strings.TrimSpace(*sessionID) == "" || modeCount != 1 {
+			_, _ = fmt.Fprintln(errOut, "usage: agtmux-app terminal write --session <id> [--text <payload> | --key <tmux-key> | --bytes-b64 <payload>] [--enter] [--paste] [--json]")
 			return 2
 		}
 		resp, err := svc.TerminalWrite(ctx, appclient.TerminalWriteRequest{
 			SessionID: strings.TrimSpace(*sessionID),
 			Text:      textVal,
 			Key:       keyVal,
+			BytesB64:  bytesVal,
 			Enter:     *enter,
 			Paste:     *paste,
 		})

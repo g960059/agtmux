@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 enum RuntimeError: LocalizedError {
     case binaryNotFound(String)
@@ -101,13 +102,462 @@ struct BinaryResolver {
     }
 }
 
+protocol TerminalDaemonTransport {
+    func listCapabilities() async throws -> CapabilitiesEnvelope
+    func terminalRead(target: String, paneID: String, cursor: String?, lines: Int) async throws -> TerminalReadEnvelope
+    func terminalResize(target: String, paneID: String, cols: Int, rows: Int) async throws -> TerminalResizeResponse
+    func terminalAttach(
+        target: String,
+        paneID: String,
+        ifRuntime: String?,
+        ifState: String?,
+        ifUpdatedWithin: String?,
+        forceStale: Bool
+    ) async throws -> TerminalAttachResponse
+    func terminalDetach(sessionID: String) async throws -> TerminalDetachResponse
+    func terminalWrite(
+        sessionID: String,
+        text: String?,
+        key: String?,
+        bytes: [UInt8]?,
+        enter: Bool,
+        paste: Bool
+    ) async throws -> TerminalWriteResponse
+    func terminalStream(sessionID: String, cursor: String?, lines: Int) async throws -> TerminalStreamEnvelope
+}
+
+enum DaemonUnixClientError: Error {
+    case unavailable(String)
+    case invalidResponse(String)
+    case status(path: String, statusCode: Int, code: String, message: String)
+
+    var canFallbackToCLI: Bool {
+        switch self {
+        case .unavailable, .invalidResponse:
+            return true
+        case .status:
+            return false
+        }
+    }
+
+    func asRuntimeError(command: String) -> RuntimeError {
+        switch self {
+        case .unavailable(let message):
+            return .commandFailed("daemon \(command)", 1, message)
+        case .invalidResponse(let message):
+            return .invalidJSON(message)
+        case .status(_, let statusCode, let code, let message):
+            let stderr = [code, message]
+                .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                .joined(separator: ": ")
+            return .commandFailed("daemon \(command)", Int32(statusCode), stderr)
+        }
+    }
+}
+
+private struct DaemonAPIErrorEnvelope: Decodable {
+    struct Item: Decodable {
+        let code: String
+        let message: String
+    }
+
+    let error: Item
+}
+
+private struct DaemonTerminalReadRequest: Encodable {
+    let target: String
+    let paneID: String
+    let cursor: String?
+    let lines: Int
+
+    enum CodingKeys: String, CodingKey {
+        case target
+        case paneID = "pane_id"
+        case cursor
+        case lines
+    }
+}
+
+private struct DaemonTerminalResizeRequest: Encodable {
+    let target: String
+    let paneID: String
+    let cols: Int
+    let rows: Int
+
+    enum CodingKeys: String, CodingKey {
+        case target
+        case paneID = "pane_id"
+        case cols
+        case rows
+    }
+}
+
+private struct DaemonTerminalAttachRequest: Encodable {
+    let target: String
+    let paneID: String
+    let ifRuntime: String?
+    let ifState: String?
+    let ifUpdatedWithin: String?
+    let forceStale: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case target
+        case paneID = "pane_id"
+        case ifRuntime = "if_runtime"
+        case ifState = "if_state"
+        case ifUpdatedWithin = "if_updated_within"
+        case forceStale = "force_stale"
+    }
+}
+
+private struct DaemonTerminalDetachRequest: Encodable {
+    let sessionID: String
+
+    enum CodingKeys: String, CodingKey {
+        case sessionID = "session_id"
+    }
+}
+
+private struct DaemonTerminalWriteRequest: Encodable {
+    let sessionID: String
+    let text: String?
+    let key: String?
+    let bytesB64: String?
+    let enter: Bool
+    let paste: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case sessionID = "session_id"
+        case text
+        case key
+        case bytesB64 = "bytes_b64"
+        case enter
+        case paste
+    }
+}
+
+actor DaemonUnixTerminalTransport: TerminalDaemonTransport {
+    private let socketPath: String
+    private let decoder = JSONDecoder()
+    private let encoder = JSONEncoder()
+
+    init(socketPath: String) {
+        self.socketPath = socketPath
+    }
+
+    func listCapabilities() async throws -> CapabilitiesEnvelope {
+        let body = try await request(method: "GET", path: "/v1/capabilities", queryItems: [], requestBody: Optional<Data>.none)
+        return try decode(body, as: CapabilitiesEnvelope.self, context: "capabilities")
+    }
+
+    func terminalRead(target: String, paneID: String, cursor: String?, lines: Int) async throws -> TerminalReadEnvelope {
+        let req = DaemonTerminalReadRequest(target: target, paneID: paneID, cursor: cursor, lines: lines)
+        let body = try await request(method: "POST", path: "/v1/terminal/read", queryItems: [], requestBody: req)
+        return try decode(body, as: TerminalReadEnvelope.self, context: "terminal/read")
+    }
+
+    func terminalResize(target: String, paneID: String, cols: Int, rows: Int) async throws -> TerminalResizeResponse {
+        let req = DaemonTerminalResizeRequest(target: target, paneID: paneID, cols: cols, rows: rows)
+        let body = try await request(method: "POST", path: "/v1/terminal/resize", queryItems: [], requestBody: req)
+        return try decode(body, as: TerminalResizeResponse.self, context: "terminal/resize")
+    }
+
+    func terminalAttach(
+        target: String,
+        paneID: String,
+        ifRuntime: String?,
+        ifState: String?,
+        ifUpdatedWithin: String?,
+        forceStale: Bool
+    ) async throws -> TerminalAttachResponse {
+        let req = DaemonTerminalAttachRequest(
+            target: target,
+            paneID: paneID,
+            ifRuntime: ifRuntime,
+            ifState: ifState,
+            ifUpdatedWithin: ifUpdatedWithin,
+            forceStale: forceStale
+        )
+        let body = try await request(method: "POST", path: "/v1/terminal/attach", queryItems: [], requestBody: req)
+        return try decode(body, as: TerminalAttachResponse.self, context: "terminal/attach")
+    }
+
+    func terminalDetach(sessionID: String) async throws -> TerminalDetachResponse {
+        let req = DaemonTerminalDetachRequest(sessionID: sessionID)
+        let body = try await request(method: "POST", path: "/v1/terminal/detach", queryItems: [], requestBody: req)
+        return try decode(body, as: TerminalDetachResponse.self, context: "terminal/detach")
+    }
+
+    func terminalWrite(
+        sessionID: String,
+        text: String?,
+        key: String?,
+        bytes: [UInt8]?,
+        enter: Bool,
+        paste: Bool
+    ) async throws -> TerminalWriteResponse {
+        let bytesB64: String?
+        if let bytes, !bytes.isEmpty {
+            bytesB64 = Data(bytes).base64EncodedString()
+        } else {
+            bytesB64 = nil
+        }
+        let req = DaemonTerminalWriteRequest(
+            sessionID: sessionID,
+            text: text,
+            key: key,
+            bytesB64: bytesB64,
+            enter: enter,
+            paste: paste
+        )
+        let body = try await request(method: "POST", path: "/v1/terminal/write", queryItems: [], requestBody: req)
+        return try decode(body, as: TerminalWriteResponse.self, context: "terminal/write")
+    }
+
+    func terminalStream(sessionID: String, cursor: String?, lines: Int) async throws -> TerminalStreamEnvelope {
+        var items: [URLQueryItem] = [URLQueryItem(name: "session_id", value: sessionID)]
+        if let cursor, !cursor.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            items.append(URLQueryItem(name: "cursor", value: cursor))
+        }
+        if lines > 0 {
+            items.append(URLQueryItem(name: "lines", value: String(lines)))
+        }
+        let body = try await request(method: "GET", path: "/v1/terminal/stream", queryItems: items, requestBody: Optional<Data>.none)
+        return try decode(body, as: TerminalStreamEnvelope.self, context: "terminal/stream")
+    }
+
+    private func decode<T: Decodable>(_ data: Data, as type: T.Type, context: String) throws -> T {
+        do {
+            return try decoder.decode(type, from: data)
+        } catch {
+            throw DaemonUnixClientError.invalidResponse("decode \(context) failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func request<Body: Encodable>(
+        method: String,
+        path: String,
+        queryItems: [URLQueryItem],
+        requestBody: Body?
+    ) async throws -> Data {
+        let bodyData: Data?
+        if let requestBody {
+            bodyData = try encoder.encode(requestBody)
+        } else {
+            bodyData = nil
+        }
+        let socketPath = self.socketPath
+        return try await Task.detached(priority: .userInitiated) {
+            try Self.requestBlocking(
+                socketPath: socketPath,
+                method: method,
+                path: path,
+                queryItems: queryItems,
+                body: bodyData
+            )
+        }.value
+    }
+
+    private static func requestBlocking(
+        socketPath: String,
+        method: String,
+        path: String,
+        queryItems: [URLQueryItem],
+        body: Data?
+    ) throws -> Data {
+        let fd = try openAndConnect(socketPath: socketPath)
+        defer {
+            Darwin.close(fd)
+        }
+
+        var target = path
+        if !queryItems.isEmpty {
+            var components = URLComponents()
+            components.queryItems = queryItems
+            if let encoded = components.percentEncodedQuery, !encoded.isEmpty {
+                target += "?\(encoded)"
+            }
+        }
+
+        var requestText = "\(method) \(target) HTTP/1.0\r\n"
+        requestText += "Host: unix\r\n"
+        requestText += "Accept: application/json\r\n"
+        requestText += "Connection: close\r\n"
+        if let body {
+            requestText += "Content-Type: application/json\r\n"
+            requestText += "Content-Length: \(body.count)\r\n"
+        }
+        requestText += "\r\n"
+
+        var payload = Data(requestText.utf8)
+        if let body {
+            payload.append(body)
+        }
+        try writeAll(fd: fd, data: payload)
+        let raw = try readAll(fd: fd)
+        return try parseResponse(raw: raw, path: path)
+    }
+
+    private static func openAndConnect(socketPath: String) throws -> Int32 {
+        let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else {
+            throw DaemonUnixClientError.unavailable("open unix socket failed: \(errnoDescription())")
+        }
+
+        // Prevent SIGPIPE from terminating the app when daemon side closes
+        // the socket during startup races. We handle EPIPE as a normal error.
+        var noSigPipe: Int32 = 1
+        _ = withUnsafePointer(to: &noSigPipe) { ptr in
+            Darwin.setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, ptr, socklen_t(MemoryLayout<Int32>.size))
+        }
+
+        var addr = sockaddr_un()
+        memset(&addr, 0, MemoryLayout<sockaddr_un>.size)
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let pathBytes = Array(socketPath.utf8CString)
+        let maxPathBytes = MemoryLayout.size(ofValue: addr.sun_path)
+        guard pathBytes.count <= maxPathBytes else {
+            Darwin.close(fd)
+            throw DaemonUnixClientError.unavailable("socket path too long")
+        }
+
+        let copyResult = withUnsafeMutablePointer(to: &addr.sun_path) { pathPtr in
+            pathBytes.withUnsafeBufferPointer { pathBuffer in
+                memcpy(pathPtr, pathBuffer.baseAddress, pathBytes.count)
+            }
+        }
+        _ = copyResult
+
+        let sockLen = socklen_t(MemoryLayout<sa_family_t>.size + pathBytes.count)
+        let connectResult = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                Darwin.connect(fd, sockPtr, sockLen)
+            }
+        }
+        guard connectResult == 0 else {
+            let message = errnoDescription()
+            Darwin.close(fd)
+            throw DaemonUnixClientError.unavailable("connect unix socket failed: \(message)")
+        }
+        return fd
+    }
+
+    private static func writeAll(fd: Int32, data: Data) throws {
+        try data.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else {
+                return
+            }
+            var sent = 0
+            while sent < raw.count {
+                let wrote = Darwin.write(fd, base.advanced(by: sent), raw.count - sent)
+                if wrote < 0 {
+                    if errno == EINTR {
+                        continue
+                    }
+                    throw DaemonUnixClientError.unavailable("write failed: \(errnoDescription())")
+                }
+                sent += wrote
+            }
+        }
+    }
+
+    private static func readAll(fd: Int32) throws -> Data {
+        var data = Data()
+        var buf = [UInt8](repeating: 0, count: 8192)
+        while true {
+            let n = Darwin.read(fd, &buf, buf.count)
+            if n == 0 {
+                break
+            }
+            if n < 0 {
+                if errno == EINTR {
+                    continue
+                }
+                throw DaemonUnixClientError.unavailable("read failed: \(errnoDescription())")
+            }
+            data.append(buf, count: Int(n))
+        }
+        return data
+    }
+
+    private static func parseResponse(raw: Data, path: String) throws -> Data {
+        let separator = Data("\r\n\r\n".utf8)
+        guard let headerRange = raw.range(of: separator) else {
+            throw DaemonUnixClientError.invalidResponse("response header delimiter missing")
+        }
+        let headerData = raw.subdata(in: raw.startIndex..<headerRange.lowerBound)
+        let body = raw.subdata(in: headerRange.upperBound..<raw.endIndex)
+
+        guard let headerText = String(data: headerData, encoding: .utf8) else {
+            throw DaemonUnixClientError.invalidResponse("response header is not utf8")
+        }
+        let lines = headerText.components(separatedBy: "\r\n")
+        guard let statusLine = lines.first else {
+            throw DaemonUnixClientError.invalidResponse("missing status line")
+        }
+        let parts = statusLine.split(separator: " ", omittingEmptySubsequences: true)
+        guard parts.count >= 2, let statusCode = Int(parts[1]) else {
+            throw DaemonUnixClientError.invalidResponse("invalid status line: \(statusLine)")
+        }
+
+        if statusCode >= 400 {
+            var errorCode = "http_error"
+            var errorMessage = String(data: body, encoding: .utf8) ?? "request failed"
+            if let parsed = try? JSONDecoder().decode(DaemonAPIErrorEnvelope.self, from: body) {
+                if !parsed.error.code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    errorCode = parsed.error.code
+                }
+                if !parsed.error.message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    errorMessage = parsed.error.message
+                }
+            }
+            throw DaemonUnixClientError.status(
+                path: path,
+                statusCode: statusCode,
+                code: errorCode,
+                message: errorMessage
+            )
+        }
+        return body
+    }
+
+    private static func errnoDescription() -> String {
+        String(cString: strerror(errno))
+    }
+}
+
 struct AGTMUXCLIClient {
+    private enum FallbackPolicy {
+        case allow
+        case deny
+    }
+
     let socketPath: String
     let appBinaryPath: String
+    private let daemonTransport: (any TerminalDaemonTransport)?
+    private let commandRunner: @Sendable (String, [String]) throws -> String
+
+    init(
+        socketPath: String,
+        appBinaryPath: String,
+        daemonTransport: (any TerminalDaemonTransport)? = nil,
+        commandRunner: @escaping @Sendable (String, [String]) throws -> String = { executable, args in
+            try runCapture(executable, args)
+        }
+    ) {
+        self.socketPath = socketPath
+        self.appBinaryPath = appBinaryPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.daemonTransport = daemonTransport
+        self.commandRunner = commandRunner
+    }
 
     init(socketPath: String) throws {
-        self.socketPath = socketPath
-        self.appBinaryPath = try BinaryResolver.resolve(binary: "agtmux-app", envKey: "AGTMUX_APP_BIN")
+        let appBinaryPath = try BinaryResolver.resolve(binary: "agtmux-app", envKey: "AGTMUX_APP_BIN")
+        self.init(
+            socketPath: socketPath,
+            appBinaryPath: appBinaryPath,
+            daemonTransport: DaemonUnixTerminalTransport(socketPath: socketPath)
+        )
     }
 
     func fetchSnapshot() async throws -> DashboardSnapshot {
@@ -144,36 +594,60 @@ struct AGTMUXCLIClient {
     }
 
     func fetchCapabilities() async throws -> CapabilitiesEnvelope {
-        let out = try await runAppCommand(["terminal", "capabilities", "--json"])
-        return try decodeSingleJSONLine(out, as: CapabilitiesEnvelope.self)
+        try await withDaemonFallback(
+            daemonCommand: "/v1/capabilities",
+            daemonOperation: { transport in
+                try await transport.listCapabilities()
+            },
+            fallback: {
+                let out = try await runAppCommand(["terminal", "capabilities", "--json"])
+                return try decodeSingleJSONLine(out, as: CapabilitiesEnvelope.self)
+            }
+        )
     }
 
     func terminalRead(target: String, paneID: String, cursor: String?, lines: Int) async throws -> TerminalReadEnvelope {
-        var args = [
-            "terminal", "read",
-            "--target", target,
-            "--pane", paneID,
-            "--lines", String(lines),
-            "--json",
-        ]
-        if let cursor, !cursor.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            args += ["--cursor", cursor.trimmingCharacters(in: .whitespacesAndNewlines)]
-        }
-        let out = try await runAppCommand(args)
-        return try decodeSingleJSONLine(out, as: TerminalReadEnvelope.self)
+        try await withDaemonFallback(
+            daemonCommand: "/v1/terminal/read",
+            daemonOperation: { transport in
+                try await transport.terminalRead(target: target, paneID: paneID, cursor: cursor, lines: lines)
+            },
+            fallback: {
+                var args = [
+                    "terminal", "read",
+                    "--target", target,
+                    "--pane", paneID,
+                    "--lines", String(lines),
+                    "--json",
+                ]
+                if let cursor, !cursor.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    args += ["--cursor", cursor.trimmingCharacters(in: .whitespacesAndNewlines)]
+                }
+                let out = try await runAppCommand(args)
+                return try decodeSingleJSONLine(out, as: TerminalReadEnvelope.self)
+            }
+        )
     }
 
     func terminalResize(target: String, paneID: String, cols: Int, rows: Int) async throws -> TerminalResizeResponse {
-        let args = [
-            "terminal", "resize",
-            "--target", target,
-            "--pane", paneID,
-            "--cols", String(cols),
-            "--rows", String(rows),
-            "--json",
-        ]
-        let out = try await runAppCommand(args)
-        return try decodeSingleJSONLine(out, as: TerminalResizeResponse.self)
+        try await withDaemonFallback(
+            daemonCommand: "/v1/terminal/resize",
+            daemonOperation: { transport in
+                try await transport.terminalResize(target: target, paneID: paneID, cols: cols, rows: rows)
+            },
+            fallback: {
+                let args = [
+                    "terminal", "resize",
+                    "--target", target,
+                    "--pane", paneID,
+                    "--cols", String(cols),
+                    "--rows", String(rows),
+                    "--json",
+                ]
+                let out = try await runAppCommand(args)
+                return try decodeSingleJSONLine(out, as: TerminalResizeResponse.self)
+            }
+        )
     }
 
     func terminalAttach(
@@ -184,90 +658,154 @@ struct AGTMUXCLIClient {
         ifUpdatedWithin: String? = nil,
         forceStale: Bool = false
     ) async throws -> TerminalAttachResponse {
-        var args = [
-            "terminal", "attach",
-            "--target", target,
-            "--pane", paneID,
-            "--json",
-        ]
-        if let ifRuntime, !ifRuntime.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            args += ["--if-runtime", ifRuntime.trimmingCharacters(in: .whitespacesAndNewlines)]
-        }
-        if let ifState, !ifState.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            args += ["--if-state", ifState.trimmingCharacters(in: .whitespacesAndNewlines)]
-        }
-        if let ifUpdatedWithin, !ifUpdatedWithin.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            args += ["--if-updated-within", ifUpdatedWithin.trimmingCharacters(in: .whitespacesAndNewlines)]
-        }
-        if forceStale {
-            args.append("--force-stale")
-        }
-        let out = try await runAppCommand(args)
-        return try decodeSingleJSONLine(out, as: TerminalAttachResponse.self)
+        try await withDaemonFallback(
+            daemonCommand: "/v1/terminal/attach",
+            fallbackPolicy: .deny,
+            daemonOperation: { transport in
+                try await transport.terminalAttach(
+                    target: target,
+                    paneID: paneID,
+                    ifRuntime: ifRuntime,
+                    ifState: ifState,
+                    ifUpdatedWithin: ifUpdatedWithin,
+                    forceStale: forceStale
+                )
+            },
+            fallback: {
+                var args = [
+                    "terminal", "attach",
+                    "--target", target,
+                    "--pane", paneID,
+                    "--json",
+                ]
+                if let ifRuntime, !ifRuntime.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    args += ["--if-runtime", ifRuntime.trimmingCharacters(in: .whitespacesAndNewlines)]
+                }
+                if let ifState, !ifState.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    args += ["--if-state", ifState.trimmingCharacters(in: .whitespacesAndNewlines)]
+                }
+                if let ifUpdatedWithin, !ifUpdatedWithin.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    args += ["--if-updated-within", ifUpdatedWithin.trimmingCharacters(in: .whitespacesAndNewlines)]
+                }
+                if forceStale {
+                    args.append("--force-stale")
+                }
+                let out = try await runAppCommand(args)
+                return try decodeSingleJSONLine(out, as: TerminalAttachResponse.self)
+            }
+        )
     }
 
     func terminalDetach(sessionID: String) async throws -> TerminalDetachResponse {
-        let out = try await runAppCommand([
-            "terminal", "detach",
-            "--session", sessionID,
-            "--json",
-        ])
-        return try decodeSingleJSONLine(out, as: TerminalDetachResponse.self)
+        try await withDaemonFallback(
+            daemonCommand: "/v1/terminal/detach",
+            fallbackPolicy: .deny,
+            daemonOperation: { transport in
+                try await transport.terminalDetach(sessionID: sessionID)
+            },
+            fallback: {
+                let out = try await runAppCommand([
+                    "terminal", "detach",
+                    "--session", sessionID,
+                    "--json",
+                ])
+                return try decodeSingleJSONLine(out, as: TerminalDetachResponse.self)
+            }
+        )
     }
 
     func terminalWrite(
         sessionID: String,
         text: String? = nil,
         key: String? = nil,
+        bytes: [UInt8]? = nil,
         enter: Bool = false,
         paste: Bool = false
     ) async throws -> TerminalWriteResponse {
         let hasText = (text?.isEmpty == false)
         let normalizedKey = key?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let hasKey = !normalizedKey.isEmpty
-        if hasText == hasKey {
+        let hasBytes = (bytes?.isEmpty == false)
+        let modeCount = (hasText ? 1 : 0) + (hasKey ? 1 : 0) + (hasBytes ? 1 : 0)
+        if modeCount != 1 {
             throw RuntimeError.commandFailed(
                 "agtmux-app terminal write",
                 2,
-                "either text or key must be set, and both cannot be set together"
+                "exactly one of text, key, or bytes must be set"
             )
         }
-
-        var args = [
-            "terminal", "write",
-            "--session", sessionID,
-            "--json",
-        ]
-        if let text, !text.isEmpty {
-            args += ["--text", text]
-        } else {
-            args += ["--key", normalizedKey]
-        }
-        if enter {
-            args.append("--enter")
-        }
-        if paste {
-            args.append("--paste")
-        }
-        let out = try await runAppCommand(args)
-        return try decodeSingleJSONLine(out, as: TerminalWriteResponse.self)
+        return try await withDaemonFallback(
+            daemonCommand: "/v1/terminal/write",
+            fallbackPolicy: .deny,
+            daemonOperation: { transport in
+                try await transport.terminalWrite(
+                    sessionID: sessionID,
+                    text: text,
+                    key: hasKey ? normalizedKey : nil,
+                    bytes: hasBytes ? bytes : nil,
+                    enter: enter,
+                    paste: paste
+                )
+            },
+            fallback: {
+                var args = [
+                    "terminal", "write",
+                    "--session", sessionID,
+                    "--json",
+                ]
+                if let text, !text.isEmpty {
+                    args += ["--text", text]
+                } else if hasKey {
+                    args += ["--key", normalizedKey]
+                } else if let bytes, !bytes.isEmpty {
+                    args += ["--bytes-b64", Data(bytes).base64EncodedString()]
+                }
+                if enter {
+                    args.append("--enter")
+                }
+                if paste {
+                    args.append("--paste")
+                }
+                let out = try await runAppCommand(args)
+                return try decodeSingleJSONLine(out, as: TerminalWriteResponse.self)
+            }
+        )
     }
 
     func terminalStream(sessionID: String, cursor: String?, lines: Int) async throws -> TerminalStreamEnvelope {
-        var args = [
-            "terminal", "stream",
-            "--session", sessionID,
-            "--lines", String(lines),
-            "--json",
-        ]
-        if let cursor, !cursor.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            args += ["--cursor", cursor.trimmingCharacters(in: .whitespacesAndNewlines)]
-        }
-        let out = try await runAppCommand(args)
-        return try decodeSingleJSONLine(out, as: TerminalStreamEnvelope.self)
+        try await withDaemonFallback(
+            daemonCommand: "/v1/terminal/stream",
+            daemonOperation: { transport in
+                try await transport.terminalStream(sessionID: sessionID, cursor: cursor, lines: lines)
+            },
+            fallback: {
+                var args = [
+                    "terminal", "stream",
+                    "--session", sessionID,
+                    "--lines", String(lines),
+                    "--json",
+                ]
+                if let cursor, !cursor.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    args += ["--cursor", cursor.trimmingCharacters(in: .whitespacesAndNewlines)]
+                }
+                let out = try await runAppCommand(args)
+                return try decodeSingleJSONLine(out, as: TerminalStreamEnvelope.self)
+            }
+        )
     }
 
-    func sendText(target: String, paneID: String, text: String, requestRef: String, enter: Bool, paste: Bool) async throws -> ActionResponse {
+    func sendText(
+        target: String,
+        paneID: String,
+        text: String,
+        requestRef: String,
+        enter: Bool,
+        paste: Bool,
+        ifRuntime: String? = nil,
+        ifState: String? = nil,
+        ifUpdatedWithin: String? = nil,
+        forceStale: Bool = false
+    ) async throws -> ActionResponse {
         var args = [
             "action", "send",
             "--request-ref", requestRef,
@@ -281,6 +819,18 @@ struct AGTMUXCLIClient {
         }
         if paste {
             args.append("--paste")
+        }
+        if let ifRuntime, !ifRuntime.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            args += ["--if-runtime", ifRuntime.trimmingCharacters(in: .whitespacesAndNewlines)]
+        }
+        if let ifState, !ifState.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            args += ["--if-state", ifState.trimmingCharacters(in: .whitespacesAndNewlines)]
+        }
+        if let ifUpdatedWithin, !ifUpdatedWithin.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            args += ["--if-updated-within", ifUpdatedWithin.trimmingCharacters(in: .whitespacesAndNewlines)]
+        }
+        if forceStale {
+            args.append("--force-stale")
         }
         let out = try await runAppCommand(args)
         return try decodeSingleJSONLine(out, as: ActionResponse.self)
@@ -299,7 +849,17 @@ struct AGTMUXCLIClient {
         return try decodeSingleJSONLine(out, as: ActionResponse.self)
     }
 
-    func kill(target: String, paneID: String, requestRef: String, mode: String, signal: String) async throws -> ActionResponse {
+    func kill(
+        target: String,
+        paneID: String,
+        requestRef: String,
+        mode: String,
+        signal: String,
+        ifRuntime: String? = nil,
+        ifState: String? = nil,
+        ifUpdatedWithin: String? = nil,
+        forceStale: Bool = false
+    ) async throws -> ActionResponse {
         let args = [
             "action", "kill",
             "--request-ref", requestRef,
@@ -309,7 +869,20 @@ struct AGTMUXCLIClient {
             "--signal", signal,
             "--json",
         ]
-        let out = try await runAppCommand(args)
+        var finalArgs = args
+        if let ifRuntime, !ifRuntime.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            finalArgs += ["--if-runtime", ifRuntime.trimmingCharacters(in: .whitespacesAndNewlines)]
+        }
+        if let ifState, !ifState.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            finalArgs += ["--if-state", ifState.trimmingCharacters(in: .whitespacesAndNewlines)]
+        }
+        if let ifUpdatedWithin, !ifUpdatedWithin.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            finalArgs += ["--if-updated-within", ifUpdatedWithin.trimmingCharacters(in: .whitespacesAndNewlines)]
+        }
+        if forceStale {
+            finalArgs.append("--force-stale")
+        }
+        let out = try await runAppCommand(finalArgs)
         return try decodeSingleJSONLine(out, as: ActionResponse.self)
     }
 
@@ -324,9 +897,35 @@ struct AGTMUXCLIClient {
 
     private func runAppCommand(_ args: [String]) async throws -> String {
         let allArgs = ["--socket", socketPath] + args
+        let appBinaryPath = self.appBinaryPath
+        let commandRunner = self.commandRunner
         return try await Task.detached(priority: .userInitiated) {
-            try runCapture(appBinaryPath, allArgs)
+            try commandRunner(appBinaryPath, allArgs)
         }.value
+    }
+
+    private func withDaemonFallback<T>(
+        daemonCommand: String,
+        fallbackPolicy: FallbackPolicy = .allow,
+        daemonOperation: @escaping (any TerminalDaemonTransport) async throws -> T,
+        fallback: @escaping () async throws -> T
+    ) async throws -> T {
+        guard let daemonTransport else {
+            return try await fallback()
+        }
+        do {
+            return try await daemonOperation(daemonTransport)
+        } catch let daemonError as DaemonUnixClientError {
+            if fallbackPolicy == .allow && daemonError.canFallbackToCLI {
+                return try await fallback()
+            }
+            throw daemonError.asRuntimeError(command: daemonCommand)
+        } catch {
+            if fallbackPolicy == .allow {
+                return try await fallback()
+            }
+            throw error
+        }
     }
 }
 
@@ -344,11 +943,20 @@ final class DaemonManager {
     private let backupIntervalSeconds: TimeInterval = 300
     private let maxBackupFiles = 12
 
-    init(socketPath: String, dbPath: String, logPath: String) throws {
+    init(
+        socketPath: String,
+        dbPath: String,
+        logPath: String,
+        daemonBinaryPath: String? = nil
+    ) throws {
         self.socketPath = socketPath
         self.dbPath = dbPath
         self.logPath = logPath
-        self.daemonBinaryPath = try BinaryResolver.resolve(binary: "agtmuxd", envKey: "AGTMUX_DAEMON_BIN")
+        if let daemonBinaryPath, !daemonBinaryPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            self.daemonBinaryPath = daemonBinaryPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            self.daemonBinaryPath = try BinaryResolver.resolve(binary: "agtmuxd", envKey: "AGTMUX_DAEMON_BIN")
+        }
         let supportDir = URL(fileURLWithPath: logPath).deletingLastPathComponent()
         self.launcherLogPath = supportDir.appendingPathComponent("launcher.log", isDirectory: false).path
     }

@@ -8,6 +8,7 @@ struct TargetItem: Decodable, Identifiable, Hashable {
     let targetID: String
     let targetName: String
     let kind: String
+    let connectionRef: String?
     let isDefault: Bool
     let health: String
 
@@ -17,6 +18,7 @@ struct TargetItem: Decodable, Identifiable, Hashable {
         case targetID = "target_id"
         case targetName = "target_name"
         case kind
+        case connectionRef = "connection_ref"
         case isDefault = "is_default"
         case health
     }
@@ -247,6 +249,10 @@ struct TerminalFrame: Decodable {
     let frameType: String
     let streamID: String
     let cursor: String
+    let cursorX: Int?
+    let cursorY: Int?
+    let paneCols: Int?
+    let paneRows: Int?
     let paneID: String
     let target: String
     let lines: Int
@@ -257,6 +263,10 @@ struct TerminalFrame: Decodable {
         case frameType = "frame_type"
         case streamID = "stream_id"
         case cursor
+        case cursorX = "cursor_x"
+        case cursorY = "cursor_y"
+        case paneCols = "pane_cols"
+        case paneRows = "pane_rows"
         case paneID = "pane_id"
         case target
         case lines
@@ -271,6 +281,9 @@ struct TerminalResizeResponse: Decodable {
     let cols: Int
     let rows: Int
     let resultCode: String
+    let policy: String?
+    let clientCount: Int?
+    let reason: String?
 
     enum CodingKeys: String, CodingKey {
         case target
@@ -278,6 +291,9 @@ struct TerminalResizeResponse: Decodable {
         case cols
         case rows
         case resultCode = "result_code"
+        case policy
+        case clientCount = "client_count"
+        case reason
     }
 }
 
@@ -329,6 +345,10 @@ struct TerminalStreamFrame: Decodable {
     let frameType: String
     let streamID: String
     let cursor: String
+    let cursorX: Int?
+    let cursorY: Int?
+    let paneCols: Int?
+    let paneRows: Int?
     let sessionID: String
     let target: String
     let paneID: String
@@ -341,6 +361,10 @@ struct TerminalStreamFrame: Decodable {
         case frameType = "frame_type"
         case streamID = "stream_id"
         case cursor
+        case cursorX = "cursor_x"
+        case cursorY = "cursor_y"
+        case paneCols = "pane_cols"
+        case paneRows = "pane_rows"
         case sessionID = "session_id"
         case target
         case paneID = "pane_id"

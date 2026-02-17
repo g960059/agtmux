@@ -3,6 +3,8 @@ import SwiftUI
 
 @MainActor
 final class AppViewModel: ObservableObject {
+    typealias ExternalTerminalCommandRunner = (String, [String]) throws -> String
+
     enum DaemonState: String {
         case starting
         case running
@@ -24,6 +26,25 @@ final class AppViewModel: ObservableObject {
                 return "By Status"
             case .byChronological:
                 return "By Chronological"
+            }
+        }
+    }
+
+    enum SessionSortMode: String, CaseIterable, Identifiable {
+        case stable
+        case recentActivity
+        case name
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .stable:
+                return "Stable"
+            case .recentActivity:
+                return "Recent Activity"
+            case .name:
+                return "Name"
             }
         }
     }
@@ -97,6 +118,7 @@ final class AppViewModel: ObservableObject {
         let byCategory: [String: Int]
         let panes: [PaneItem]
         let windows: [WindowSection]
+        let lastActiveAt: Date?
     }
 
     private struct PaneObservation {
@@ -110,7 +132,11 @@ final class AppViewModel: ObservableObject {
     private enum PreferenceKey {
         static let uiPrefsVersion = "ui.prefs_version"
         static let viewMode = "ui.view_mode"
+        static let sessionSortMode = "ui.session_sort_mode"
+        static let sessionStableOrder = "ui.session_stable_order"
+        static let sessionStableOrderNext = "ui.session_stable_order_next"
         static let windowGrouping = "ui.window_grouping"
+        static let interactiveTerminalInputEnabled = "ui.interactive_terminal_input_enabled"
         static let showWindowMetadata = "ui.show_window_metadata"
         static let showWindowGroupBackground = "ui.show_window_group_background"
         static let showSessionMetadataInStatusView = "ui.show_session_metadata_in_status_view"
@@ -128,26 +154,58 @@ final class AppViewModel: ObservableObject {
     @Published var sessions: [SessionItem] = []
     @Published var windows: [WindowItem] = []
     @Published var panes: [PaneItem] = []
+    let nativeTmuxTerminalEnabled: Bool
     @Published var selectedPane: PaneItem? {
         didSet {
             if oldValue?.id != selectedPane?.id {
                 terminalStreamTask?.cancel()
                 if let oldPaneID = oldValue?.id {
-                    if let oldSessionID = terminalProxySessionByPaneID.removeValue(forKey: oldPaneID) {
-                        terminalCursorByPaneID.removeValue(forKey: oldPaneID)
-                        Task { [weak self] in
-                            await self?.detachTerminalProxySession(sessionID: oldSessionID)
+                    Task { [weak self] in
+                        guard let self else {
+                            return
                         }
-                    } else {
-                        terminalCursorByPaneID.removeValue(forKey: oldPaneID)
+                        if let oldSessionID = await self.terminalSessionController.resetPane(oldPaneID) {
+                            await self.detachTerminalProxySession(sessionID: oldSessionID)
+                        }
                     }
                 }
-                if let paneID = selectedPane?.id {
-                    // Force a fresh snapshot/stream sync on pane switch.
-                    terminalCursorByPaneID.removeValue(forKey: paneID)
-                }
                 outputPreview = ""
-                restartTerminalStreamForSelectedPane()
+                terminalCursorX = nil
+                terminalCursorY = nil
+                terminalPaneCols = nil
+                terminalPaneRows = nil
+                let nextPaneID = selectedPane?.id
+                if autoStreamOnSelection {
+                    Task { [weak self] in
+                        guard let self else {
+                            return
+                        }
+                        if let nextPaneID {
+                            // Force a fresh snapshot/stream sync on pane switch.
+                            await self.terminalSessionController.clearCursor(for: nextPaneID)
+                        }
+                        guard self.selectedPane?.id == nextPaneID else {
+                            return
+                        }
+                        self.restartTerminalStreamForSelectedPane()
+                    }
+                } else {
+                    if let nextPaneID {
+                        Task { [weak self] in
+                            guard let self else {
+                                return
+                            }
+                            guard self.selectedPane?.id == nextPaneID else {
+                                return
+                            }
+                            await self.terminalSessionController.clearCursor(for: nextPaneID)
+                        }
+                    }
+                    if nextPaneID != nil {
+                        // Keep generation semantics aligned with production even when auto stream is disabled for tests.
+                        terminalStreamGeneration += 1
+                    }
+                }
             }
         }
     }
@@ -155,11 +213,25 @@ final class AppViewModel: ObservableObject {
     @Published var sendText: String = ""
     @Published var sendEnter: Bool = true
     @Published var sendPaste: Bool = false
+    @Published var interactiveTerminalInputEnabled: Bool = true {
+        didSet {
+            defaults.set(interactiveTerminalInputEnabled, forKey: PreferenceKey.interactiveTerminalInputEnabled)
+        }
+    }
     @Published var outputPreview: String = ""
+    @Published var terminalCursorX: Int?
+    @Published var terminalCursorY: Int?
+    @Published var terminalPaneCols: Int?
+    @Published var terminalPaneRows: Int?
     @Published var refreshInFlight: Bool = false
     @Published var viewMode: ViewMode = .bySession {
         didSet {
             defaults.set(viewMode.rawValue, forKey: PreferenceKey.viewMode)
+        }
+    }
+    @Published var sessionSortMode: SessionSortMode = .stable {
+        didSet {
+            defaults.set(sessionSortMode.rawValue, forKey: PreferenceKey.sessionSortMode)
         }
     }
     @Published var windowGrouping: WindowGrouping = .auto {
@@ -212,14 +284,19 @@ final class AppViewModel: ObservableObject {
     private let daemon: DaemonManager
     private let client: AGTMUXCLIClient
     private let defaults: UserDefaults
+    private let externalTerminalCommandRunner: ExternalTerminalCommandRunner
+    // Keeps production behavior enabled by default while allowing deterministic unit tests.
+    private let autoStreamOnSelection: Bool
     private var pollingTask: Task<Void, Never>?
     private var paneObservations: [String: PaneObservation] = [:]
     private var queueLastEmitByKey: [String: Date] = [:]
+    private var sessionStableOrder: [String: Int] = [:]
+    private var nextSessionStableOrder = 0
     private var terminalCapabilities: CapabilityFlags?
     private var terminalCapabilitiesFetchedAt: Date?
-    private var terminalCursorByPaneID: [String: String] = [:]
-    private var terminalProxySessionByPaneID: [String: String] = [:]
+    private let terminalSessionController: TerminalSessionController
     private var terminalStreamTask: Task<Void, Never>?
+    private var terminalResizeTask: Task<Void, Never>?
     private var terminalStreamGeneration: Int = 0
     private var didBootstrap = false
     private var recoveryInFlight = false
@@ -227,21 +304,35 @@ final class AppViewModel: ObservableObject {
     private let queueDedupeWindowSeconds: TimeInterval = 30
     private let recoveryCooldownSeconds: TimeInterval = 6
     private let queueLimit = 250
-    private let currentUIPrefsVersion = 4
+    private let currentUIPrefsVersion = 6
     private let terminalCapabilitiesCacheTTLSeconds: TimeInterval = 60
-    private let terminalStreamPollIntervalSeconds: TimeInterval = 1.0
-    private let terminalOutputMaxChars = 120_000
+    private let terminalStreamPollIntervalSeconds: TimeInterval = 0.12
+    private let terminalStreamLines = 120
+    private let terminalOutputMaxChars = 60_000
 
-    init(daemon: DaemonManager, client: AGTMUXCLIClient, defaults: UserDefaults = .standard) {
+    init(
+        daemon: DaemonManager,
+        client: AGTMUXCLIClient,
+        defaults: UserDefaults = .standard,
+        nativeTmuxTerminalEnabled: Bool = false,
+        autoStreamOnSelection: Bool = true,
+        terminalSessionController: TerminalSessionController = TerminalSessionController(),
+        externalTerminalCommandRunner: @escaping ExternalTerminalCommandRunner = AppViewModel.runExternalTerminalCommand
+    ) {
         self.daemon = daemon
         self.client = client
         self.defaults = defaults
+        self.nativeTmuxTerminalEnabled = nativeTmuxTerminalEnabled
+        self.externalTerminalCommandRunner = externalTerminalCommandRunner
+        self.autoStreamOnSelection = autoStreamOnSelection
+        self.terminalSessionController = terminalSessionController
         loadPreferences()
     }
 
     deinit {
         pollingTask?.cancel()
         terminalStreamTask?.cancel()
+        terminalResizeTask?.cancel()
     }
 
     func bootstrap() {
@@ -275,8 +366,29 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    func openSelectedPaneInExternalTerminal() {
+        guard let pane = selectedPane else {
+            infoMessage = ""
+            errorMessage = "Pane を選択してください。"
+            return
+        }
+        do {
+            let invocation = try buildExternalTerminalInvocation(for: pane)
+            _ = try externalTerminalCommandRunner(invocation.executable, invocation.args)
+            infoMessage = "opened in external terminal"
+            errorMessage = ""
+        } catch {
+            infoMessage = ""
+            errorMessage = error.localizedDescription
+        }
+    }
+
     var hasSelectedPane: Bool {
         selectedPane != nil
+    }
+
+    func supportsNativeTmuxTerminal(for pane: PaneItem) -> Bool {
+        normalizedToken(pane.identity.target) == "local"
     }
 
     var canSend: Bool {
@@ -300,49 +412,75 @@ final class AppViewModel: ObservableObject {
                     return
                 }
                 let streamGeneration = terminalStreamGeneration
-                if await shouldUseTerminalProxy() {
-                    let sessionID = try await ensureTerminalProxySession(for: pane, generation: streamGeneration)
-                    guard selectedPane?.id == pane.id else {
-                        return
-                    }
-                    let resp = try await client.terminalWrite(
-                        sessionID: sessionID,
-                        text: sendText,
-                        key: nil,
-                        enter: sendEnter,
-                        paste: sendPaste
-                    )
-                    if resp.resultCode != "completed" {
-                        let reason = resp.errorCode ?? "unknown"
-                        errorMessage = "terminal-write failed: \(reason)"
-                        return
-                    }
-                    let streamResp = try await client.terminalStream(
-                        sessionID: sessionID,
-                        cursor: terminalCursorByPaneID[pane.id],
-                        lines: 200
-                    )
-                    terminalCursorByPaneID[pane.id] = streamResp.frame.cursor
-                    applyTerminalStreamFrame(streamResp.frame, paneID: pane.id)
-                    if streamResp.frame.frameType == "attached" {
-                        let followResp = try await client.terminalStream(
+                let guardOptions = writeGuardOptions(for: pane)
+                if await shouldUseTerminalProxy(for: pane.id) {
+                    do {
+                        let sessionID = try await ensureTerminalProxySession(for: pane, generation: streamGeneration)
+                        guard selectedPane?.id == pane.id else {
+                            return
+                        }
+                        let resp = try await client.terminalWrite(
                             sessionID: sessionID,
-                            cursor: streamResp.frame.cursor,
-                            lines: 200
+                            text: sendText,
+                            key: nil,
+                            bytes: nil,
+                            enter: sendEnter,
+                            paste: sendPaste
                         )
-                        terminalCursorByPaneID[pane.id] = followResp.frame.cursor
-                        applyTerminalStreamFrame(followResp.frame, paneID: pane.id)
+                        if resp.resultCode != "completed" {
+                            let reason = resp.errorCode ?? "unknown"
+                            errorMessage = "terminal-write failed: \(reason)"
+                            return
+                        }
+                        if shouldPerformImmediateWriteRefresh(for: pane.id, generation: streamGeneration) {
+                            let currentCursor = await terminalSessionController.cursor(for: pane.id)
+                            let streamResp = try await client.terminalStream(
+                                sessionID: sessionID,
+                                cursor: currentCursor,
+                                lines: terminalStreamLines
+                            )
+                            await terminalSessionController.setCursor(streamResp.frame.cursor, for: pane.id)
+                            applyTerminalStreamFrame(streamResp.frame, paneID: pane.id)
+                            if streamResp.frame.frameType == "attached" {
+                                let followResp = try await client.terminalStream(
+                                    sessionID: sessionID,
+                                    cursor: streamResp.frame.cursor,
+                                    lines: terminalStreamLines
+                                )
+                                await terminalSessionController.setCursor(followResp.frame.cursor, for: pane.id)
+                                applyTerminalStreamFrame(followResp.frame, paneID: pane.id)
+                            }
+                        }
+                        await terminalSessionController.recordSuccess(for: pane.id)
+                        infoMessage = "terminal-write: \(resp.resultCode)"
+                    } catch {
+                        if error is CancellationError {
+                            throw error
+                        }
+                        let outcome = await terminalSessionController.recordFailure(for: pane.id)
+                        if shouldResetTerminalProxySession(error: error),
+                           let staleSessionID = await terminalSessionController.clearProxySession(for: pane.id) {
+                            await terminalSessionController.clearCursor(for: pane.id)
+                            await detachTerminalProxySession(sessionID: staleSessionID)
+                        }
+                        if outcome.didEnterDegradedMode {
+                            infoMessage = "interactive terminal degraded to snapshot mode"
+                        }
+                        throw error
                     }
-                    infoMessage = "terminal-write: \(resp.resultCode)"
                 } else {
                     let requestRef = "macapp-send-\(UUID().uuidString)"
                     let resp = try await client.sendText(
                         target: pane.identity.target,
                         paneID: pane.identity.paneID,
-                        text: sendText,
+                        text: text,
                         requestRef: requestRef,
                         enter: sendEnter,
-                        paste: sendPaste
+                        paste: sendPaste,
+                        ifRuntime: guardOptions.ifRuntime,
+                        ifState: guardOptions.ifState,
+                        ifUpdatedWithin: guardOptions.ifUpdatedWithin,
+                        forceStale: guardOptions.forceStale
                     )
                     infoMessage = "send: \(resp.resultCode) (\(resp.actionID))"
                     await refresh()
@@ -358,6 +496,154 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    func performInteractiveInput(text: String? = nil, key: String? = nil, bytes: [UInt8]? = nil) {
+        guard let pane = selectedPane else {
+            errorMessage = "Pane を選択してください。"
+            return
+        }
+        let inputText = text ?? ""
+        let inputKey = (key ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let inputBytes = bytes ?? []
+        let hasText = !inputText.isEmpty
+        let hasKey = !inputKey.isEmpty
+        let hasBytes = !inputBytes.isEmpty
+        let modeCount = (hasText ? 1 : 0) + (hasKey ? 1 : 0) + (hasBytes ? 1 : 0)
+        guard modeCount == 1 else {
+            if modeCount > 1 {
+                errorMessage = "text / key / bytes は同時指定できません。"
+            }
+            return
+        }
+
+        Task {
+            do {
+                guard selectedPane?.id == pane.id else {
+                    return
+                }
+                let streamGeneration = terminalStreamGeneration
+                let guardOptions = writeGuardOptions(for: pane)
+                if await shouldUseTerminalProxy(for: pane.id) {
+                    do {
+                        let sessionID = try await ensureTerminalProxySession(for: pane, generation: streamGeneration)
+                        guard selectedPane?.id == pane.id else {
+                            return
+                        }
+                        let resp = try await client.terminalWrite(
+                            sessionID: sessionID,
+                            text: hasText ? inputText : nil,
+                            key: hasKey ? inputKey : nil,
+                            bytes: hasBytes ? inputBytes : nil,
+                            enter: false,
+                            paste: false
+                        )
+                        if resp.resultCode != "completed" {
+                            let reason = resp.errorCode ?? "unknown"
+                            errorMessage = "terminal-write failed: \(reason)"
+                            return
+                        }
+                        // Avoid a synchronous follow-up stream roundtrip while auto-stream is active.
+                        // This keeps keypress latency low in embedded terminal mode.
+                        if shouldPerformImmediateWriteRefresh(for: pane.id, generation: streamGeneration) {
+                            let currentCursor = await terminalSessionController.cursor(for: pane.id)
+                            let streamResp = try await client.terminalStream(
+                                sessionID: sessionID,
+                                cursor: currentCursor,
+                                lines: terminalStreamLines
+                            )
+                            await terminalSessionController.setCursor(streamResp.frame.cursor, for: pane.id)
+                            applyTerminalStreamFrame(streamResp.frame, paneID: pane.id)
+                            if streamResp.frame.frameType == "attached" {
+                                let followResp = try await client.terminalStream(
+                                    sessionID: sessionID,
+                                    cursor: streamResp.frame.cursor,
+                                    lines: terminalStreamLines
+                                )
+                                await terminalSessionController.setCursor(followResp.frame.cursor, for: pane.id)
+                                applyTerminalStreamFrame(followResp.frame, paneID: pane.id)
+                            }
+                        }
+                        await terminalSessionController.recordSuccess(for: pane.id)
+                    } catch {
+                        if error is CancellationError {
+                            throw error
+                        }
+                        let outcome = await terminalSessionController.recordFailure(for: pane.id)
+                        if shouldResetTerminalProxySession(error: error),
+                           let staleSessionID = await terminalSessionController.clearProxySession(for: pane.id) {
+                            await terminalSessionController.clearCursor(for: pane.id)
+                            await detachTerminalProxySession(sessionID: staleSessionID)
+                        }
+                        if outcome.didEnterDegradedMode {
+                            infoMessage = "interactive terminal degraded to snapshot mode"
+                        }
+                        throw error
+                    }
+                } else if hasText {
+                    let requestRef = "macapp-send-key-\(UUID().uuidString)"
+                    _ = try await client.sendText(
+                        target: pane.identity.target,
+                        paneID: pane.identity.paneID,
+                        text: inputText,
+                        requestRef: requestRef,
+                        enter: false,
+                        paste: false,
+                        ifRuntime: guardOptions.ifRuntime,
+                        ifState: guardOptions.ifState,
+                        ifUpdatedWithin: guardOptions.ifUpdatedWithin,
+                        forceStale: guardOptions.forceStale
+                    )
+                    await refresh()
+                } else if hasBytes {
+                    errorMessage = "interactive byte input requires terminal proxy support"
+                    return
+                } else {
+                    errorMessage = "interactive key input requires terminal proxy support"
+                    return
+                }
+                errorMessage = ""
+            } catch is CancellationError {
+                errorMessage = ""
+                return
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    func performInteractiveInput(bytes: [UInt8]) {
+        guard !bytes.isEmpty else {
+            return
+        }
+        performInteractiveInput(text: nil, key: nil, bytes: bytes)
+    }
+
+    func performTerminalResize(cols: Int, rows: Int) {
+        guard cols > 0, rows > 0, let pane = selectedPane else {
+            return
+        }
+        terminalResizeTask?.cancel()
+        terminalResizeTask = Task { [weak self] in
+            guard let self else {
+                return
+            }
+            // Debounce rapid resize notifications while dragging window splitters.
+            try? await Task.sleep(for: .milliseconds(80))
+            guard !Task.isCancelled, self.selectedPane?.id == pane.id else {
+                return
+            }
+            do {
+                _ = try await self.client.terminalResize(
+                    target: pane.identity.target,
+                    paneID: pane.identity.paneID,
+                    cols: cols,
+                    rows: rows
+                )
+            } catch {
+                // Keep resize errors non-blocking for typing interaction.
+            }
+        }
+    }
+
     func performViewOutput(lines: Int = 80, forceSnapshot: Bool = false) {
         guard let pane = selectedPane else {
             errorMessage = "Pane を選択してください。"
@@ -369,42 +655,59 @@ final class AppViewModel: ObservableObject {
                     return
                 }
                 let streamGeneration = terminalStreamGeneration
-                if await shouldUseTerminalProxy() {
-                    if forceSnapshot {
-                        terminalCursorByPaneID.removeValue(forKey: pane.id)
+                if await shouldUseTerminalProxy(for: pane.id) {
+                    do {
+                        if forceSnapshot {
+                            await terminalSessionController.clearCursor(for: pane.id)
+                        }
+                        let cursor = forceSnapshot ? nil : await terminalSessionController.cursor(for: pane.id)
+                        let sessionID = try await ensureTerminalProxySession(for: pane, generation: streamGeneration)
+                        guard selectedPane?.id == pane.id else {
+                            return
+                        }
+                        let resp = try await client.terminalStream(sessionID: sessionID, cursor: cursor, lines: lines)
+                        var lastFrame = resp.frame
+                        await terminalSessionController.setCursor(resp.frame.cursor, for: pane.id)
+                        applyTerminalStreamFrame(resp.frame, paneID: pane.id)
+                        if resp.frame.frameType == "attached" {
+                            let followResp = try await client.terminalStream(
+                                sessionID: sessionID,
+                                cursor: resp.frame.cursor,
+                                lines: lines
+                            )
+                            lastFrame = followResp.frame
+                            await terminalSessionController.setCursor(followResp.frame.cursor, for: pane.id)
+                            applyTerminalStreamFrame(followResp.frame, paneID: pane.id)
+                        }
+                        await terminalSessionController.recordSuccess(for: pane.id)
+                        infoMessage = "terminal-\(lastFrame.frameType): \(lastFrame.cursor)"
+                    } catch {
+                        if error is CancellationError {
+                            throw error
+                        }
+                        let outcome = await terminalSessionController.recordFailure(for: pane.id)
+                        if shouldResetTerminalProxySession(error: error),
+                           let staleSessionID = await terminalSessionController.clearProxySession(for: pane.id) {
+                            await terminalSessionController.clearCursor(for: pane.id)
+                            await detachTerminalProxySession(sessionID: staleSessionID)
+                        }
+                        if outcome.didEnterDegradedMode {
+                            infoMessage = "interactive terminal degraded to snapshot mode"
+                        }
+                        throw error
                     }
-                    let cursor = forceSnapshot ? nil : terminalCursorByPaneID[pane.id]
-                    let sessionID = try await ensureTerminalProxySession(for: pane, generation: streamGeneration)
-                    guard selectedPane?.id == pane.id else {
-                        return
-                    }
-                    let resp = try await client.terminalStream(sessionID: sessionID, cursor: cursor, lines: lines)
-                    var lastFrame = resp.frame
-                    terminalCursorByPaneID[pane.id] = resp.frame.cursor
-                    applyTerminalStreamFrame(resp.frame, paneID: pane.id)
-                    if resp.frame.frameType == "attached" {
-                        let followResp = try await client.terminalStream(
-                            sessionID: sessionID,
-                            cursor: resp.frame.cursor,
-                            lines: lines
-                        )
-                        lastFrame = followResp.frame
-                        terminalCursorByPaneID[pane.id] = followResp.frame.cursor
-                        applyTerminalStreamFrame(followResp.frame, paneID: pane.id)
-                    }
-                    infoMessage = "terminal-\(lastFrame.frameType): \(lastFrame.cursor)"
                 } else if await shouldUseTerminalRead() {
                     if forceSnapshot {
-                        terminalCursorByPaneID.removeValue(forKey: pane.id)
+                        await terminalSessionController.clearCursor(for: pane.id)
                     }
-                    let cursor = forceSnapshot ? nil : terminalCursorByPaneID[pane.id]
+                    let cursor = forceSnapshot ? nil : await terminalSessionController.cursor(for: pane.id)
                     let resp = try await client.terminalRead(
                         target: pane.identity.target,
                         paneID: pane.identity.paneID,
                         cursor: cursor,
                         lines: lines
                     )
-                    terminalCursorByPaneID[pane.id] = resp.frame.cursor
+                    await terminalSessionController.setCursor(resp.frame.cursor, for: pane.id)
                     if resp.frame.frameType == "delta", let content = resp.frame.content {
                         outputPreview = outputPreview + content
                     } else {
@@ -483,6 +786,7 @@ final class AppViewModel: ObservableObject {
     }
 
     var sessionSections: [SessionSection] {
+        updateSessionStableOrder(with: filteredPanes)
         let grouped = Dictionary(grouping: filteredPanes, by: { paneSessionKey(target: $0.identity.target, sessionName: $0.identity.sessionName) })
         let sessionMeta = Dictionary(uniqueKeysWithValues: sessions.map { (paneSessionKey(target: $0.identity.target, sessionName: $0.identity.sessionName), $0) })
         var out: [SessionSection] = []
@@ -494,6 +798,7 @@ final class AppViewModel: ObservableObject {
             let counts = countByCategory(in: sorted)
             let topCategory = sessionMeta[key]?.topCategory ?? topCategory(from: counts)
             let windows = shouldGroupByWindow(sorted) ? buildWindowSections(sorted, key: key) : []
+            let lastActiveAt = sorted.compactMap { paneRecencyDate(for: $0) }.max()
             out.append(SessionSection(
                 id: key,
                 target: first.identity.target,
@@ -501,19 +806,36 @@ final class AppViewModel: ObservableObject {
                 topCategory: topCategory,
                 byCategory: counts,
                 panes: sorted,
-                windows: windows
+                windows: windows,
+                lastActiveAt: lastActiveAt
             ))
         }
         out.sort { lhs, rhs in
-            let lp = categoryPrecedence(lhs.topCategory)
-            let rp = categoryPrecedence(rhs.topCategory)
-            if lp != rp {
-                return lp < rp
+            switch sessionSortMode {
+            case .stable:
+                let li = stableSessionOrder(for: lhs.id)
+                let ri = stableSessionOrder(for: rhs.id)
+                if li != ri {
+                    return li < ri
+                }
+            case .recentActivity:
+                let lDate = lhs.lastActiveAt ?? Date.distantPast
+                let rDate = rhs.lastActiveAt ?? Date.distantPast
+                if lDate != rDate {
+                    return lDate > rDate
+                }
+            case .name:
+                break
             }
             if lhs.target != rhs.target {
                 return lhs.target < rhs.target
             }
-            return lhs.sessionName < rhs.sessionName
+            if lhs.sessionName != rhs.sessionName {
+                return lhs.sessionName < rhs.sessionName
+            }
+            let li = stableSessionOrder(for: lhs.id)
+            let ri = stableSessionOrder(for: rhs.id)
+            return li < ri
         }
         return out
     }
@@ -542,10 +864,14 @@ final class AppViewModel: ObservableObject {
         if let lastInteraction = parseTimestamp(pane.lastInteractionAt ?? "") {
             return lastInteraction
         }
-        if let lastEvent = parseTimestamp(pane.lastEventAt ?? "") {
+        if !isAdministrativeEventType(pane.lastEventType),
+           let lastEvent = parseTimestamp(pane.lastEventAt ?? "") {
             return lastEvent
         }
-        return parseTimestamp(pane.updatedAt)
+        if agentPresence(for: pane) == "none" {
+            return parseTimestamp(pane.updatedAt)
+        }
+        return nil
     }
 
     var summaryCards: [(String, Int)] {
@@ -639,10 +965,19 @@ final class AppViewModel: ObservableObject {
     }
 
     func activityState(for pane: PaneItem) -> String {
+        if let inferred = inferAttentionStateFromReason(pane.reasonCode) {
+            return inferred
+        }
+
         if let state = normalizedToken(pane.activityState) {
+            if state == "completed" {
+                return "idle"
+            }
             return state
         }
-        switch normalizedState(pane.state) {
+
+        let normalized = normalizedState(pane.state)
+        switch normalized {
         case "running":
             return "running"
         case "waiting_input":
@@ -727,11 +1062,36 @@ final class AppViewModel: ObservableObject {
     }
 
     func lastActiveShortLabel(for pane: PaneItem) -> String {
-        let anchor = parseTimestamp(pane.lastInteractionAt ?? "")
+        let anchor = paneRecencyDate(for: pane)
         guard let updated = anchor else {
             return "-"
         }
         return compactRelativeTimestamp(since: updated, now: Date())
+    }
+
+    func sessionLastActiveShortLabel(for section: SessionSection) -> String {
+        guard let date = section.lastActiveAt else {
+            return "-"
+        }
+        return compactRelativeTimestamp(since: date, now: Date())
+    }
+
+    func sessionCategorySummary(for section: SessionSection) -> String {
+        let counts = section.byCategory
+        var parts: [String] = []
+        if counts["attention", default: 0] > 0 {
+            parts.append("A\(counts["attention", default: 0])")
+        }
+        if counts["running", default: 0] > 0 {
+            parts.append("R\(counts["running", default: 0])")
+        }
+        if counts["idle", default: 0] > 0 {
+            parts.append("I\(counts["idle", default: 0])")
+        }
+        if parts.isEmpty {
+            parts.append("0")
+        }
+        return parts.joined(separator: " ")
     }
 
     func isStateReasonRedundant(for pane: PaneItem, withinCategory category: String? = nil) -> Bool {
@@ -787,13 +1147,36 @@ final class AppViewModel: ObservableObject {
         Task {
             do {
                 let requestRef = "macapp-kill-\(UUID().uuidString)"
-                let resp = try await client.kill(
-                    target: pane.identity.target,
-                    paneID: pane.identity.paneID,
-                    requestRef: requestRef,
-                    mode: mode,
-                    signal: signal
-                )
+                let guardOptions = writeGuardOptions(for: pane)
+                let resp: ActionResponse
+                do {
+                    resp = try await client.kill(
+                        target: pane.identity.target,
+                        paneID: pane.identity.paneID,
+                        requestRef: requestRef,
+                        mode: mode,
+                        signal: signal,
+                        ifRuntime: guardOptions.ifRuntime,
+                        ifState: guardOptions.ifState,
+                        ifUpdatedWithin: guardOptions.ifUpdatedWithin,
+                        forceStale: guardOptions.forceStale
+                    )
+                } catch {
+                    guard isStaleGuardConflict(error) else {
+                        throw error
+                    }
+                    resp = try await client.kill(
+                        target: pane.identity.target,
+                        paneID: pane.identity.paneID,
+                        requestRef: requestRef,
+                        mode: mode,
+                        signal: signal,
+                        ifRuntime: guardOptions.ifRuntime,
+                        ifState: guardOptions.ifState,
+                        ifUpdatedWithin: guardOptions.ifUpdatedWithin,
+                        forceStale: true
+                    )
+                }
                 infoMessage = "kill: \(resp.resultCode) (\(resp.actionID))"
                 errorMessage = ""
                 await refresh()
@@ -855,19 +1238,19 @@ final class AppViewModel: ObservableObject {
 
     private func applySnapshot(_ snapshot: DashboardSnapshot) {
         observeTransitions(newPanes: snapshot.panes, now: Date())
+        updateSessionStableOrder(with: snapshot.panes)
         targets = snapshot.targets
         sessions = snapshot.sessions
         windows = snapshot.windows
         panes = snapshot.panes
         let paneIDs = Set(panes.map(\.id))
-        let staleSessions = terminalProxySessionByPaneID.filter { !paneIDs.contains($0.key) }
-        terminalCursorByPaneID = terminalCursorByPaneID.filter { paneIDs.contains($0.key) }
-        terminalProxySessionByPaneID = terminalProxySessionByPaneID.filter { paneIDs.contains($0.key) }
-        if !staleSessions.isEmpty {
-            for (_, sessionID) in staleSessions {
-                Task { [weak self] in
-                    await self?.detachTerminalProxySession(sessionID: sessionID)
-                }
+        Task { [weak self] in
+            guard let self else {
+                return
+            }
+            let staleSessions = await self.terminalSessionController.prune(keepingPaneIDs: paneIDs)
+            for sessionID in staleSessions {
+                await self.detachTerminalProxySession(sessionID: sessionID)
             }
         }
         if let current = selectedPane {
@@ -1002,18 +1385,26 @@ final class AppViewModel: ObservableObject {
 
     private func sortedPanes(_ panes: [PaneItem]) -> [PaneItem] {
         panes.sorted { lhs, rhs in
-            let lcat = displayCategory(for: lhs)
-            let rcat = displayCategory(for: rhs)
-            let lp = categoryPrecedence(lcat)
-            let rp = categoryPrecedence(rcat)
-            if lp != rp {
-                return lp < rp
+            let lw = sortableNumericSuffix(lhs.identity.windowID)
+            let rw = sortableNumericSuffix(rhs.identity.windowID)
+            if lw != rw {
+                return lw < rw
             }
             if lhs.identity.windowID != rhs.identity.windowID {
                 return lhs.identity.windowID < rhs.identity.windowID
             }
+            let lp = sortableNumericSuffix(lhs.identity.paneID)
+            let rp = sortableNumericSuffix(rhs.identity.paneID)
+            if lp != rp {
+                return lp < rp
+            }
             return lhs.identity.paneID < rhs.identity.paneID
         }
+    }
+
+    private func sortableNumericSuffix(_ raw: String) -> Int {
+        let digits = raw.filter(\.isNumber)
+        return Int(digits) ?? .max
     }
 
     private func countByCategory(in panes: [PaneItem]) -> [String: Int] {
@@ -1062,9 +1453,16 @@ final class AppViewModel: ObservableObject {
             viewMode = .bySession
             defaults.set(ViewMode.bySession.rawValue, forKey: PreferenceKey.viewMode)
         }
+        if let raw = defaults.string(forKey: PreferenceKey.sessionSortMode), let restored = SessionSortMode(rawValue: raw) {
+            sessionSortMode = restored
+        } else {
+            sessionSortMode = .stable
+            defaults.set(SessionSortMode.stable.rawValue, forKey: PreferenceKey.sessionSortMode)
+        }
         if let raw = defaults.string(forKey: PreferenceKey.windowGrouping), let restored = WindowGrouping(rawValue: raw) {
             windowGrouping = restored
         }
+        interactiveTerminalInputEnabled = readBoolPreference(PreferenceKey.interactiveTerminalInputEnabled, fallback: true)
         showWindowMetadata = readBoolPreference(PreferenceKey.showWindowMetadata, fallback: false)
         showWindowGroupBackground = readBoolPreference(PreferenceKey.showWindowGroupBackground, fallback: true)
         showSessionMetadataInStatusView = readBoolPreference(PreferenceKey.showSessionMetadataInStatusView, fallback: false)
@@ -1073,15 +1471,69 @@ final class AppViewModel: ObservableObject {
         hideUnmanagedCategory = readBoolPreference(PreferenceKey.hideUnmanagedCategory, fallback: false)
         showUnknownCategory = readBoolPreference(PreferenceKey.showUnknownCategory, fallback: false)
         reviewUnreadOnly = readBoolPreference(PreferenceKey.reviewUnreadOnly, fallback: true)
+        restoreSessionStableOrder()
 
         let storedVersion = defaults.integer(forKey: PreferenceKey.uiPrefsVersion)
         if storedVersion < currentUIPrefsVersion {
-            // v4: keep cleaner cards and enable by-session window group highlight by default.
+            // v6: keep sidebar click targets stable by default.
+            viewMode = .bySession
+            defaults.set(ViewMode.bySession.rawValue, forKey: PreferenceKey.viewMode)
             showWindowMetadata = false
             showSessionMetadataInStatusView = false
             showWindowGroupBackground = true
+            sessionSortMode = .stable
             defaults.set(currentUIPrefsVersion, forKey: PreferenceKey.uiPrefsVersion)
         }
+    }
+
+    private func updateSessionStableOrder(with panes: [PaneItem]) {
+        let keys = Set(panes.map { paneSessionKey(target: $0.identity.target, sessionName: $0.identity.sessionName) })
+        if keys.isEmpty {
+            return
+        }
+        let missing = keys.filter { sessionStableOrder[$0] == nil }.sorted()
+        var changed = false
+        for key in missing {
+            sessionStableOrder[key] = nextSessionStableOrder
+            nextSessionStableOrder += 1
+            changed = true
+        }
+        if changed {
+            persistSessionStableOrder()
+        }
+    }
+
+    private func stableSessionOrder(for key: String) -> Int {
+        if let index = sessionStableOrder[key] {
+            return index
+        }
+        let next = nextSessionStableOrder
+        sessionStableOrder[key] = next
+        nextSessionStableOrder += 1
+        persistSessionStableOrder()
+        return next
+    }
+
+    private func restoreSessionStableOrder() {
+        if let data = defaults.data(forKey: PreferenceKey.sessionStableOrder),
+           let restored = try? JSONDecoder().decode([String: Int].self, from: data) {
+            sessionStableOrder = restored
+        } else {
+            sessionStableOrder = [:]
+        }
+        let restoredNext = defaults.integer(forKey: PreferenceKey.sessionStableOrderNext)
+        if restoredNext > 0 {
+            nextSessionStableOrder = restoredNext
+            return
+        }
+        nextSessionStableOrder = (sessionStableOrder.values.max() ?? -1) + 1
+    }
+
+    private func persistSessionStableOrder() {
+        if let data = try? JSONEncoder().encode(sessionStableOrder) {
+            defaults.set(data, forKey: PreferenceKey.sessionStableOrder)
+        }
+        defaults.set(nextSessionStableOrder, forKey: PreferenceKey.sessionStableOrderNext)
     }
 
     private func readBoolPreference(_ key: String, fallback: Bool) -> Bool {
@@ -1089,6 +1541,19 @@ final class AppViewModel: ObservableObject {
             return fallback
         }
         return defaults.bool(forKey: key)
+    }
+
+    private func shouldPerformImmediateWriteRefresh(for paneID: String, generation: Int) -> Bool {
+        guard generation == terminalStreamGeneration else {
+            return false
+        }
+        guard selectedPane?.id == paneID else {
+            return false
+        }
+        if autoStreamOnSelection {
+            return terminalStreamTask == nil
+        }
+        return true
     }
 
     private func restartTerminalStreamForSelectedPane() {
@@ -1105,8 +1570,6 @@ final class AppViewModel: ObservableObject {
     }
 
     private func terminalStreamLoop(for paneID: String, generation: Int) async {
-        var cursor = terminalCursorByPaneID[paneID]
-        var consecutiveFailures = 0
         while !Task.isCancelled {
             guard generation == terminalStreamGeneration else {
                 return
@@ -1118,73 +1581,77 @@ final class AppViewModel: ObservableObject {
                 return
             }
             do {
-                if await shouldUseTerminalProxy() {
+                if await shouldUseTerminalProxy(for: paneID) {
                     let sessionID = try await ensureTerminalProxySession(for: pane, generation: generation)
+                    let cursor = await terminalSessionController.cursor(for: paneID)
                     let resp = try await client.terminalStream(
                         sessionID: sessionID,
                         cursor: cursor,
-                        lines: 200
+                        lines: terminalStreamLines
                     )
                     guard generation == terminalStreamGeneration, selectedPane?.id == paneID else {
                         return
                     }
-                    cursor = resp.frame.cursor
-                    terminalCursorByPaneID[paneID] = resp.frame.cursor
+                    await terminalSessionController.setCursor(resp.frame.cursor, for: paneID)
                     applyTerminalStreamFrame(resp.frame, paneID: paneID)
+                    await terminalSessionController.recordSuccess(for: paneID)
                 } else if await shouldUseTerminalRead() {
+                    let cursor = await terminalSessionController.cursor(for: paneID)
                     let resp = try await client.terminalRead(
                         target: pane.identity.target,
                         paneID: pane.identity.paneID,
                         cursor: cursor,
-                        lines: 200
+                        lines: terminalStreamLines
                     )
                     guard generation == terminalStreamGeneration, selectedPane?.id == paneID else {
                         return
                     }
-                    cursor = resp.frame.cursor
-                    terminalCursorByPaneID[paneID] = resp.frame.cursor
+                    await terminalSessionController.setCursor(resp.frame.cursor, for: paneID)
                     applyTerminalFrame(resp.frame, paneID: paneID)
                 } else {
-                    consecutiveFailures += 1
-                    let delayMillis = terminalStreamRetryDelayMillis(for: consecutiveFailures)
-                    if selectedPane?.id == paneID, consecutiveFailures >= 3 {
+                    let outcome = await terminalSessionController.recordFailure(for: paneID)
+                    if selectedPane?.id == paneID, outcome.didEnterDegradedMode {
+                        infoMessage = "interactive terminal degraded to snapshot mode"
+                    } else if selectedPane?.id == paneID, outcome.delayMillis >= 1000 {
                         infoMessage = "terminal stream waiting for daemon capabilities..."
                     }
-                    try? await Task.sleep(for: .milliseconds(delayMillis))
+                    try? await Task.sleep(for: .milliseconds(outcome.delayMillis))
                     continue
                 }
-                consecutiveFailures = 0
                 try await Task.sleep(for: .milliseconds(Int(terminalStreamPollIntervalSeconds * 1000)))
             } catch {
                 if error is CancellationError || Task.isCancelled || generation != terminalStreamGeneration {
                     return
                 }
                 if shouldResetTerminalProxySession(error: error),
-                   let staleSessionID = terminalProxySessionByPaneID[paneID] {
-                    terminalProxySessionByPaneID.removeValue(forKey: paneID)
-                    terminalCursorByPaneID.removeValue(forKey: paneID)
-                    cursor = nil
+                   let staleSessionID = await terminalSessionController.clearProxySession(for: paneID) {
+                    await terminalSessionController.clearCursor(for: paneID)
                     await detachTerminalProxySession(sessionID: staleSessionID)
                 }
-                consecutiveFailures += 1
-                let delayMillis = terminalStreamRetryDelayMillis(for: consecutiveFailures)
-                if selectedPane?.id == paneID, consecutiveFailures >= 3 {
-                    infoMessage = "terminal stream reconnecting..."
+                let outcome = await terminalSessionController.recordFailure(for: paneID)
+                if selectedPane?.id == paneID {
+                    if outcome.didEnterDegradedMode {
+                        infoMessage = "interactive terminal degraded to snapshot mode"
+                    } else {
+                        infoMessage = "terminal stream reconnecting..."
+                    }
                 }
-                try? await Task.sleep(for: .milliseconds(delayMillis))
+                try? await Task.sleep(for: .milliseconds(outcome.delayMillis))
             }
         }
-    }
-
-    private func terminalStreamRetryDelayMillis(for consecutiveFailures: Int) -> Int {
-        let cappedFailure = min(max(consecutiveFailures, 1), 5)
-        return min(4000, Int(Double(250) * pow(2, Double(cappedFailure - 1))))
     }
 
     private func applyTerminalFrame(_ frame: TerminalFrame, paneID: String) {
         guard selectedPane?.id == paneID else {
             return
         }
+        updateTerminalRenderMetadata(
+            cursorX: frame.cursorX,
+            cursorY: frame.cursorY,
+            paneCols: frame.paneCols,
+            paneRows: frame.paneRows,
+            clearCursorIfMissing: true
+        )
         let content = frame.content ?? ""
         if frame.frameType == "delta" {
             if !content.isEmpty {
@@ -1200,24 +1667,30 @@ final class AppViewModel: ObservableObject {
         guard selectedPane?.id == paneID else {
             return
         }
+        updateTerminalRenderMetadata(
+            cursorX: frame.cursorX,
+            cursorY: frame.cursorY,
+            paneCols: frame.paneCols,
+            paneRows: frame.paneRows,
+            clearCursorIfMissing: frame.frameType != "attached"
+        )
         switch frame.frameType {
         case "attached":
             return
         case "output":
-            let content = frame.content ?? ""
-            if !content.isEmpty {
-                outputPreview += content
-            }
+            outputPreview = frame.content ?? ""
         case "reset":
             outputPreview = frame.content ?? ""
         case "error":
             let reason = frame.errorCode ?? frame.message ?? "unknown"
             errorMessage = "terminal-stream error: \(reason)"
-            if let sessionID = terminalProxySessionByPaneID[paneID] {
-                terminalProxySessionByPaneID.removeValue(forKey: paneID)
-                terminalCursorByPaneID.removeValue(forKey: paneID)
-                Task { [weak self] in
-                    await self?.detachTerminalProxySession(sessionID: sessionID)
+            Task { [weak self] in
+                guard let self else {
+                    return
+                }
+                if let sessionID = await self.terminalSessionController.clearProxySession(for: paneID) {
+                    await self.terminalSessionController.clearCursor(for: paneID)
+                    await self.detachTerminalProxySession(sessionID: sessionID)
                 }
             }
             return
@@ -1234,17 +1707,43 @@ final class AppViewModel: ObservableObject {
         outputPreview = String(outputPreview.suffix(terminalOutputMaxChars))
     }
 
+    private func updateTerminalRenderMetadata(
+        cursorX: Int?,
+        cursorY: Int?,
+        paneCols: Int?,
+        paneRows: Int?,
+        clearCursorIfMissing: Bool = false
+    ) {
+        if let paneCols, paneCols > 0 {
+            terminalPaneCols = paneCols
+        }
+        if let paneRows, paneRows > 0 {
+            terminalPaneRows = paneRows
+        }
+        if clearCursorIfMissing, (cursorX == nil || cursorY == nil) {
+            terminalCursorX = nil
+            terminalCursorY = nil
+            return
+        }
+        guard let cursorX, let cursorY, cursorX >= 0, cursorY >= 0 else {
+            return
+        }
+        terminalCursorX = cursorX
+        terminalCursorY = cursorY
+    }
+
     private func ensureTerminalProxySession(for pane: PaneItem, generation: Int? = nil) async throws -> String {
-        if let sessionID = terminalProxySessionByPaneID[pane.id], !sessionID.isEmpty {
+        if let sessionID = await terminalSessionController.proxySession(for: pane.id), !sessionID.isEmpty {
             return sessionID
         }
+        let guardOptions = writeGuardOptions(for: pane)
         let response = try await client.terminalAttach(
             target: pane.identity.target,
             paneID: pane.identity.paneID,
-            ifRuntime: trimmedNonEmpty(pane.runtimeID),
-            ifState: nil,
-            ifUpdatedWithin: nil,
-            forceStale: false
+            ifRuntime: guardOptions.ifRuntime,
+            ifState: guardOptions.ifState,
+            ifUpdatedWithin: guardOptions.ifUpdatedWithin,
+            forceStale: guardOptions.forceStale
         )
         let sessionID = response.sessionID.trimmingCharacters(in: .whitespacesAndNewlines)
         if !shouldAcceptTerminalAttachResponse(response) {
@@ -1260,7 +1759,7 @@ final class AppViewModel: ObservableObject {
                 throw CancellationError()
             }
         }
-        terminalProxySessionByPaneID[pane.id] = sessionID
+        await terminalSessionController.setProxySession(sessionID, for: pane.id)
         return sessionID
     }
 
@@ -1271,11 +1770,14 @@ final class AppViewModel: ObservableObject {
         _ = try? await client.terminalDetach(sessionID: sessionID)
     }
 
-    private func shouldUseTerminalProxy() async -> Bool {
+    private func shouldUseTerminalProxy(for paneID: String) async -> Bool {
         guard let caps = await fetchTerminalCapabilities() else {
             return false
         }
-        return shouldUseTerminalProxy(caps: caps)
+        guard shouldUseTerminalProxy(caps: caps) else {
+            return false
+        }
+        return await terminalSessionController.shouldUseProxy(for: paneID)
     }
 
     func shouldUseTerminalProxy(caps: CapabilityFlags) -> Bool {
@@ -1292,6 +1794,25 @@ final class AppViewModel: ObservableObject {
             return false
         }
         return true
+    }
+
+    private struct WriteGuardOptions {
+        let ifRuntime: String?
+        let ifState: String?
+        let ifUpdatedWithin: String?
+        let forceStale: Bool
+    }
+
+    private func writeGuardOptions(for pane: PaneItem) -> WriteGuardOptions {
+        let runtime = trimmedNonEmpty(pane.runtimeID)
+        let normalized = normalizedState(pane.state)
+        let state = normalized == "unknown" ? nil : normalized
+        return WriteGuardOptions(
+            ifRuntime: runtime,
+            ifState: state,
+            ifUpdatedWithin: nil,
+            forceStale: false
+        )
     }
 
     private func shouldUseTerminalRead() async -> Bool {
@@ -1327,6 +1848,14 @@ final class AppViewModel: ObservableObject {
         let normalized = stderr.lowercased()
         let resetTokens = ["e_ref_not_found", "session not found", "e_runtime_stale"]
         return resetTokens.contains { normalized.contains($0) }
+    }
+
+    private func isStaleGuardConflict(_ error: Error) -> Bool {
+        guard case let RuntimeError.commandFailed(_, _, stderr) = error else {
+            return false
+        }
+        let normalized = stderr.lowercased()
+        return normalized.contains("e_runtime_stale") || normalized.contains("runtime stale")
     }
 
     func shouldAcceptTerminalAttachResponse(_ response: TerminalAttachResponse) -> Bool {
@@ -1387,6 +1916,124 @@ final class AppViewModel: ObservableObject {
         return raw
     }
 
+    private struct ExternalTerminalInvocation {
+        let executable: String
+        let args: [String]
+    }
+
+    private func buildExternalTerminalInvocation(for pane: PaneItem) throws -> ExternalTerminalInvocation {
+        let sessionName = pane.identity.sessionName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let windowID = pane.identity.windowID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let paneID = pane.identity.paneID.trimmingCharacters(in: .whitespacesAndNewlines)
+        if sessionName.isEmpty || windowID.isEmpty || paneID.isEmpty {
+            throw RuntimeError.commandFailed("external terminal", 1, "pane identity is incomplete")
+        }
+
+        let targetToken = pane.identity.target.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedTarget = targetRecord(for: targetToken)
+        let targetKind: String
+        if let resolvedTarget {
+            switch normalizedToken(resolvedTarget.kind) {
+            case "local":
+                targetKind = "local"
+            case "ssh":
+                targetKind = "ssh"
+            case nil:
+                throw RuntimeError.commandFailed("external terminal", 1, "target kind is unavailable")
+            default:
+                throw RuntimeError.commandFailed("external terminal", 1, "unsupported target kind")
+            }
+        } else if normalizedToken(targetToken) == "local" || targetToken.isEmpty {
+            targetKind = "local"
+        } else {
+            throw RuntimeError.commandFailed("external terminal", 1, "target is unavailable")
+        }
+
+        let tmuxJump = [
+            "tmux select-window -t \(shellQuote(windowID))",
+            "tmux select-pane -t \(shellQuote(paneID))",
+            "tmux attach-session -t \(shellQuote(sessionName))",
+        ].joined(separator: " && ")
+
+        var command = tmuxJump
+        if targetKind == "ssh" {
+            let connectionRef = normalizedSSHConnectionRef(resolvedTarget?.connectionRef)
+            guard let connectionRef else {
+                throw RuntimeError.commandFailed(
+                    "external terminal",
+                    1,
+                    "ssh target connection_ref is unavailable"
+                )
+            }
+            command = "ssh -t \(shellQuote(connectionRef)) \(shellQuote(tmuxJump))"
+        }
+
+        let escapedCommand = escapeForAppleScriptLiteral(command)
+        return ExternalTerminalInvocation(
+            executable: "/usr/bin/osascript",
+            args: [
+                "-e", "tell application \"Terminal\" to activate",
+                "-e", "tell application \"Terminal\" to do script \"\(escapedCommand)\"",
+            ]
+        )
+    }
+
+    private func targetRecord(for targetToken: String) -> TargetItem? {
+        let normalized = targetToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        if normalized.isEmpty {
+            return nil
+        }
+        return targets.first {
+            $0.targetName == normalized || $0.targetID == normalized
+        }
+    }
+
+    private func normalizedSSHConnectionRef(_ value: String?) -> String? {
+        guard var ref = trimmedNonEmpty(value) else {
+            return nil
+        }
+        if ref.hasPrefix("ssh://") {
+            ref.removeFirst("ssh://".count)
+        }
+        return trimmedNonEmpty(ref)
+    }
+
+    private func shellQuote(_ raw: String) -> String {
+        "'" + raw.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
+    }
+
+    private func escapeForAppleScriptLiteral(_ raw: String) -> String {
+        raw
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+    }
+
+    nonisolated private static func runExternalTerminalCommand(_ executable: String, _ args: [String]) throws -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = args
+
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+
+        try process.run()
+        process.waitUntilExit()
+
+        let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
+        let stderr = String(data: stderrData, encoding: .utf8) ?? ""
+
+        if process.terminationStatus != 0 {
+            let command = ([executable] + args).joined(separator: " ")
+            let reason = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            throw RuntimeError.commandFailed(command, process.terminationStatus, reason)
+        }
+        return stdout
+    }
+
     private var filteredPanes: [PaneItem] {
         let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !q.isEmpty else {
@@ -1423,6 +2070,42 @@ final class AppViewModel: ObservableObject {
         return normalized.contains("complete") ||
             normalized.contains("finished") ||
             normalized.contains("exit")
+    }
+
+    private func inferAttentionStateFromReason(_ reasonCode: String?) -> String? {
+        guard let reason = normalizedToken(reasonCode) else {
+            return nil
+        }
+        if reason.contains("waiting_approval") || reason.contains("approval_required") || reason == "approval" {
+            return "waiting_approval"
+        }
+        if reason.contains("waiting_input") || reason.contains("needs_input") || reason == "input" {
+            return "waiting_input"
+        }
+        if reason.contains("error") || reason.contains("failed") {
+            return "error"
+        }
+        return nil
+    }
+
+    private func isAdministrativeEventType(_ eventType: String?) -> Bool {
+        guard let normalized = normalizedToken(eventType) else {
+            return false
+        }
+        let canonical = normalized
+            .replacingOccurrences(of: ".", with: "_")
+            .replacingOccurrences(of: "-", with: "_")
+            .replacingOccurrences(of: ":", with: "_")
+        if canonical.contains("wrapper_start") || canonical.contains("wrapper_exit") {
+            return true
+        }
+        if canonical.contains("view_output") || canonical.contains("terminal_read") || canonical.contains("terminal_stream") {
+            return true
+        }
+        if canonical.contains("action_attach") || canonical.contains("action_kill") {
+            return true
+        }
+        return false
     }
 
     private func parseTimestamp(_ input: String) -> Date? {

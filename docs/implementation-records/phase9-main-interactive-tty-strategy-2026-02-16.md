@@ -188,6 +188,11 @@ Phase 9 は `main` を「send/read UI」から「interactive terminal UI」へ�
 
 2. resize競合（複数クライアント）
 - 対策: tmux設定前提を明文化し統合テスト化
+: 実装ポリシー（Phase9/TASK-924）:
+  - `tmux list-clients -t <session>` で対象 session の attach client 数を確認
+  - `client_count > 1` の場合、`terminal/resize` は `result_code=skipped_conflict` で no-op
+  - `client_count <= 1` の場合のみ `resize-pane` を実行
+  - client 数の検査に失敗した場合は安全側で `result_code=skipped_conflict`（`inspection_fallback_skip`）
 
 3. ssh遅延揺らぎ
 - 対策: local/ssh でSLO分離評価

@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import SwiftUI
 
 @main
@@ -7,6 +8,10 @@ struct AGTMUXDesktopApp: App {
     private let launchError: String?
 
     init() {
+        // Avoid process-level termination when writing to a closed pipe/socket.
+        // We handle EPIPE as a recoverable runtime error.
+        signal(SIGPIPE, SIG_IGN)
+        Self.disableBrokenWindowRestoration()
         do {
             let paths = AppPaths.resolve()
             appendLauncherLog(baseDir: paths.baseDir, message: "app init: start")
@@ -16,7 +21,11 @@ struct AGTMUXDesktopApp: App {
                 logPath: paths.logPath
             )
             let client = try AGTMUXCLIClient(socketPath: paths.socketPath)
-            model = AppViewModel(daemon: daemon, client: client)
+            model = AppViewModel(
+                daemon: daemon,
+                client: client,
+                nativeTmuxTerminalEnabled: true
+            )
             launchError = nil
             appendLauncherLog(baseDir: paths.baseDir, message: "app init: model ready")
             model?.bootstrap()
@@ -26,6 +35,17 @@ struct AGTMUXDesktopApp: App {
             launchError = error.localizedDescription
             let paths = AppPaths.resolve()
             appendLauncherLog(baseDir: paths.baseDir, message: "app init: failed \(error.localizedDescription)")
+        }
+    }
+
+    private static func disableBrokenWindowRestoration() {
+        UserDefaults.standard.set(false, forKey: "NSQuitAlwaysKeepsWindows")
+        guard let bundleID = Bundle.main.bundleIdentifier else {
+            return
+        }
+        let savedStatePath = ("~/Library/Saved Application State/\(bundleID).savedState" as NSString).expandingTildeInPath
+        if FileManager.default.fileExists(atPath: savedStatePath) {
+            try? FileManager.default.removeItem(atPath: savedStatePath)
         }
     }
 
@@ -45,6 +65,7 @@ struct AGTMUXDesktopApp: App {
                     .frame(minWidth: 980, minHeight: 560)
             }
         }
+        .defaultSize(width: 1320, height: 840)
         .windowStyle(.hiddenTitleBar)
     }
 }
@@ -240,6 +261,17 @@ private struct CockpitView: View {
                             .foregroundStyle(palette.textPrimary)
                             .lineLimit(1)
                         Spacer(minLength: 0)
+                        Button {
+                            model.openSelectedPaneInExternalTerminal()
+                        } label: {
+                            Image(systemName: "arrow.up.right.square")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(palette.textMuted)
+                                .frame(width: 22, height: 20)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("Open in External Terminal")
                         Text("\(pane.identity.sessionName)  \(pane.identity.paneID)")
                             .font(.system(size: 11, weight: .regular, design: .monospaced))
                             .foregroundStyle(palette.textMuted)
@@ -259,68 +291,46 @@ private struct CockpitView: View {
                 .padding(.horizontal, 10)
                 .padding(.bottom, 8)
 
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 0) {
-                            Text(model.outputPreview.isEmpty ? "Waiting for terminal output..." : model.outputPreview)
-                                .font(.system(size: 12, weight: .regular, design: .monospaced))
-                                .foregroundStyle(model.outputPreview.isEmpty ? palette.textMuted : palette.terminalText)
-                                .textSelection(.enabled)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(10)
-                            Color.clear
-                                .frame(height: 1)
-                                .id("terminal-bottom")
+                if let pane = model.selectedPane,
+                   model.nativeTmuxTerminalEnabled,
+                   model.supportsNativeTmuxTerminal(for: pane) {
+                    NativeTmuxTerminalView(
+                        pane: pane,
+                        darkMode: colorScheme == .dark,
+                        content: model.outputPreview,
+                        cursorX: model.terminalCursorX,
+                        cursorY: model.terminalCursorY,
+                        paneCols: model.terminalPaneCols,
+                        paneRows: model.terminalPaneRows,
+                        interactiveInputEnabled: model.interactiveTerminalInputEnabled,
+                        onInputBytes: { bytes in
+                            model.performInteractiveInput(bytes: bytes)
+                        },
+                        onResize: { cols, rows in
+                            model.performTerminalResize(cols: cols, rows: rows)
                         }
+                    )
+                    .id("native-terminal-\(pane.id)")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(palette.terminalBackground)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .padding(.horizontal, 10)
+                } else {
+                    VStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(.system(size: 18, weight: .regular))
+                            .foregroundStyle(palette.textMuted)
+                        Text("Native tmux terminal is available only for local targets.")
+                            .font(.system(size: 12, weight: .semibold, design: .rounded))
+                            .foregroundStyle(palette.textSecondary)
                     }
-                    .onAppear {
-                        DispatchQueue.main.async {
-                            proxy.scrollTo("terminal-bottom", anchor: .bottom)
-                        }
-                    }
-                    .onChange(of: model.selectedPane?.id) { _, _ in
-                        DispatchQueue.main.async {
-                            proxy.scrollTo("terminal-bottom", anchor: .bottom)
-                        }
-                    }
-                    .onChange(of: model.outputPreview) { _, _ in
-                        withAnimation(.linear(duration: 0.08)) {
-                            proxy.scrollTo("terminal-bottom", anchor: .bottom)
-                        }
-                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(palette.surfaceMuted)
+                    )
+                    .padding(.horizontal, 10)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(palette.terminalBackground)
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .padding(.horizontal, 10)
-
-                VStack(alignment: .leading, spacing: 8) {
-                    TextField("Send text...", text: $model.sendText, axis: .vertical)
-                        .textFieldStyle(.roundedBorder)
-                        .lineLimit(2...4)
-                    HStack {
-                        Toggle("Enter", isOn: $model.sendEnter)
-                            .help("Append Enter key after text")
-                        Toggle("Paste", isOn: $model.sendPaste)
-                            .help("Use tmux paste-buffer mode")
-                        Spacer(minLength: 0)
-                        Button("Send") {
-                            model.performSend()
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(!model.canSend)
-                        .keyboardShortcut(.return, modifiers: .command)
-                    }
-                    .toggleStyle(.switch)
-                    .font(.system(size: 12, weight: .regular, design: .rounded))
-                    .foregroundStyle(palette.textSecondary)
-                }
-                .padding(8)
-                .background(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(palette.surfaceMuted)
-                )
-                .padding(10)
 
                 if !model.errorMessage.isEmpty {
                     Text(model.errorMessage)
@@ -356,11 +366,11 @@ private struct CockpitView: View {
     }
 
     private var contentBoard: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             sidebarSectionHeader
 
             ScrollView {
-                LazyVStack(spacing: 10) {
+                LazyVStack(spacing: 8) {
                     switch model.viewMode {
                     case .bySession:
                         ForEach(model.sessionSections) { section in
@@ -385,6 +395,9 @@ private struct CockpitView: View {
             Text("Sessions")
                 .font(.system(size: 15, weight: .semibold, design: .rounded))
                 .foregroundStyle(palette.textPrimary)
+            Text("\(model.sessionSections.count)")
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .foregroundStyle(palette.textMuted)
             Spacer(minLength: 0)
             Button {
                 model.infoMessage = "Session creation UI is coming soon."
@@ -404,6 +417,11 @@ private struct CockpitView: View {
                     Text("By Status").tag(AppViewModel.ViewMode.byStatus)
                     Text("By Chronological").tag(AppViewModel.ViewMode.byChronological)
                 }
+                Picker("Session Order", selection: $model.sessionSortMode) {
+                    Text("Stable").tag(AppViewModel.SessionSortMode.stable)
+                    Text("Recent Activity").tag(AppViewModel.SessionSortMode.recentActivity)
+                    Text("Name").tag(AppViewModel.SessionSortMode.name)
+                }
                 Divider()
                 Toggle("Group By tmux Window", isOn: $model.showWindowGroupBackground)
             } label: {
@@ -417,6 +435,14 @@ private struct CockpitView: View {
             .help("Sort / filter")
         }
         .padding(.horizontal, 2)
+        .overlay(alignment: .bottomLeading) {
+            Text(model.sessionSortMode == .stable ? "stable order" : model.sessionSortMode.title.lowercased())
+                .font(.system(size: 10, weight: .regular, design: .monospaced))
+                .foregroundStyle(palette.textMuted)
+                .padding(.leading, 2)
+                .padding(.top, 24)
+        }
+        .padding(.bottom, 16)
     }
 
     private var sidebarFooter: some View {
@@ -471,12 +497,12 @@ private struct CockpitView: View {
     }
 
     private func sessionSection(_ section: AppViewModel.SessionSection) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 8) {
                 HStack(spacing: 7) {
-                    Image(systemName: "rectangle.stack")
+                    Image(systemName: "folder.fill")
                         .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(palette.textMuted)
+                        .foregroundStyle(palette.textSecondary)
                     Text(section.sessionName)
                         .font(.system(size: 14, weight: .semibold, design: .rounded))
                         .foregroundStyle(palette.textPrimary)
@@ -484,10 +510,19 @@ private struct CockpitView: View {
                 }
                 .padding(.leading, 4)
                 Spacer(minLength: 0)
-                Text(section.target)
+                Text(model.sessionLastActiveShortLabel(for: section))
                     .font(.system(size: 10, weight: .regular, design: .monospaced))
                     .foregroundStyle(palette.textMuted)
+                Text(section.target)
+                    .font(.system(size: 10, weight: .regular, design: .monospaced))
+                    .foregroundStyle(palette.textSecondary)
                     .lineLimit(1)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(
+                        Capsule(style: .continuous)
+                            .fill(palette.rowFill)
+                    )
             }
 
             paneList(
@@ -496,7 +531,7 @@ private struct CockpitView: View {
                 indentWhenFlat: true
             )
         }
-        .padding(.bottom, 1)
+        .padding(.bottom, 2)
     }
 
     private func statusSection(category: String, panes: [PaneItem]) -> some View {
@@ -586,11 +621,11 @@ private struct CockpitView: View {
             .padding(.horizontal, 10)
             .background(
                 RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(hovered ? palette.rowHoverFill : Color.clear)
+                    .fill(selected ? palette.rowSelectedFill : (hovered ? palette.rowHoverFill : Color.clear))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .stroke(hovered ? palette.rowHoverStroke : Color.clear, lineWidth: 1)
+                    .stroke(selected ? palette.rowSelectedStroke : (hovered ? palette.rowHoverStroke : Color.clear), lineWidth: 1)
             )
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -606,9 +641,9 @@ private struct CockpitView: View {
             Button("Open") {
                 model.selectedPane = pane
             }
-            Button("Reload Terminal Snapshot") {
+            Button("Open in External Terminal") {
                 model.selectedPane = pane
-                model.performViewOutput(lines: 200, forceSnapshot: true)
+                model.openSelectedPaneInExternalTerminal()
             }
             Divider()
             Button("Pane Details") {

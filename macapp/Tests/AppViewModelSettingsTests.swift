@@ -149,6 +149,198 @@ final class AppViewModelSettingsTests: XCTestCase {
         XCTAssertEqual(model.lastActiveLabel(for: pane), "last active: -")
     }
 
+    func testLastActiveShortLabelIgnoresAdministrativeEventTimestamp() throws {
+        let model = try makeModel()
+        let pane = PaneItem(
+            identity: PaneIdentity(target: "local", sessionName: "s1", windowID: "@1", paneID: "%1"),
+            windowName: nil,
+            currentCmd: "codex",
+            paneTitle: nil,
+            state: "idle",
+            reasonCode: nil,
+            confidence: nil,
+            runtimeID: "rt-1",
+            agentType: "codex",
+            agentPresence: "managed",
+            activityState: "idle",
+            displayCategory: "idle",
+            needsUserAction: nil,
+            stateSource: "wrapper",
+            lastEventType: "action.view-output",
+            lastEventAt: ISO8601DateFormatter().string(from: Date()),
+            awaitingResponseKind: nil,
+            sessionLabel: nil,
+            sessionLabelSource: nil,
+            lastInteractionAt: nil,
+            updatedAt: "2026-02-15T00:00:00Z"
+        )
+        XCTAssertEqual(model.lastActiveShortLabel(for: pane), "-")
+    }
+
+    func testActivityStateDoesNotPromoteManagedIdleFromUpdatedAtOnly() throws {
+        let model = try makeModel()
+        let pane = PaneItem(
+            identity: PaneIdentity(target: "local", sessionName: "s1", windowID: "@1", paneID: "%1"),
+            windowName: nil,
+            currentCmd: "codex",
+            paneTitle: nil,
+            state: "idle",
+            reasonCode: nil,
+            confidence: nil,
+            runtimeID: "rt-1",
+            agentType: "codex",
+            agentPresence: "managed",
+            activityState: "idle",
+            displayCategory: "idle",
+            needsUserAction: nil,
+            stateSource: "poller",
+            lastEventType: nil,
+            lastEventAt: nil,
+            awaitingResponseKind: nil,
+            sessionLabel: nil,
+            sessionLabelSource: nil,
+            lastInteractionAt: nil,
+            updatedAt: ISO8601DateFormatter().string(from: Date())
+        )
+        XCTAssertEqual(model.activityState(for: pane), "idle")
+    }
+
+    func testActivityStateUsesExplicitDaemonActivityState() throws {
+        let model = try makeModel()
+        let pane = PaneItem(
+            identity: PaneIdentity(target: "local", sessionName: "s1", windowID: "@1", paneID: "%1"),
+            windowName: nil,
+            currentCmd: "codex",
+            paneTitle: nil,
+            state: "idle",
+            reasonCode: nil,
+            confidence: nil,
+            runtimeID: "rt-1",
+            agentType: "codex",
+            agentPresence: "managed",
+            activityState: "idle",
+            displayCategory: "idle",
+            needsUserAction: nil,
+            stateSource: "hook",
+            lastEventType: nil,
+            lastEventAt: nil,
+            awaitingResponseKind: nil,
+            sessionLabel: nil,
+            sessionLabelSource: nil,
+            lastInteractionAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-5)),
+            updatedAt: "2026-02-15T00:00:00Z"
+        )
+        XCTAssertEqual(model.activityState(for: pane), "idle")
+
+        let runningPane = PaneItem(
+            identity: PaneIdentity(target: "local", sessionName: "s1", windowID: "@1", paneID: "%2"),
+            windowName: nil,
+            currentCmd: "codex",
+            paneTitle: nil,
+            state: "idle",
+            reasonCode: nil,
+            confidence: nil,
+            runtimeID: "rt-2",
+            agentType: "codex",
+            agentPresence: "managed",
+            activityState: "running",
+            displayCategory: "running",
+            needsUserAction: nil,
+            stateSource: "hook",
+            lastEventType: nil,
+            lastEventAt: nil,
+            awaitingResponseKind: nil,
+            sessionLabel: nil,
+            sessionLabelSource: nil,
+            lastInteractionAt: nil,
+            updatedAt: "2026-02-15T00:00:00Z"
+        )
+        XCTAssertEqual(model.activityState(for: runningPane), "running")
+    }
+
+    func testSessionStableOrderPersistsAcrossModelInstances() throws {
+        let suiteName = "AGTMUXDesktopTests-SessionOrder-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Failed to create test defaults")
+            throw NSError(domain: "test", code: 1)
+        }
+        defaults.removePersistentDomain(forName: suiteName)
+
+        let firstModel = try makeModel(defaults: defaults)
+        firstModel.sessionSortMode = .stable
+        firstModel.panes = [
+            makePane(paneID: "%1", displayCategory: "idle", sessionName: "z-session"),
+            makePane(paneID: "%2", displayCategory: "idle", sessionName: "a-session"),
+        ]
+        let firstOrder = firstModel.sessionSections.map(\.sessionName)
+        XCTAssertEqual(firstOrder, ["a-session", "z-session"])
+
+        let secondModel = try makeModel(defaults: defaults)
+        secondModel.sessionSortMode = .stable
+        secondModel.panes = [
+            makePane(paneID: "%3", displayCategory: "idle", sessionName: "z-session"),
+            makePane(paneID: "%4", displayCategory: "idle", sessionName: "a-session"),
+        ]
+        let secondOrder = secondModel.sessionSections.map(\.sessionName)
+        XCTAssertEqual(secondOrder, ["a-session", "z-session"])
+    }
+
+    func testPaneOrderWithinSessionIgnoresCategoryTransitions() throws {
+        let model = try makeModel()
+        let pane1 = PaneItem(
+            identity: PaneIdentity(target: "local", sessionName: "s1", windowID: "@1", paneID: "%1"),
+            windowName: nil,
+            currentCmd: "codex",
+            paneTitle: nil,
+            state: "running",
+            reasonCode: nil,
+            confidence: nil,
+            runtimeID: "rt-1",
+            agentType: "codex",
+            agentPresence: "managed",
+            activityState: "running",
+            displayCategory: "running",
+            needsUserAction: nil,
+            stateSource: nil,
+            lastEventType: nil,
+            lastEventAt: nil,
+            awaitingResponseKind: nil,
+            sessionLabel: "one",
+            sessionLabelSource: nil,
+            lastInteractionAt: nil,
+            updatedAt: "2026-02-15T00:00:00Z"
+        )
+        let pane2 = PaneItem(
+            identity: PaneIdentity(target: "local", sessionName: "s1", windowID: "@1", paneID: "%2"),
+            windowName: nil,
+            currentCmd: "codex",
+            paneTitle: nil,
+            state: "idle",
+            reasonCode: nil,
+            confidence: nil,
+            runtimeID: "rt-2",
+            agentType: "codex",
+            agentPresence: "managed",
+            activityState: "idle",
+            displayCategory: "idle",
+            needsUserAction: nil,
+            stateSource: nil,
+            lastEventType: nil,
+            lastEventAt: nil,
+            awaitingResponseKind: nil,
+            sessionLabel: "two",
+            sessionLabelSource: nil,
+            lastInteractionAt: nil,
+            updatedAt: "2026-02-15T00:00:00Z"
+        )
+        model.panes = [pane2, pane1]
+        guard let section = model.sessionSections.first else {
+            XCTFail("missing session section")
+            return
+        }
+        XCTAssertEqual(section.panes.map(\.identity.paneID), ["%1", "%2"])
+    }
+
     func testStateReasonRedundantForIdle() throws {
         let model = try makeModel()
         let pane = makePane(paneID: "%1", displayCategory: "idle")
@@ -294,31 +486,309 @@ final class AppViewModelSettingsTests: XCTestCase {
         ))
     }
 
-    private func makeModel() throws -> AppViewModel {
-        setenv("AGTMUX_DAEMON_BIN", "/usr/bin/true", 1)
-        setenv("AGTMUX_APP_BIN", "/usr/bin/true", 1)
+    func testOpenSelectedPaneInExternalTerminalBuildsLocalTmuxJumpCommand() throws {
+        let capture = ExternalTerminalRunCapture()
+        let model = try makeModel(externalTerminalCommandRunner: { executable, args in
+            capture.set(executable: executable, args: args)
+            return ""
+        })
+        let pane = makePane(paneID: "%1", displayCategory: "idle")
+        model.panes = [pane]
+        model.selectedPane = pane
 
-        let daemon = try DaemonManager(
-            socketPath: "/tmp/agtmux-test.sock",
-            dbPath: "/tmp/agtmux-test.db",
-            logPath: "/tmp/agtmux-test.log"
+        model.openSelectedPaneInExternalTerminal()
+
+        let captured = capture.snapshot()
+        XCTAssertEqual(captured.executable, "/usr/bin/osascript")
+        let joined = captured.args.joined(separator: " ")
+        XCTAssertTrue(joined.contains("tell application \"Terminal\" to do script"))
+        XCTAssertTrue(joined.contains("tmux select-window -t '@1'"))
+        XCTAssertTrue(joined.contains("tmux select-pane -t '%1'"))
+        XCTAssertTrue(joined.contains("&&"))
+        assertSubsequenceOrder(
+            joined,
+            expected: [
+                "tmux select-window -t",
+                "tmux select-pane -t",
+                "tmux attach-session -t",
+            ]
         )
-        let client = try AGTMUXCLIClient(socketPath: "/tmp/agtmux-test.sock")
+        XCTAssertEqual(model.errorMessage, "")
+    }
 
-        let suiteName = "AGTMUXDesktopTests-\(UUID().uuidString)"
+    func testOpenSelectedPaneInExternalTerminalBuildsSSHCommand() throws {
+        let capture = ExternalTerminalRunCapture()
+        let model = try makeModel(externalTerminalCommandRunner: { executable, args in
+            capture.set(executable: executable, args: args)
+            return ""
+        })
+        model.targets = [
+            TargetItem(
+                targetID: "vm1",
+                targetName: "vm1",
+                kind: "ssh",
+                connectionRef: "ssh://devvm",
+                isDefault: false,
+                health: "ok"
+            )
+        ]
+        let pane = makePane(paneID: "%3", displayCategory: "idle", target: "vm1")
+        model.panes = [pane]
+        model.selectedPane = pane
+
+        model.openSelectedPaneInExternalTerminal()
+
+        let captured = capture.snapshot()
+        XCTAssertEqual(captured.executable, "/usr/bin/osascript")
+        let joined = captured.args.joined(separator: " ")
+        XCTAssertTrue(joined.contains("ssh -t"))
+        XCTAssertTrue(joined.contains("devvm"))
+        XCTAssertTrue(joined.contains("&&"))
+        assertSubsequenceOrder(
+            joined,
+            expected: [
+                "tmux select-window -t",
+                "tmux select-pane -t",
+                "tmux attach-session -t",
+            ]
+        )
+        XCTAssertEqual(model.errorMessage, "")
+    }
+
+    func testOpenSelectedPaneInExternalTerminalFailsWhenTargetIsUnavailable() throws {
+        let capture = ExternalTerminalRunCapture()
+        let model = try makeModel(externalTerminalCommandRunner: { executable, args in
+            capture.set(executable: executable, args: args)
+            return ""
+        })
+        let pane = makePane(paneID: "%9", displayCategory: "idle", target: "missing-target")
+        model.panes = [pane]
+        model.selectedPane = pane
+
+        model.openSelectedPaneInExternalTerminal()
+
+        let captured = capture.snapshot()
+        XCTAssertEqual(captured.executable, "")
+        XCTAssertTrue(captured.args.isEmpty)
+        XCTAssertTrue(model.errorMessage.contains("target is unavailable"))
+    }
+
+    func testOpenSelectedPaneInExternalTerminalFailsWhenTargetKindIsUnsupported() throws {
+        let capture = ExternalTerminalRunCapture()
+        let model = try makeModel(externalTerminalCommandRunner: { executable, args in
+            capture.set(executable: executable, args: args)
+            return ""
+        })
+        model.targets = [
+            TargetItem(
+                targetID: "vm2",
+                targetName: "vm2",
+                kind: "container",
+                connectionRef: nil,
+                isDefault: false,
+                health: "ok"
+            )
+        ]
+        let pane = makePane(paneID: "%10", displayCategory: "idle", target: "vm2")
+        model.panes = [pane]
+        model.selectedPane = pane
+
+        model.openSelectedPaneInExternalTerminal()
+
+        let captured = capture.snapshot()
+        XCTAssertEqual(captured.executable, "")
+        XCTAssertTrue(captured.args.isEmpty)
+        XCTAssertTrue(model.errorMessage.contains("unsupported target kind"))
+    }
+
+    func testOpenSelectedPaneInExternalTerminalFailsWhenTargetKindIsUnavailable() throws {
+        let capture = ExternalTerminalRunCapture()
+        let model = try makeModel(externalTerminalCommandRunner: { executable, args in
+            capture.set(executable: executable, args: args)
+            return ""
+        })
+        model.targets = [
+            TargetItem(
+                targetID: "vm3",
+                targetName: "vm3",
+                kind: "   ",
+                connectionRef: nil,
+                isDefault: false,
+                health: "ok"
+            )
+        ]
+        let pane = makePane(paneID: "%11", displayCategory: "idle", target: "vm3")
+        model.panes = [pane]
+        model.selectedPane = pane
+
+        model.openSelectedPaneInExternalTerminal()
+
+        let captured = capture.snapshot()
+        XCTAssertEqual(captured.executable, "")
+        XCTAssertTrue(captured.args.isEmpty)
+        XCTAssertTrue(model.errorMessage.contains("target kind is unavailable"))
+    }
+
+    func testOpenSelectedPaneInExternalTerminalFailsWhenSSHConnectionRefMissing() throws {
+        let capture = ExternalTerminalRunCapture()
+        let model = try makeModel(externalTerminalCommandRunner: { executable, args in
+            capture.set(executable: executable, args: args)
+            return ""
+        })
+        model.targets = [
+            TargetItem(
+                targetID: "vm4",
+                targetName: "vm4",
+                kind: "ssh",
+                connectionRef: nil,
+                isDefault: false,
+                health: "ok"
+            )
+        ]
+        let pane = makePane(paneID: "%12", displayCategory: "idle", target: "vm4")
+        model.panes = [pane]
+        model.selectedPane = pane
+
+        model.openSelectedPaneInExternalTerminal()
+
+        let captured = capture.snapshot()
+        XCTAssertEqual(captured.executable, "")
+        XCTAssertTrue(captured.args.isEmpty)
+        XCTAssertTrue(model.errorMessage.contains("connection_ref is unavailable"))
+    }
+
+    func testOpenSelectedPaneInExternalTerminalFailsWhenPaneIdentityIncomplete() throws {
+        let capture = ExternalTerminalRunCapture()
+        let model = try makeModel(externalTerminalCommandRunner: { executable, args in
+            capture.set(executable: executable, args: args)
+            return ""
+        })
+        let incomplete = PaneItem(
+            identity: PaneIdentity(target: "local", sessionName: "s1", windowID: "@1", paneID: ""),
+            windowName: nil,
+            currentCmd: nil,
+            paneTitle: nil,
+            state: "idle",
+            reasonCode: nil,
+            confidence: nil,
+            runtimeID: nil,
+            agentType: nil,
+            agentPresence: nil,
+            activityState: nil,
+            displayCategory: "idle",
+            needsUserAction: nil,
+            stateSource: nil,
+            lastEventType: nil,
+            lastEventAt: nil,
+            awaitingResponseKind: nil,
+            sessionLabel: nil,
+            sessionLabelSource: nil,
+            lastInteractionAt: nil,
+            updatedAt: "2026-02-15T00:00:00Z"
+        )
+        model.panes = [incomplete]
+        model.selectedPane = incomplete
+
+        model.openSelectedPaneInExternalTerminal()
+
+        let captured = capture.snapshot()
+        XCTAssertEqual(captured.executable, "")
+        XCTAssertTrue(captured.args.isEmpty)
+        XCTAssertTrue(model.errorMessage.contains("pane identity is incomplete"))
+    }
+
+    func testOpenSelectedPaneInExternalTerminalRequiresSelection() throws {
+        let model = try makeModel()
+        model.infoMessage = "opened in external terminal"
+        model.selectedPane = nil
+
+        model.openSelectedPaneInExternalTerminal()
+
+        XCTAssertEqual(model.infoMessage, "")
+        XCTAssertEqual(model.errorMessage, "Pane を選択してください。")
+    }
+
+    func testOpenSelectedPaneInExternalTerminalClearsInfoMessageOnRunnerFailure() throws {
+        enum DummyError: LocalizedError {
+            case failed
+            var errorDescription: String? { "external terminal failed" }
+        }
+
+        let model = try makeModel(externalTerminalCommandRunner: { _, _ in
+            throw DummyError.failed
+        })
+        let pane = makePane(paneID: "%1", displayCategory: "idle")
+        model.panes = [pane]
+        model.selectedPane = pane
+        model.infoMessage = "opened in external terminal"
+
+        model.openSelectedPaneInExternalTerminal()
+
+        XCTAssertTrue(model.errorMessage.contains("external terminal failed"))
+        XCTAssertEqual(model.infoMessage, "")
+    }
+
+    func testInteractiveTerminalInputPreferenceDefaultsToTrueAndPersists() throws {
+        let suiteName = "AGTMUXDesktopTests-InteractiveInput-\(UUID().uuidString)"
         guard let defaults = UserDefaults(suiteName: suiteName) else {
             XCTFail("Failed to create test defaults")
             throw NSError(domain: "test", code: 1)
         }
         defaults.removePersistentDomain(forName: suiteName)
-        return AppViewModel(daemon: daemon, client: client, defaults: defaults)
+
+        let model = try makeModel(defaults: defaults)
+        XCTAssertTrue(model.interactiveTerminalInputEnabled)
+        model.interactiveTerminalInputEnabled = false
+
+        let restored = try makeModel(defaults: defaults)
+        XCTAssertFalse(restored.interactiveTerminalInputEnabled)
     }
 
-    private func makePane(paneID: String, displayCategory: String) -> PaneItem {
+    private func makeModel(
+        defaults providedDefaults: UserDefaults? = nil,
+        externalTerminalCommandRunner: @escaping AppViewModel.ExternalTerminalCommandRunner = { _, _ in "" }
+    ) throws -> AppViewModel {
+        let daemon = try DaemonManager(
+            socketPath: "/tmp/agtmux-test.sock",
+            dbPath: "/tmp/agtmux-test.db",
+            logPath: "/tmp/agtmux-test.log",
+            daemonBinaryPath: "/usr/bin/true"
+        )
+        let client = AGTMUXCLIClient(
+            socketPath: "/tmp/agtmux-test.sock",
+            appBinaryPath: "/usr/bin/true"
+        )
+
+        let defaults: UserDefaults
+        if let providedDefaults {
+            defaults = providedDefaults
+        } else {
+            let suiteName = "AGTMUXDesktopTests-\(UUID().uuidString)"
+            guard let isolated = UserDefaults(suiteName: suiteName) else {
+                XCTFail("Failed to create test defaults")
+                throw NSError(domain: "test", code: 1)
+            }
+            isolated.removePersistentDomain(forName: suiteName)
+            defaults = isolated
+        }
+        return AppViewModel(
+            daemon: daemon,
+            client: client,
+            defaults: defaults,
+            externalTerminalCommandRunner: externalTerminalCommandRunner
+        )
+    }
+
+    private func makePane(
+        paneID: String,
+        displayCategory: String,
+        target: String = "local",
+        sessionName: String = "s1"
+    ) -> PaneItem {
         PaneItem(
             identity: PaneIdentity(
-                target: "local",
-                sessionName: "s1",
+                target: target,
+                sessionName: sessionName,
                 windowID: "@1",
                 paneID: paneID
             ),
@@ -343,5 +813,35 @@ final class AppViewModelSettingsTests: XCTestCase {
             lastInteractionAt: nil,
             updatedAt: "2026-02-15T00:00:00Z"
         )
+    }
+}
+
+private final class ExternalTerminalRunCapture: @unchecked Sendable {
+    private let lock = NSLock()
+    private var executable: String = ""
+    private var args: [String] = []
+
+    func set(executable: String, args: [String]) {
+        lock.lock()
+        self.executable = executable
+        self.args = args
+        lock.unlock()
+    }
+
+    func snapshot() -> (executable: String, args: [String]) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (executable, args)
+    }
+}
+
+private func assertSubsequenceOrder(_ text: String, expected parts: [String], file: StaticString = #filePath, line: UInt = #line) {
+    var lowerBound = text.startIndex
+    for part in parts {
+        guard let found = text.range(of: part, range: lowerBound..<text.endIndex) else {
+            XCTFail("expected token not found: \(part) in: \(text)", file: file, line: line)
+            return
+        }
+        lowerBound = found.upperBound
     }
 }

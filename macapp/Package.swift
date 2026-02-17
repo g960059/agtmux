@@ -9,9 +9,15 @@ let package = Package(
     products: [
         .executable(name: "AGTMUXDesktop", targets: ["AGTMUXDesktop"]),
     ],
+    dependencies: [
+        .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", from: "1.2.6"),
+    ],
     targets: [
         .executableTarget(
             name: "AGTMUXDesktop",
+            dependencies: [
+                "SwiftTerm",
+            ],
             path: "Sources"
         ),
         .testTarget(

@@ -206,6 +206,10 @@ type TerminalFrameItem struct {
 	FrameType   string `json:"frame_type"`
 	StreamID    string `json:"stream_id"`
 	Cursor      string `json:"cursor"`
+	CursorX     *int   `json:"cursor_x,omitempty"`
+	CursorY     *int   `json:"cursor_y,omitempty"`
+	PaneCols    *int   `json:"pane_cols,omitempty"`
+	PaneRows    *int   `json:"pane_rows,omitempty"`
 	PaneID      string `json:"pane_id"`
 	Target      string `json:"target"`
 	Lines       int    `json:"lines"`
@@ -227,6 +231,9 @@ type TerminalResizeResponse struct {
 	Cols          int       `json:"cols"`
 	Rows          int       `json:"rows"`
 	ResultCode    string    `json:"result_code"`
+	Policy        string    `json:"policy,omitempty"`
+	ClientCount   int       `json:"client_count,omitempty"`
+	Reason        string    `json:"reason,omitempty"`
 }
 
 type TerminalAttachResponse struct {
@@ -259,6 +266,10 @@ type TerminalStreamFrame struct {
 	FrameType   string `json:"frame_type"`
 	StreamID    string `json:"stream_id"`
 	Cursor      string `json:"cursor"`
+	CursorX     *int   `json:"cursor_x,omitempty"`
+	CursorY     *int   `json:"cursor_y,omitempty"`
+	PaneCols    *int   `json:"pane_cols,omitempty"`
+	PaneRows    *int   `json:"pane_rows,omitempty"`
 	SessionID   string `json:"session_id"`
 	Target      string `json:"target"`
 	PaneID      string `json:"pane_id"`

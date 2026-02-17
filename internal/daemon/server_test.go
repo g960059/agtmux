@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -3275,8 +3276,8 @@ func TestTerminalAttachWriteStreamDetachLifecycle(t *testing.T) {
 		t.Fatalf("stream expected 200, got %d body=%s", thirdStream.Code, thirdStream.Body.String())
 	}
 	thirdFrame := decodeJSON[api.TerminalStreamEnvelope](t, thirdStream)
-	if thirdFrame.Frame.FrameType != "output" || thirdFrame.Frame.Content != "a" {
-		t.Fatalf("expected output delta frame, got %+v", thirdFrame.Frame)
+	if thirdFrame.Frame.FrameType != "output" || !strings.Contains(thirdFrame.Frame.Content, "prompt> a") {
+		t.Fatalf("expected output frame with full snapshot content, got %+v", thirdFrame.Frame)
 	}
 
 	detachRec := doJSONRequest(t, srv.httpSrv.Handler, http.MethodPost, "/v1/terminal/detach", map[string]any{
@@ -3293,6 +3294,177 @@ func TestTerminalAttachWriteStreamDetachLifecycle(t *testing.T) {
 	missingStream := doJSONRequest(t, srv.httpSrv.Handler, http.MethodGet, "/v1/terminal/stream?session_id="+url.QueryEscape(attachResp.SessionID), nil)
 	if missingStream.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 after detach, got %d body=%s", missingStream.Code, missingStream.Body.String())
+	}
+}
+
+func TestTerminalWriteAcceptsBytesBase64Payload(t *testing.T) {
+	runner := &scriptedRunner{}
+	srv, store := newAPITestServer(t, runner)
+	seedTarget(t, store, "t1", "t1")
+	now := time.Now().UTC()
+	pid := int64(1234)
+	seedPaneRuntimeState(t, store,
+		model.Pane{
+			TargetID:    "t1",
+			PaneID:      "%1",
+			SessionName: "s1",
+			WindowID:    "@1",
+			WindowName:  "w1",
+			CurrentCmd:  "codex",
+			UpdatedAt:   now,
+		},
+		model.Runtime{
+			RuntimeID:        "rt-1",
+			TargetID:         "t1",
+			PaneID:           "%1",
+			TmuxServerBootID: "boot-1",
+			PaneEpoch:        1,
+			AgentType:        "codex",
+			PID:              &pid,
+			StartedAt:        now,
+		},
+		model.StateRow{
+			TargetID:     "t1",
+			PaneID:       "%1",
+			RuntimeID:    "rt-1",
+			State:        model.StateIdle,
+			ReasonCode:   "idle",
+			Confidence:   "high",
+			StateVersion: 1,
+			LastSeenAt:   now,
+			UpdatedAt:    now,
+		},
+	)
+
+	attachRec := doJSONRequest(t, srv.httpSrv.Handler, http.MethodPost, "/v1/terminal/attach", map[string]any{
+		"target":  "t1",
+		"pane_id": "%1",
+	})
+	if attachRec.Code != http.StatusOK {
+		t.Fatalf("attach expected 200, got %d body=%s", attachRec.Code, attachRec.Body.String())
+	}
+	attachResp := decodeJSON[api.TerminalAttachResponse](t, attachRec)
+
+	payload := []byte("/\xe3\x81\x82")
+	writeRec := doJSONRequest(t, srv.httpSrv.Handler, http.MethodPost, "/v1/terminal/write", map[string]any{
+		"session_id": attachResp.SessionID,
+		"bytes_b64":  base64.StdEncoding.EncodeToString(payload),
+	})
+	if writeRec.Code != http.StatusOK {
+		t.Fatalf("write expected 200, got %d body=%s", writeRec.Code, writeRec.Body.String())
+	}
+	writeResp := decodeJSON[api.TerminalWriteResponse](t, writeRec)
+	if writeResp.ResultCode != "completed" {
+		t.Fatalf("unexpected write response: %+v", writeResp)
+	}
+	lastCall := runner.calls[len(runner.calls)-1]
+	got := strings.Join(lastCall.args, " ")
+	if got != "send-keys -t %1 -H 2f e3 81 82" {
+		t.Fatalf("expected hex send-keys call, got %q", got)
+	}
+}
+
+func TestTerminalStreamIncludesCursorPositionMetadata(t *testing.T) {
+	runner := &scriptedRunner{
+		outputs: [][]byte{
+			[]byte("prompt> \n__AGTMUX_CURSOR_POSITION__2,45,102,46\n"),
+		},
+	}
+	srv, store := newAPITestServer(t, runner)
+	seedTarget(t, store, "t1", "t1")
+	now := time.Now().UTC()
+	pid := int64(7123)
+	seedPaneRuntimeState(t, store,
+		model.Pane{
+			TargetID:    "t1",
+			PaneID:      "%1",
+			SessionName: "s1",
+			WindowID:    "@1",
+			WindowName:  "w1",
+			CurrentCmd:  "codex",
+			UpdatedAt:   now,
+		},
+		model.Runtime{
+			RuntimeID:        "rt-1",
+			TargetID:         "t1",
+			PaneID:           "%1",
+			TmuxServerBootID: "boot-1",
+			PaneEpoch:        1,
+			AgentType:        "codex",
+			PID:              &pid,
+			StartedAt:        now,
+		},
+		model.StateRow{
+			TargetID:     "t1",
+			PaneID:       "%1",
+			RuntimeID:    "rt-1",
+			State:        model.StateIdle,
+			ReasonCode:   "idle",
+			Confidence:   "high",
+			StateVersion: 1,
+			LastSeenAt:   now,
+			UpdatedAt:    now,
+		},
+	)
+
+	attachRec := doJSONRequest(t, srv.httpSrv.Handler, http.MethodPost, "/v1/terminal/attach", map[string]any{
+		"target":  "t1",
+		"pane_id": "%1",
+	})
+	if attachRec.Code != http.StatusOK {
+		t.Fatalf("attach expected 200, got %d body=%s", attachRec.Code, attachRec.Body.String())
+	}
+	attachResp := decodeJSON[api.TerminalAttachResponse](t, attachRec)
+
+	firstStream := doJSONRequest(t, srv.httpSrv.Handler, http.MethodGet, "/v1/terminal/stream?session_id="+url.QueryEscape(attachResp.SessionID), nil)
+	if firstStream.Code != http.StatusOK {
+		t.Fatalf("stream expected 200, got %d body=%s", firstStream.Code, firstStream.Body.String())
+	}
+	firstFrame := decodeJSON[api.TerminalStreamEnvelope](t, firstStream)
+
+	secondStream := doJSONRequest(
+		t,
+		srv.httpSrv.Handler,
+		http.MethodGet,
+		"/v1/terminal/stream?session_id="+url.QueryEscape(attachResp.SessionID)+"&cursor="+url.QueryEscape(firstFrame.Frame.Cursor)+"&lines=120",
+		nil,
+	)
+	if secondStream.Code != http.StatusOK {
+		t.Fatalf("stream expected 200, got %d body=%s", secondStream.Code, secondStream.Body.String())
+	}
+	secondFrame := decodeJSON[api.TerminalStreamEnvelope](t, secondStream)
+	if secondFrame.Frame.Content != "prompt> " {
+		t.Fatalf("expected marker removed from content, got %q", secondFrame.Frame.Content)
+	}
+	if secondFrame.Frame.CursorX == nil || secondFrame.Frame.CursorY == nil {
+		t.Fatalf("expected cursor metadata, got %+v", secondFrame.Frame)
+	}
+	if *secondFrame.Frame.CursorX != 2 || *secondFrame.Frame.CursorY != 45 {
+		t.Fatalf("unexpected cursor coordinates: x=%v y=%v", secondFrame.Frame.CursorX, secondFrame.Frame.CursorY)
+	}
+	if secondFrame.Frame.PaneCols == nil || secondFrame.Frame.PaneRows == nil {
+		t.Fatalf("expected pane size metadata, got %+v", secondFrame.Frame)
+	}
+	if *secondFrame.Frame.PaneCols != 102 || *secondFrame.Frame.PaneRows != 46 {
+		t.Fatalf("unexpected pane size: cols=%v rows=%v", secondFrame.Frame.PaneCols, secondFrame.Frame.PaneRows)
+	}
+}
+
+func TestTrimSnapshotToVisibleRows(t *testing.T) {
+	rows := 3
+	got := trimSnapshotToVisibleRows("l1\nl2\nl3\nl4\nl5\n", &rows)
+	if got != "l3\nl4\nl5" {
+		t.Fatalf("unexpected trimmed output: %q", got)
+	}
+
+	gotNoRowLimit := trimSnapshotToVisibleRows("a\nb\n", nil)
+	if gotNoRowLimit != "a\nb" {
+		t.Fatalf("expected trailing newline trimmed without row limit, got %q", gotNoRowLimit)
+	}
+
+	gotCRLF := trimSnapshotToVisibleRows("x\r\ny\r\nz\r\n", &rows)
+	if gotCRLF != "x\ny\nz" {
+		t.Fatalf("expected CRLF normalization, got %q", gotCRLF)
 	}
 }
 
@@ -3460,6 +3632,163 @@ func TestTerminalWriteRejectsStaleRuntimeGuard(t *testing.T) {
 	}
 }
 
+func TestTerminalStreamRejectsExpiredProxySession(t *testing.T) {
+	runner := &stubRunner{out: []byte("prompt> ")}
+	srv, store := newAPITestServer(t, runner)
+	seedTarget(t, store, "t1", "t1")
+	now := time.Now().UTC()
+	pid := int64(4545)
+	seedPaneRuntimeState(t, store,
+		model.Pane{
+			TargetID:    "t1",
+			PaneID:      "%1",
+			SessionName: "s1",
+			WindowID:    "@1",
+			WindowName:  "w1",
+			CurrentCmd:  "codex",
+			UpdatedAt:   now,
+		},
+		model.Runtime{
+			RuntimeID:        "rt-1",
+			TargetID:         "t1",
+			PaneID:           "%1",
+			TmuxServerBootID: "boot-1",
+			PaneEpoch:        1,
+			AgentType:        "codex",
+			PID:              &pid,
+			StartedAt:        now,
+		},
+		model.StateRow{
+			TargetID:     "t1",
+			PaneID:       "%1",
+			RuntimeID:    "rt-1",
+			State:        model.StateIdle,
+			ReasonCode:   "idle",
+			Confidence:   "high",
+			StateVersion: 1,
+			LastSeenAt:   now,
+			UpdatedAt:    now,
+		},
+	)
+
+	attachRec := doJSONRequest(t, srv.httpSrv.Handler, http.MethodPost, "/v1/terminal/attach", map[string]any{
+		"target":  "t1",
+		"pane_id": "%1",
+	})
+	if attachRec.Code != http.StatusOK {
+		t.Fatalf("attach expected 200, got %d body=%s", attachRec.Code, attachRec.Body.String())
+	}
+	attachResp := decodeJSON[api.TerminalAttachResponse](t, attachRec)
+	if attachResp.SessionID == "" {
+		t.Fatalf("missing session id: %+v", attachResp)
+	}
+
+	srv.terminalMu.Lock()
+	expired := srv.terminalProxy[attachResp.SessionID]
+	expired.UpdatedAt = expired.UpdatedAt.Add(-(srv.terminalProxyTTL + time.Second))
+	srv.terminalProxy[attachResp.SessionID] = expired
+	srv.terminalMu.Unlock()
+
+	streamRec := doJSONRequest(t, srv.httpSrv.Handler, http.MethodGet, "/v1/terminal/stream?session_id="+url.QueryEscape(attachResp.SessionID), nil)
+	if streamRec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for expired terminal session, got %d body=%s", streamRec.Code, streamRec.Body.String())
+	}
+	errResp := decodeJSON[api.ErrorResponse](t, streamRec)
+	if errResp.Error.Code != model.ErrRefNotFound {
+		t.Fatalf("expected ref not found for expired session, got %+v", errResp.Error)
+	}
+
+	srv.terminalMu.Lock()
+	_, stillExists := srv.terminalProxy[attachResp.SessionID]
+	srv.terminalMu.Unlock()
+	if stillExists {
+		t.Fatalf("expired terminal session should be removed from cache")
+	}
+}
+
+func TestTerminalReadResetsWhenCachedStateExpired(t *testing.T) {
+	runner := &scriptedRunner{
+		outputs: [][]byte{
+			[]byte("line1\nline2\n"),
+			[]byte("line1\nline2\nline3\n"),
+		},
+	}
+	srv, store := newAPITestServer(t, runner)
+	seedTarget(t, store, "t1", "t1")
+	now := time.Now().UTC()
+	pid := int64(5656)
+	seedPaneRuntimeState(t, store,
+		model.Pane{
+			TargetID:    "t1",
+			PaneID:      "%1",
+			SessionName: "s1",
+			WindowID:    "@1",
+			WindowName:  "w1",
+			CurrentCmd:  "codex",
+			UpdatedAt:   now,
+		},
+		model.Runtime{
+			RuntimeID:        "rt-1",
+			TargetID:         "t1",
+			PaneID:           "%1",
+			TmuxServerBootID: "boot-1",
+			PaneEpoch:        1,
+			AgentType:        "codex",
+			PID:              &pid,
+			StartedAt:        now,
+		},
+		model.StateRow{
+			TargetID:     "t1",
+			PaneID:       "%1",
+			RuntimeID:    "rt-1",
+			State:        model.StateIdle,
+			ReasonCode:   "idle",
+			Confidence:   "high",
+			StateVersion: 1,
+			LastSeenAt:   now,
+			UpdatedAt:    now,
+		},
+	)
+
+	firstRead := doJSONRequest(t, srv.httpSrv.Handler, http.MethodPost, "/v1/terminal/read", map[string]any{
+		"target":  "t1",
+		"pane_id": "%1",
+		"lines":   120,
+	})
+	if firstRead.Code != http.StatusOK {
+		t.Fatalf("first read expected 200, got %d body=%s", firstRead.Code, firstRead.Body.String())
+	}
+	firstEnvelope := decodeJSON[api.TerminalReadEnvelope](t, firstRead)
+	if firstEnvelope.Frame.Cursor == "" {
+		t.Fatalf("first read missing cursor: %+v", firstEnvelope.Frame)
+	}
+
+	pk := paneKey("t1", "%1")
+	srv.terminalMu.Lock()
+	state, ok := srv.terminalStates[pk]
+	if !ok {
+		srv.terminalMu.Unlock()
+		t.Fatalf("expected cached terminal state")
+	}
+	state.updatedAt = state.updatedAt.Add(-(srv.terminalStateTTL + time.Second))
+	srv.terminalStates[pk] = state
+	srv.terminalMu.Unlock()
+
+	secondRead := doJSONRequest(t, srv.httpSrv.Handler, http.MethodPost, "/v1/terminal/read", map[string]any{
+		"target":  "t1",
+		"pane_id": "%1",
+		"cursor":  firstEnvelope.Frame.Cursor,
+		"lines":   120,
+	})
+	if secondRead.Code != http.StatusOK {
+		t.Fatalf("second read expected 200, got %d body=%s", secondRead.Code, secondRead.Body.String())
+	}
+	secondEnvelope := decodeJSON[api.TerminalReadEnvelope](t, secondRead)
+	if secondEnvelope.Frame.FrameType != "reset" || secondEnvelope.Frame.ResetReason != "cursor_discontinuity" {
+		t.Fatalf("expected reset after terminal state TTL expiration, got %+v", secondEnvelope.Frame)
+	}
+}
+
 func TestTerminalStreamDoesNotResurrectDetachedSession(t *testing.T) {
 	runner := newBlockingFirstCallRunner()
 	srv, store := newAPITestServer(t, runner)
@@ -3556,7 +3885,14 @@ func TestTerminalStreamDoesNotResurrectDetachedSession(t *testing.T) {
 }
 
 func TestTerminalReadAndResizeHandlers(t *testing.T) {
-	runner := &stubRunner{out: []byte("line1\nline2\n")}
+	runner := &scriptedRunner{
+		outputs: [][]byte{
+			[]byte("line1\nline2\n"), // terminal/read capture-pane
+			[]byte("line1\nline2\n"), // terminal/read capture-pane (cursor mismatch path)
+			[]byte("/dev/pts/1\n"),   // terminal/resize list-clients
+			[]byte("ok\n"),           // terminal/resize resize-pane
+		},
+	}
 	srv, store := newAPITestServer(t, runner)
 	seedTarget(t, store, "t1", "t1")
 	now := time.Now().UTC()
@@ -3619,7 +3955,9 @@ func TestTerminalReadAndResizeHandlers(t *testing.T) {
 	if lastReadCall.name != "tmux" {
 		t.Fatalf("expected tmux command, got %+v", lastReadCall)
 	}
-	if strings.Join(lastReadCall.args, " ") != "capture-pane -t %1 -p -S -120" {
+	joinedReadArgs := strings.Join(lastReadCall.args, " ")
+	if !strings.Contains(joinedReadArgs, "capture-pane -t %1 -p -S -120") ||
+		!strings.Contains(joinedReadArgs, "display-message -p -t %1 __AGTMUX_CURSOR_POSITION__") {
 		t.Fatalf("unexpected read args: %+v", lastReadCall.args)
 	}
 
@@ -3649,9 +3987,229 @@ func TestTerminalReadAndResizeHandlers(t *testing.T) {
 	if resizeResp.ResultCode != "completed" || resizeResp.Cols != 120 || resizeResp.Rows != 40 {
 		t.Fatalf("unexpected resize response: %+v", resizeResp)
 	}
+	if resizeResp.Policy != resizePolicySingleClientApply {
+		t.Fatalf("expected single client policy, got %+v", resizeResp)
+	}
+	if resizeResp.ClientCount != 1 {
+		t.Fatalf("expected client_count=1, got %+v", resizeResp)
+	}
+	if len(runner.calls) < 2 {
+		t.Fatalf("expected list-clients and resize-pane calls, got %d", len(runner.calls))
+	}
+	clientCountCall := runner.calls[len(runner.calls)-2]
+	if strings.Join(clientCountCall.args, " ") != "list-clients -t s1 -F #{client_tty}" {
+		t.Fatalf("unexpected list-clients args: %+v", clientCountCall.args)
+	}
 	lastResizeCall := runner.calls[len(runner.calls)-1]
 	if strings.Join(lastResizeCall.args, " ") != "resize-pane -t %1 -x 120 -y 40" {
 		t.Fatalf("unexpected resize args: %+v", lastResizeCall.args)
+	}
+}
+
+func TestTerminalResizeSkipsWhenMultipleClientsAttached(t *testing.T) {
+	runner := &scriptedRunner{
+		outputs: [][]byte{
+			[]byte("/dev/pts/1\n/dev/pts/2\n"), // terminal/resize list-clients
+		},
+	}
+	srv, store := newAPITestServer(t, runner)
+	seedTarget(t, store, "t1", "t1")
+	now := time.Now().UTC()
+	pid := int64(5678)
+	seedPaneRuntimeState(t, store,
+		model.Pane{
+			TargetID:    "t1",
+			PaneID:      "%1",
+			SessionName: "s1",
+			WindowID:    "@1",
+			WindowName:  "w1",
+			CurrentCmd:  "codex",
+			UpdatedAt:   now,
+		},
+		model.Runtime{
+			RuntimeID:        "rt-1",
+			TargetID:         "t1",
+			PaneID:           "%1",
+			TmuxServerBootID: "boot-1",
+			PaneEpoch:        1,
+			AgentType:        "codex",
+			PID:              &pid,
+			StartedAt:        now,
+		},
+		model.StateRow{
+			TargetID:     "t1",
+			PaneID:       "%1",
+			RuntimeID:    "rt-1",
+			State:        model.StateIdle,
+			ReasonCode:   "idle",
+			Confidence:   "high",
+			StateVersion: 1,
+			LastSeenAt:   now,
+			UpdatedAt:    now,
+		},
+	)
+
+	rec := doJSONRequest(t, srv.httpSrv.Handler, http.MethodPost, "/v1/terminal/resize", map[string]any{
+		"target":  "t1",
+		"pane_id": "%1",
+		"cols":    120,
+		"rows":    40,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	resp := decodeJSON[api.TerminalResizeResponse](t, rec)
+	if resp.ResultCode != "skipped_conflict" {
+		t.Fatalf("expected skipped_conflict, got %+v", resp)
+	}
+	if resp.Policy != resizePolicyMultiClientSkip || resp.Reason != "multiple_clients_attached" {
+		t.Fatalf("unexpected resize policy response: %+v", resp)
+	}
+	if resp.ClientCount != 2 {
+		t.Fatalf("expected client_count=2, got %+v", resp)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("expected list-clients only, got calls=%d", len(runner.calls))
+	}
+	if strings.Join(runner.calls[0].args, " ") != "list-clients -t s1 -F #{client_tty}" {
+		t.Fatalf("unexpected first call args: %+v", runner.calls[0].args)
+	}
+}
+
+func TestTerminalResizeSkipsWhenClientInspectionFails(t *testing.T) {
+	runner := &stubRunner{err: errors.New("tmux list-clients failed")}
+	srv, store := newAPITestServer(t, runner)
+	seedTarget(t, store, "t1", "t1")
+	now := time.Now().UTC()
+	pid := int64(9012)
+	seedPaneRuntimeState(t, store,
+		model.Pane{
+			TargetID:    "t1",
+			PaneID:      "%1",
+			SessionName: "s1",
+			WindowID:    "@1",
+			WindowName:  "w1",
+			CurrentCmd:  "codex",
+			UpdatedAt:   now,
+		},
+		model.Runtime{
+			RuntimeID:        "rt-1",
+			TargetID:         "t1",
+			PaneID:           "%1",
+			TmuxServerBootID: "boot-1",
+			PaneEpoch:        1,
+			AgentType:        "codex",
+			PID:              &pid,
+			StartedAt:        now,
+		},
+		model.StateRow{
+			TargetID:     "t1",
+			PaneID:       "%1",
+			RuntimeID:    "rt-1",
+			State:        model.StateIdle,
+			ReasonCode:   "idle",
+			Confidence:   "high",
+			StateVersion: 1,
+			LastSeenAt:   now,
+			UpdatedAt:    now,
+		},
+	)
+
+	rec := doJSONRequest(t, srv.httpSrv.Handler, http.MethodPost, "/v1/terminal/resize", map[string]any{
+		"target":  "t1",
+		"pane_id": "%1",
+		"cols":    120,
+		"rows":    40,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	resp := decodeJSON[api.TerminalResizeResponse](t, rec)
+	if resp.ResultCode != "skipped_conflict" {
+		t.Fatalf("expected skipped_conflict, got %+v", resp)
+	}
+	if resp.Policy != resizePolicyInspectionFallbackSkip || resp.Reason != "client_inspection_failed" {
+		t.Fatalf("unexpected resize inspection fallback response: %+v", resp)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("expected list-clients only, got calls=%d", len(runner.calls))
+	}
+	if strings.Join(runner.calls[0].args, " ") != "list-clients -t s1 -F #{client_tty}" {
+		t.Fatalf("unexpected call args: %+v", runner.calls[0].args)
+	}
+}
+
+func TestTerminalResizeAppliesWhenNoTmuxClientAttached(t *testing.T) {
+	runner := &scriptedRunner{
+		outputs: [][]byte{
+			[]byte(""),     // terminal/resize list-clients (no attached clients)
+			[]byte("ok\n"), // terminal/resize resize-pane
+		},
+	}
+	srv, store := newAPITestServer(t, runner)
+	seedTarget(t, store, "t1", "t1")
+	now := time.Now().UTC()
+	pid := int64(3456)
+	seedPaneRuntimeState(t, store,
+		model.Pane{
+			TargetID:    "t1",
+			PaneID:      "%1",
+			SessionName: "s1",
+			WindowID:    "@1",
+			WindowName:  "w1",
+			CurrentCmd:  "codex",
+			UpdatedAt:   now,
+		},
+		model.Runtime{
+			RuntimeID:        "rt-1",
+			TargetID:         "t1",
+			PaneID:           "%1",
+			TmuxServerBootID: "boot-1",
+			PaneEpoch:        1,
+			AgentType:        "codex",
+			PID:              &pid,
+			StartedAt:        now,
+		},
+		model.StateRow{
+			TargetID:     "t1",
+			PaneID:       "%1",
+			RuntimeID:    "rt-1",
+			State:        model.StateIdle,
+			ReasonCode:   "idle",
+			Confidence:   "high",
+			StateVersion: 1,
+			LastSeenAt:   now,
+			UpdatedAt:    now,
+		},
+	)
+
+	rec := doJSONRequest(t, srv.httpSrv.Handler, http.MethodPost, "/v1/terminal/resize", map[string]any{
+		"target":  "t1",
+		"pane_id": "%1",
+		"cols":    132,
+		"rows":    44,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	resp := decodeJSON[api.TerminalResizeResponse](t, rec)
+	if resp.ResultCode != "completed" {
+		t.Fatalf("expected completed, got %+v", resp)
+	}
+	if resp.Policy != resizePolicySingleClientApply {
+		t.Fatalf("expected single-client policy, got %+v", resp)
+	}
+	if resp.ClientCount != 0 {
+		t.Fatalf("expected client_count=0, got %+v", resp)
+	}
+	if len(runner.calls) != 2 {
+		t.Fatalf("expected list-clients and resize-pane calls, got %d", len(runner.calls))
+	}
+	if strings.Join(runner.calls[0].args, " ") != "list-clients -t s1 -F #{client_tty}" {
+		t.Fatalf("unexpected list-clients args: %+v", runner.calls[0].args)
+	}
+	if strings.Join(runner.calls[1].args, " ") != "resize-pane -t %1 -x 132 -y 44" {
+		t.Fatalf("unexpected resize args: %+v", runner.calls[1].args)
 	}
 }
 
@@ -3848,6 +4406,119 @@ func TestTerminalReadRejectsInvalidCursor(t *testing.T) {
 	resp := decodeJSON[api.ErrorResponse](t, rec)
 	if resp.Error.Code != model.ErrCursorInvalid {
 		t.Fatalf("unexpected error response: %+v", resp)
+	}
+}
+
+func TestRefinePanePresentationWithSignalsPromotesRecentManagedIdle(t *testing.T) {
+	now := time.Now().UTC()
+	recent := now.Add(-5 * time.Second)
+	agentPresence, activityState, category, needsAction := refinePanePresentationWithSignals(
+		"managed",
+		string(model.StateIdle),
+		"",
+		"",
+		&recent,
+		now,
+	)
+	if agentPresence != "managed" {
+		t.Fatalf("unexpected agent presence: %q", agentPresence)
+	}
+	if activityState != string(model.StateRunning) {
+		t.Fatalf("expected running state, got %q", activityState)
+	}
+	if category != "running" {
+		t.Fatalf("expected running category, got %q", category)
+	}
+	if needsAction {
+		t.Fatalf("expected needsAction=false")
+	}
+}
+
+func TestRefinePanePresentationWithSignalsDoesNotPromoteOnlyByActiveReason(t *testing.T) {
+	now := time.Now().UTC()
+	old := now.Add(-2 * time.Minute)
+	_, activityState, category, _ := refinePanePresentationWithSignals(
+		"managed",
+		string(model.StateIdle),
+		"active",
+		"",
+		&old,
+		now,
+	)
+	if activityState != string(model.StateIdle) {
+		t.Fatalf("expected idle state, got %q", activityState)
+	}
+	if category != "idle" {
+		t.Fatalf("expected idle category, got %q", category)
+	}
+}
+
+func TestRefinePanePresentationWithSignalsKeepsIdleWhenReasonExplicitlyIdle(t *testing.T) {
+	now := time.Now().UTC()
+	recent := now.Add(-2 * time.Second)
+	_, activityState, category, _ := refinePanePresentationWithSignals(
+		"managed",
+		string(model.StateIdle),
+		"idle",
+		"",
+		&recent,
+		now,
+	)
+	if activityState != string(model.StateIdle) {
+		t.Fatalf("expected idle state, got %q", activityState)
+	}
+	if category != "idle" {
+		t.Fatalf("expected idle category, got %q", category)
+	}
+}
+
+func TestRefinePanePresentationWithSignalsKeepsIdleAfterCompletionLikeEvent(t *testing.T) {
+	now := time.Now().UTC()
+	recent := now.Add(-3 * time.Second)
+	_, activityState, category, _ := refinePanePresentationWithSignals(
+		"managed",
+		string(model.StateIdle),
+		"idle",
+		"task_completed",
+		&recent,
+		now,
+	)
+	if activityState != string(model.StateIdle) {
+		t.Fatalf("expected idle state, got %q", activityState)
+	}
+	if category != "idle" {
+		t.Fatalf("expected idle category, got %q", category)
+	}
+}
+
+func TestResolveClaudeSessionHintUsesJSONLModTime(t *testing.T) {
+	homeDir := t.TempDir()
+	workspace := "/tmp/repo"
+	sessionID := "abc123-session"
+	projectDir := filepath.Join(homeDir, ".claude", "projects", strings.ReplaceAll(workspace, "/", "-"))
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project dir: %v", err)
+	}
+
+	sessionPath := filepath.Join(projectDir, sessionID+".jsonl")
+	content := `{"type":"user","message":{"content":[{"type":"text","text":"Implement streaming terminal support"}]}}` + "\n"
+	if err := os.WriteFile(sessionPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write session file: %v", err)
+	}
+	expectedAt := time.Now().UTC().Add(-2 * time.Minute).Round(time.Second)
+	if err := os.Chtimes(sessionPath, expectedAt, expectedAt); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	hint := resolveClaudeSessionHint(homeDir, workspace, sessionID, model.TargetKindLocal)
+	if hint.label == "" || !strings.Contains(strings.ToLower(hint.label), "implement streaming") {
+		t.Fatalf("unexpected hint label: %+v", hint)
+	}
+	if hint.source != "claude_session_jsonl" {
+		t.Fatalf("unexpected hint source: %+v", hint)
+	}
+	if hint.at.IsZero() {
+		t.Fatalf("expected non-zero hint timestamp: %+v", hint)
 	}
 }
 

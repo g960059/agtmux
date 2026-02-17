@@ -74,7 +74,7 @@ func TestParsePSPIDCommandOutput(t *testing.T) {
 	}
 }
 
-func TestResolveClaudeSessionLabelPrefersJSONLPreview(t *testing.T) {
+func TestResolveClaudeSessionHintPrefersJSONLPreview(t *testing.T) {
 	home := t.TempDir()
 	workspace := "/Users/test/workspace"
 	sessionID := "764d927d-d3a9-4772-9dc7-63bebabd77a2"
@@ -89,25 +89,31 @@ func TestResolveClaudeSessionLabelPrefersJSONLPreview(t *testing.T) {
 		t.Fatalf("write jsonl: %v", err)
 	}
 
-	label, source := resolveClaudeSessionLabel(home, workspace, sessionID, model.TargetKindLocal)
-	if label == "" {
+	hint := resolveClaudeSessionHint(home, workspace, sessionID, model.TargetKindLocal)
+	if hint.label == "" {
 		t.Fatalf("expected non-empty label")
 	}
-	if source != "claude_session_jsonl" {
-		t.Fatalf("expected claude_session_jsonl source, got %q", source)
+	if hint.source != "claude_session_jsonl" {
+		t.Fatalf("expected claude_session_jsonl source, got %q", hint.source)
 	}
-	if label != "Explain orchestration with gemini and codex for this pane" {
-		t.Fatalf("unexpected label: %q", label)
+	if hint.label != "Explain orchestration with gemini and codex for this pane" {
+		t.Fatalf("unexpected label: %q", hint.label)
+	}
+	if hint.at.IsZero() {
+		t.Fatalf("expected non-zero timestamp")
 	}
 }
 
-func TestResolveClaudeSessionLabelFallbackToResumeID(t *testing.T) {
+func TestResolveClaudeSessionHintFallbackToResumeID(t *testing.T) {
 	sessionID := "764d927d-d3a9-4772-9dc7-63bebabd77a2"
-	label, source := resolveClaudeSessionLabel("", "", sessionID, model.TargetKindSSH)
-	if label != "claude 764d927d" {
-		t.Fatalf("expected fallback label, got %q", label)
+	hint := resolveClaudeSessionHint("", "", sessionID, model.TargetKindSSH)
+	if hint.label != "claude 764d927d" {
+		t.Fatalf("expected fallback label, got %q", hint.label)
 	}
-	if source != "claude_resume_id" {
-		t.Fatalf("expected claude_resume_id source, got %q", source)
+	if hint.source != "claude_resume_id" {
+		t.Fatalf("expected claude_resume_id source, got %q", hint.source)
+	}
+	if !hint.at.IsZero() {
+		t.Fatalf("fallback hint should not carry timestamp")
 	}
 }
