@@ -394,3 +394,26 @@ Phase 9 実装開始条件:
   - `cd macapp && swift test --filter CommandRuntimeTests` PASS
   - `cd macapp && swift test` PASS
   - `cd macapp && ./scripts/install-app.sh` 後、`/v1/snapshot` 応答と app/daemon 起動を確認済み
+
+### 7.10 TASK-953 Step（Snapshot Poll adaptive backoff）
+
+- 目的:
+  - dashboard snapshot が連続で不変のときに poll 間隔を自動的に伸ばし、常時 idle 時の CPU 負荷を下げる
+  - `running/attention` が存在する場合は backoff を無効化し、運用中の可視性を維持する
+- RED:
+  - `macapp/Tests/AppViewModelSettingsTests.swift`
+    - `testComputeSnapshotPollIntervalUsesBaseWhenHighActivity`
+    - `testComputeSnapshotPollIntervalBacksOffWhenStableAndIdle`
+    - `testComputeSnapshotPollIntervalRespectsMaxBackoff`
+- GREEN:
+  - `macapp/Sources/AppViewModel.swift`
+    - `unchangedSnapshotStreak` を導入
+    - `applySnapshot` で snapshot の差分有無を判定し streak 更新
+    - `computeSnapshotPollInterval(...)` を追加
+    - `currentSnapshotPollInterval()` を adaptive backoff ロジックへ切替
+    - `running/attention` 判定用 `hasHighActivityPanes()` を追加
+- REFACTOR:
+  - backoff 計算を pure function 化して UI 実装から分離し、テスト可能性を向上
+- 検証:
+  - `cd macapp && swift test --filter AppViewModelSettingsTests` PASS
+  - `cd macapp && swift test` PASS

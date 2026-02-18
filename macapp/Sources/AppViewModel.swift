@@ -311,6 +311,7 @@ final class AppViewModel: ObservableObject {
     private var bufferedInteractiveBytesByPaneID: [String: [UInt8]] = [:]
     private var bufferedInteractiveFlushTaskByPaneID: [String: Task<Void, Never>] = [:]
     private var lastInteractiveInputAtByPaneID: [String: Date] = [:]
+    private var unchangedSnapshotStreak: Int = 0
     private let queueDedupeWindowSeconds: TimeInterval = 30
     private let recoveryCooldownSeconds: TimeInterval = 6
     private let queueLimit = 250
@@ -325,6 +326,9 @@ final class AppViewModel: ObservableObject {
     private let terminalStreamDefaultLines = 160
     private let terminalStreamMinLines = 120
     private let terminalStreamMaxLines = 320
+    private let snapshotPollBackoffUnchangedStepCount = 3
+    private let snapshotPollBackoffMaxExtraSeconds = 6
+    private let snapshotPollUnchangedStreakCap = 120
     private let interactiveInputBatchWindowMillis = 12
     private let interactiveInputBatchChunkBytes = 320
     private let terminalOutputMaxChars = 60_000
@@ -1388,10 +1392,46 @@ final class AppViewModel: ObservableObject {
     }
 
     private func currentSnapshotPollInterval() -> TimeInterval {
+        let baseInterval: TimeInterval
         if autoStreamOnSelection, selectedPane != nil {
-            return snapshotPollIntervalStreamingSeconds
+            baseInterval = snapshotPollIntervalStreamingSeconds
+        } else {
+            baseInterval = snapshotPollIntervalSeconds
         }
-        return snapshotPollIntervalSeconds
+        return Self.computeSnapshotPollInterval(
+            baseInterval: baseInterval,
+            unchangedSnapshotStreak: unchangedSnapshotStreak,
+            hasHighActivity: hasHighActivityPanes(),
+            backoffStepCount: snapshotPollBackoffUnchangedStepCount,
+            maxExtraSeconds: snapshotPollBackoffMaxExtraSeconds
+        )
+    }
+
+    static func computeSnapshotPollInterval(
+        baseInterval: TimeInterval,
+        unchangedSnapshotStreak: Int,
+        hasHighActivity: Bool,
+        backoffStepCount: Int,
+        maxExtraSeconds: Int
+    ) -> TimeInterval {
+        guard baseInterval > 0 else {
+            return 1
+        }
+        guard !hasHighActivity else {
+            return baseInterval
+        }
+        let safeStep = max(1, backoffStepCount)
+        let safeStreak = max(0, unchangedSnapshotStreak)
+        let safeMaxExtra = max(0, maxExtraSeconds)
+        let extra = min(safeMaxExtra, safeStreak / safeStep)
+        return baseInterval + TimeInterval(extra)
+    }
+
+    private func hasHighActivityPanes() -> Bool {
+        panes.contains { pane in
+            let category = displayCategory(for: pane)
+            return category == "running" || category == "attention"
+        }
     }
 
     private func flushBufferedInteractiveInput(for paneID: String, generation: Int) async {
@@ -1469,6 +1509,15 @@ final class AppViewModel: ObservableObject {
     }
 
     private func applySnapshot(_ snapshot: DashboardSnapshot) {
+        let snapshotChanged = targets != snapshot.targets ||
+            sessions != snapshot.sessions ||
+            windows != snapshot.windows ||
+            panes != snapshot.panes
+        if snapshotChanged {
+            unchangedSnapshotStreak = 0
+        } else {
+            unchangedSnapshotStreak = min(unchangedSnapshotStreak + 1, snapshotPollUnchangedStreakCap)
+        }
         observeTransitions(newPanes: snapshot.panes, now: Date())
         updateSessionStableOrder(with: snapshot.panes)
         if targets != snapshot.targets {

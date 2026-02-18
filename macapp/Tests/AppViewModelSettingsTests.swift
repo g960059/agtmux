@@ -4,6 +4,55 @@ import XCTest
 
 @MainActor
 final class AppViewModelSettingsTests: XCTestCase {
+    func testComputeSnapshotPollIntervalUsesBaseWhenHighActivity() {
+        let interval = AppViewModel.computeSnapshotPollInterval(
+            baseInterval: 2,
+            unchangedSnapshotStreak: 120,
+            hasHighActivity: true,
+            backoffStepCount: 3,
+            maxExtraSeconds: 6
+        )
+        XCTAssertEqual(interval, 2, accuracy: 0.001)
+    }
+
+    func testComputeSnapshotPollIntervalBacksOffWhenStableAndIdle() {
+        let base = AppViewModel.computeSnapshotPollInterval(
+            baseInterval: 2,
+            unchangedSnapshotStreak: 0,
+            hasHighActivity: false,
+            backoffStepCount: 3,
+            maxExtraSeconds: 6
+        )
+        let step1 = AppViewModel.computeSnapshotPollInterval(
+            baseInterval: 2,
+            unchangedSnapshotStreak: 3,
+            hasHighActivity: false,
+            backoffStepCount: 3,
+            maxExtraSeconds: 6
+        )
+        let step2 = AppViewModel.computeSnapshotPollInterval(
+            baseInterval: 2,
+            unchangedSnapshotStreak: 8,
+            hasHighActivity: false,
+            backoffStepCount: 3,
+            maxExtraSeconds: 6
+        )
+        XCTAssertEqual(base, 2, accuracy: 0.001)
+        XCTAssertEqual(step1, 3, accuracy: 0.001)
+        XCTAssertEqual(step2, 4, accuracy: 0.001)
+    }
+
+    func testComputeSnapshotPollIntervalRespectsMaxBackoff() {
+        let interval = AppViewModel.computeSnapshotPollInterval(
+            baseInterval: 4,
+            unchangedSnapshotStreak: 999,
+            hasHighActivity: false,
+            backoffStepCount: 3,
+            maxExtraSeconds: 6
+        )
+        XCTAssertEqual(interval, 10, accuracy: 0.001)
+    }
+
     func testHideUnmanagedCategoryRemovesUnmanagedGroup() throws {
         let model = try makeModel()
         model.panes = [
