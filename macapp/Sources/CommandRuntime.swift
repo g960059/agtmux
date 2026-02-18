@@ -103,6 +103,7 @@ struct BinaryResolver {
 }
 
 protocol TerminalDaemonTransport {
+    func dashboardSnapshot(target: String?) async throws -> DashboardSnapshotEnvelope
     func listCapabilities() async throws -> CapabilitiesEnvelope
     func terminalRead(target: String, paneID: String, cursor: String?, lines: Int) async throws -> TerminalReadEnvelope
     func terminalResize(target: String, paneID: String, cols: Int, rows: Int) async throws -> TerminalResizeResponse
@@ -243,6 +244,15 @@ actor DaemonUnixTerminalTransport: TerminalDaemonTransport {
 
     init(socketPath: String) {
         self.socketPath = socketPath
+    }
+
+    func dashboardSnapshot(target: String?) async throws -> DashboardSnapshotEnvelope {
+        var items: [URLQueryItem] = []
+        if let target, !target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            items.append(URLQueryItem(name: "target", value: target.trimmingCharacters(in: .whitespacesAndNewlines)))
+        }
+        let body = try await request(method: "GET", path: "/v1/snapshot", queryItems: items, requestBody: Optional<Data>.none)
+        return try decode(body, as: DashboardSnapshotEnvelope.self, context: "snapshot")
     }
 
     func listCapabilities() async throws -> CapabilitiesEnvelope {
@@ -561,15 +571,29 @@ struct AGTMUXCLIClient {
     }
 
     func fetchSnapshot() async throws -> DashboardSnapshot {
-        async let targets = fetchTargets()
-        async let sessions = fetchSessions()
-        async let windows = fetchWindows()
-        async let panes = fetchPanes()
-        return try await DashboardSnapshot(
-            targets: targets,
-            sessions: sessions,
-            windows: windows,
-            panes: panes
+        try await withDaemonFallback(
+            daemonCommand: "/v1/snapshot",
+            daemonOperation: { transport in
+                let snapshot = try await transport.dashboardSnapshot(target: nil)
+                return DashboardSnapshot(
+                    targets: snapshot.targets,
+                    sessions: snapshot.sessions,
+                    windows: snapshot.windows,
+                    panes: snapshot.panes
+                )
+            },
+            fallback: {
+                async let targets = fetchTargets()
+                async let sessions = fetchSessions()
+                async let windows = fetchWindows()
+                async let panes = fetchPanes()
+                return try await DashboardSnapshot(
+                    targets: targets,
+                    sessions: sessions,
+                    windows: windows,
+                    panes: panes
+                )
+            }
         )
     }
 

@@ -699,6 +699,77 @@ func TestListEndpointsFilterSummaryAndAggregation(t *testing.T) {
 	}
 }
 
+func TestSnapshotEndpointAggregatesViews(t *testing.T) {
+	runner := &stubRunner{}
+	srv, store := newAPITestServer(t, runner)
+	now := time.Now().UTC()
+	seedTarget(t, store, "t1", "t1")
+	seedTarget(t, store, "t2", "t2")
+
+	pid1 := int64(201)
+	seedPaneRuntimeState(t, store,
+		model.Pane{TargetID: "t1", PaneID: "%1", SessionName: "s-main", WindowID: "@1", WindowName: "w1", UpdatedAt: now},
+		model.Runtime{RuntimeID: "rt-snap-1", TargetID: "t1", PaneID: "%1", TmuxServerBootID: "boot", PaneEpoch: 1, AgentType: "codex", PID: &pid1, StartedAt: now},
+		model.StateRow{TargetID: "t1", PaneID: "%1", RuntimeID: "rt-snap-1", State: model.StateRunning, ReasonCode: "test", Confidence: "high", StateVersion: 1, LastSeenAt: now, UpdatedAt: now},
+	)
+	pid2 := int64(202)
+	seedPaneRuntimeState(t, store,
+		model.Pane{TargetID: "t2", PaneID: "%2", SessionName: "s-other", WindowID: "@9", WindowName: "w9", UpdatedAt: now},
+		model.Runtime{RuntimeID: "rt-snap-2", TargetID: "t2", PaneID: "%2", TmuxServerBootID: "boot", PaneEpoch: 1, AgentType: "claude", PID: &pid2, StartedAt: now},
+		model.StateRow{TargetID: "t2", PaneID: "%2", RuntimeID: "rt-snap-2", State: model.StateIdle, ReasonCode: "test", Confidence: "high", StateVersion: 1, LastSeenAt: now, UpdatedAt: now},
+	)
+
+	rec := doJSONRequest(t, srv.httpSrv.Handler, http.MethodGet, "/v1/snapshot?target=t1", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	resp := decodeJSON[api.DashboardSnapshotEnvelope](t, rec)
+	if resp.SchemaVersion != "v1" {
+		t.Fatalf("expected schema_version=v1, got %+v", resp)
+	}
+	if len(resp.Targets) != 1 || resp.Targets[0].TargetName != "t1" {
+		t.Fatalf("expected one filtered target, got %+v", resp.Targets)
+	}
+	if len(resp.Panes) != 1 || resp.Panes[0].Identity.Target != "t1" {
+		t.Fatalf("expected one filtered pane, got %+v", resp.Panes)
+	}
+	if len(resp.Windows) != 1 || resp.Windows[0].Identity.Target != "t1" {
+		t.Fatalf("expected one filtered window, got %+v", resp.Windows)
+	}
+	if len(resp.Sessions) != 1 || resp.Sessions[0].Identity.Target != "t1" {
+		t.Fatalf("expected one filtered session, got %+v", resp.Sessions)
+	}
+	if len(resp.RequestedTargets) != 1 || resp.RequestedTargets[0] != "t1" {
+		t.Fatalf("unexpected requested targets: %+v", resp.RequestedTargets)
+	}
+	if len(resp.RespondedTargets) != 1 || resp.RespondedTargets[0] != "t1" {
+		t.Fatalf("unexpected responded targets: %+v", resp.RespondedTargets)
+	}
+	if resp.Summary.ByTarget["t1"] != 1 {
+		t.Fatalf("unexpected summary by_target: %+v", resp.Summary.ByTarget)
+	}
+	if _, ok := resp.Summary.ByTarget["t2"]; ok {
+		t.Fatalf("unexpected t2 summary for filtered snapshot: %+v", resp.Summary.ByTarget)
+	}
+}
+
+func TestSnapshotEndpointMethodNotAllowed(t *testing.T) {
+	runner := &stubRunner{}
+	srv, _ := newAPITestServer(t, runner)
+
+	rec := doJSONRequest(t, srv.httpSrv.Handler, http.MethodPost, "/v1/snapshot", nil)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if allow := rec.Header().Get("Allow"); allow != "GET" {
+		t.Fatalf("expected Allow=GET, got %q", allow)
+	}
+	resp := decodeJSON[api.ErrorResponse](t, rec)
+	if resp.Error.Code != model.ErrRefInvalid {
+		t.Fatalf("unexpected error response: %+v", resp)
+	}
+}
+
 func TestWindowsAggregationCountsAndTopState(t *testing.T) {
 	runner := &stubRunner{}
 	srv, store := newAPITestServer(t, runner)

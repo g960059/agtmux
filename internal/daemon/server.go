@@ -154,6 +154,7 @@ func NewServerWithDeps(cfg config.Config, store *db.Store, executor *target.Exec
 		mux.HandleFunc("/v1/panes", s.panesHandler)
 		mux.HandleFunc("/v1/windows", s.windowsHandler)
 		mux.HandleFunc("/v1/sessions", s.sessionsHandler)
+		mux.HandleFunc("/v1/snapshot", s.snapshotHandler)
 		mux.HandleFunc("/v1/watch", s.watchHandler)
 		mux.HandleFunc("/v1/terminal/attach", s.terminalAttachHandler)
 		mux.HandleFunc("/v1/terminal/detach", s.terminalDetachHandler)
@@ -631,6 +632,42 @@ func (s *Server) sessionsHandler(w http.ResponseWriter, r *http.Request) {
 		RequestedTargets: names,
 		RespondedTargets: names,
 		Items:            items,
+	}
+	s.writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) snapshotHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.methodNotAllowed(w, http.MethodGet)
+		return
+	}
+	targets, filters, err := s.resolveTargetFilter(r.Context(), r.URL.Query().Get("target"))
+	if err != nil {
+		s.writeResolveTargetError(w, err)
+		return
+	}
+	panes, summary, err := s.buildPaneItems(r.Context(), targets)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, model.ErrPreconditionFailed, err.Error())
+		return
+	}
+	targetItems := make([]api.TargetResponse, 0, len(targets))
+	for _, t := range targets {
+		targetItems = append(targetItems, toTargetResponse(t))
+	}
+	names := targetNames(targets)
+	resp := api.DashboardSnapshotEnvelope{
+		SchemaVersion:    "v1",
+		GeneratedAt:      time.Now().UTC(),
+		Filters:          filters,
+		Summary:          summary,
+		Partial:          false,
+		RequestedTargets: names,
+		RespondedTargets: names,
+		Targets:          targetItems,
+		Sessions:         buildSessionItems(panes),
+		Windows:          buildWindowItems(panes),
+		Panes:            panes,
 	}
 	s.writeJSON(w, http.StatusOK, resp)
 }

@@ -132,6 +132,21 @@ type ListEnvelope[T any] struct {
 	Items            []T            `json:"items"`
 }
 
+type DashboardSnapshotEnvelope struct {
+	SchemaVersion    string           `json:"schema_version"`
+	GeneratedAt      time.Time        `json:"generated_at"`
+	Filters          map[string]any   `json:"filters"`
+	Summary          ListSummary      `json:"summary"`
+	Partial          bool             `json:"partial"`
+	RequestedTargets []string         `json:"requested_targets"`
+	RespondedTargets []string         `json:"responded_targets"`
+	TargetErrors     []TargetError    `json:"target_errors,omitempty"`
+	Targets          []TargetResponse `json:"targets"`
+	Sessions         []SessionItem    `json:"sessions"`
+	Windows          []WindowItem     `json:"windows"`
+	Panes            []PaneItem       `json:"panes"`
+}
+
 type WatchLine struct {
 	SchemaVersion string         `json:"schema_version"`
 	GeneratedAt   time.Time      `json:"generated_at"`

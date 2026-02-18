@@ -381,3 +381,10 @@ struct DashboardSnapshot {
     let windows: [WindowItem]
     let panes: [PaneItem]
 }
+
+struct DashboardSnapshotEnvelope: Decodable {
+    let targets: [TargetItem]
+    let sessions: [SessionItem]
+    let windows: [WindowItem]
+    let panes: [PaneItem]
+}

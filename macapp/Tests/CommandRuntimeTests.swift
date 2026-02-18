@@ -80,6 +80,86 @@ final class CommandRuntimeTests: XCTestCase {
         XCTAssertEqual(targets.first?.targetName, "vm-2")
     }
 
+    func testFetchSnapshotUsesDaemonTransportWhenAvailable() async throws {
+        var transport = StubTerminalTransport()
+        transport.dashboardSnapshotHandler = { _ in
+            DashboardSnapshotEnvelope(
+                targets: [
+                    TargetItem(
+                        targetID: "local",
+                        targetName: "local",
+                        kind: "local",
+                        connectionRef: "",
+                        isDefault: true,
+                        health: "ok"
+                    )
+                ],
+                sessions: [],
+                windows: [],
+                panes: []
+            )
+        }
+        let client = AGTMUXCLIClient(
+            socketPath: "/tmp/agtmux-test.sock",
+            appBinaryPath: "/usr/bin/true",
+            daemonTransport: transport,
+            commandRunner: { _, _ in
+                XCTFail("snapshot should not fallback to CLI when daemon transport is healthy")
+                return "{}"
+            }
+        )
+
+        let snapshot = try await client.fetchSnapshot()
+        XCTAssertEqual(snapshot.targets.count, 1)
+        XCTAssertEqual(snapshot.targets.first?.targetName, "local")
+        XCTAssertTrue(snapshot.sessions.isEmpty)
+        XCTAssertTrue(snapshot.windows.isEmpty)
+        XCTAssertTrue(snapshot.panes.isEmpty)
+    }
+
+    func testFetchSnapshotFallsBackToCLIWhenDaemonTransportUnavailable() async throws {
+        var transport = StubTerminalTransport()
+        transport.dashboardSnapshotHandler = { _ in
+            throw DaemonUnixClientError.unavailable("snapshot unavailable")
+        }
+        let client = AGTMUXCLIClient(
+            socketPath: "/tmp/agtmux-test.sock",
+            appBinaryPath: "/usr/bin/true",
+            daemonTransport: transport,
+            commandRunner: { _, args in
+                if args.contains("targets") {
+                    return """
+                    {"targets":[{"target_id":"local","target_name":"local","kind":"local","connection_ref":"","is_default":true,"health":"ok"}]}
+                    """
+                }
+                if args.contains("sessions") {
+                    return """
+                    {"items":[{"identity":{"target":"local","session_name":"s1"},"total_panes":1,"by_state":{"idle":1},"by_agent":{"none":1}}]}
+                    """
+                }
+                if args.contains("windows") {
+                    return """
+                    {"items":[{"identity":{"target":"local","session_name":"s1","window_id":"@1"},"top_state":"idle","waiting_count":0,"running_count":0,"total_panes":1}]}
+                    """
+                }
+                if args.contains("panes") {
+                    return """
+                    {"items":[{"identity":{"target":"local","session_name":"s1","window_id":"@1","pane_id":"%1"},"state":"idle","updated_at":"2026-02-18T00:00:00Z"}]}
+                    """
+                }
+                XCTFail("unexpected args: \(args)")
+                return "{}"
+            }
+        )
+
+        let snapshot = try await client.fetchSnapshot()
+        XCTAssertEqual(snapshot.targets.count, 1)
+        XCTAssertEqual(snapshot.sessions.count, 1)
+        XCTAssertEqual(snapshot.windows.count, 1)
+        XCTAssertEqual(snapshot.panes.count, 1)
+        XCTAssertEqual(snapshot.panes.first?.identity.paneID, "%1")
+    }
+
     func testAddTargetRejectsSSHWithoutConnectionRef() async throws {
         let client = AGTMUXCLIClient(
             socketPath: "/tmp/agtmux-test.sock",
@@ -301,6 +381,7 @@ private struct StubTerminalTransport: TerminalDaemonTransport {
         case missingHandler(String)
     }
 
+    var dashboardSnapshotHandler: ((String?) async throws -> DashboardSnapshotEnvelope)?
     var listCapabilitiesHandler: (() async throws -> CapabilitiesEnvelope)?
     var terminalReadHandler: ((String, String, String?, Int) async throws -> TerminalReadEnvelope)?
     var terminalResizeHandler: ((String, String, Int, Int) async throws -> TerminalResizeResponse)?
@@ -308,6 +389,13 @@ private struct StubTerminalTransport: TerminalDaemonTransport {
     var terminalDetachHandler: ((String) async throws -> TerminalDetachResponse)?
     var terminalWriteHandler: ((String, String?, String?, [UInt8]?, Bool, Bool) async throws -> TerminalWriteResponse)?
     var terminalStreamHandler: ((String, String?, Int) async throws -> TerminalStreamEnvelope)?
+
+    func dashboardSnapshot(target: String?) async throws -> DashboardSnapshotEnvelope {
+        guard let dashboardSnapshotHandler else {
+            throw StubError.missingHandler("dashboardSnapshot")
+        }
+        return try await dashboardSnapshotHandler(target)
+    }
 
     func listCapabilities() async throws -> CapabilitiesEnvelope {
         guard let listCapabilitiesHandler else {
