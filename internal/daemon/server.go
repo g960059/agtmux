@@ -45,7 +45,7 @@ const maxTerminalReadLines = 2000
 const maxTerminalStateBytes = 256 * 1024
 const defaultTerminalStateTTL = 5 * time.Minute
 const defaultTerminalProxySessionTTL = 5 * time.Minute
-const minTerminalStreamCaptureInterval = 70 * time.Millisecond
+const minTerminalStreamCaptureInterval = 120 * time.Millisecond
 const resizePolicySingleClientApply = "single_client_apply"
 const resizePolicyMultiClientSkip = "multi_client_skip"
 const resizePolicyInspectionFallbackSkip = "inspection_fallback_skip"
@@ -1765,6 +1765,8 @@ func (s *Server) terminalWriteHandler(w http.ResponseWriter, r *http.Request) {
 		s.terminalMu.Lock()
 		if current, exists := s.terminalProxy[req.SessionID]; exists {
 			current.UpdatedAt = time.Now().UTC()
+			// Force next stream read to capture a fresh pane snapshot after input.
+			current.LastCapture = time.Time{}
 			s.terminalProxy[req.SessionID] = current
 		}
 		s.terminalMu.Unlock()
@@ -1874,9 +1876,15 @@ func (s *Server) terminalStreamHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	shouldServeCached := frameType == "reset" && rawCursor != "" && !session.LastCapture.IsZero() && now.Sub(session.LastCapture) < minTerminalStreamCaptureInterval
+	shouldServeCached := rawCursor != "" && !session.LastCapture.IsZero() && now.Sub(session.LastCapture) < minTerminalStreamCaptureInterval
 	if shouldServeCached {
-		content = session.LastContent
+		switch frameType {
+		case "reset":
+			content = session.LastContent
+		default:
+			frameType = "delta"
+			content = ""
+		}
 		seq := s.sequence.Add(1)
 		cursor := fmt.Sprintf("%s:%d", s.streamID, seq)
 		session.LastSeq = seq
