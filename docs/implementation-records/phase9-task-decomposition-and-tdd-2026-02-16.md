@@ -336,3 +336,38 @@ Phase 9 実装開始条件:
   - `cd macapp && swift test --filter AppViewModelSettingsTests/testOpenSelectedPaneInExternalTerminalBuildsSSHCommand` PASS
   - `go test ./... -count=1` PASS
   - `cd macapp && swift test` PASS
+
+### 7.8 TASK-953 Step（Snapshot Poll 負荷削減: daemon aggregated snapshot）
+
+- 目的:
+  - `AppViewModel.refresh()` が 1 回につき `agtmux-app view targets/sessions/windows/panes` を4プロセス起動していた経路を削減し、CPU/遅延を下げる
+  - 同一時点の `targets/sessions/windows/panes` を 1 API 応答で取得し、UI 反映の整合性を上げる
+- RED:
+  - `internal/daemon/server_test.go`
+    - `TestSnapshotEndpointAggregatesViews`
+    - `TestSnapshotEndpointMethodNotAllowed`
+  - `macapp/Tests/CommandRuntimeTests.swift`
+    - `testFetchSnapshotUsesDaemonTransportWhenAvailable`
+    - `testFetchSnapshotFallsBackToCLIWhenDaemonTransportUnavailable`
+  - 追加直後は `/v1/snapshot` と transport API が未実装で失敗することを確認
+- GREEN:
+  - `internal/api/v1.go`
+    - `DashboardSnapshotEnvelope` を追加
+  - `internal/daemon/server.go`
+    - `GET /v1/snapshot` を追加
+    - target filter を踏襲し、`targets/sessions/windows/panes` を1レスポンスへ集約
+  - `macapp/Sources/Models.swift`
+    - `DashboardSnapshotEnvelope` を追加
+  - `macapp/Sources/CommandRuntime.swift`
+    - `TerminalDaemonTransport` に `dashboardSnapshot(target:)` を追加
+    - `DaemonUnixTerminalTransport` に `/v1/snapshot` 実装
+    - `AGTMUXCLIClient.fetchSnapshot()` を daemon snapshot 優先へ切替
+    - daemon unavailable 時のみ既存CLI fallback（4 view command）を使用
+- REFACTOR:
+  - snapshot 取得を `withDaemonFallback` 経路へ統一し、他 terminal API と同一の失敗ポリシーへ整理
+- 検証:
+  - `go test ./internal/daemon -run 'TestSnapshotEndpoint|TestListEndpointsFilterSummaryAndAggregation' -count=1` PASS
+  - `go test ./... -count=1` PASS
+  - `cd macapp && swift test --filter CommandRuntimeTests` PASS
+  - `cd macapp && swift test` PASS
+  - `cd macapp && ./scripts/install-app.sh` 実施後、アプリ再起動確認済み
