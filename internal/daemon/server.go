@@ -1363,7 +1363,7 @@ func (s *Server) viewOutputActionHandler(w http.ResponseWriter, r *http.Request)
 	resultCode := "completed"
 	var errorCode *string
 	output := ""
-	runResult, runErr := s.executor.Run(r.Context(), tg, target.BuildTmuxCommand("capture-pane", "-t", req.PaneID, "-p", "-S", fmt.Sprintf("-%d", req.Lines)))
+	runResult, runErr := s.executor.Run(r.Context(), tg, target.BuildTmuxCommand("capture-pane", "-t", req.PaneID, "-p", "-e", "-S", fmt.Sprintf("-%d", req.Lines)))
 	if runErr != nil {
 		resultCode = "failed"
 		v := model.ErrTargetUnreachable
@@ -4684,7 +4684,7 @@ func (s *Server) capturePaneSnapshotWithCursor(
 		ctx,
 		tg,
 		target.BuildTmuxCommand(
-			"capture-pane", "-t", paneID, "-p", "-S", fmt.Sprintf("-%d", lines),
+			"capture-pane", "-t", paneID, "-p", "-e", "-S", fmt.Sprintf("-%d", lines),
 			";",
 			"display-message", "-p", "-t", paneID,
 			terminalCursorMarkerPrefix+"#{cursor_x},#{cursor_y},#{pane_width},#{pane_height}",

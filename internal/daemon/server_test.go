@@ -2119,7 +2119,7 @@ func TestViewOutputAction(t *testing.T) {
 	if lastCall.name != "tmux" {
 		t.Fatalf("expected tmux command, got %+v", lastCall)
 	}
-	if strings.Join(lastCall.args, " ") != "capture-pane -t %1 -p -S -20" {
+	if strings.Join(lastCall.args, " ") != "capture-pane -t %1 -p -e -S -20" {
 		t.Fatalf("unexpected capture args: %+v", lastCall.args)
 	}
 }
@@ -3956,7 +3956,7 @@ func TestTerminalReadAndResizeHandlers(t *testing.T) {
 		t.Fatalf("expected tmux command, got %+v", lastReadCall)
 	}
 	joinedReadArgs := strings.Join(lastReadCall.args, " ")
-	if !strings.Contains(joinedReadArgs, "capture-pane -t %1 -p -S -120") ||
+	if !strings.Contains(joinedReadArgs, "capture-pane -t %1 -p -e -S -120") ||
 		!strings.Contains(joinedReadArgs, "display-message -p -t %1 __AGTMUX_CURSOR_POSITION__") {
 		t.Fatalf("unexpected read args: %+v", lastReadCall.args)
 	}

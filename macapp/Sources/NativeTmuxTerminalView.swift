@@ -644,11 +644,84 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
             guard cols > 0 else {
                 return ""
             }
-            if raw.count <= cols {
-                return raw
+            guard !raw.isEmpty else {
+                return ""
             }
-            let end = raw.index(raw.startIndex, offsetBy: cols)
-            return String(raw[..<end])
+            var out = ""
+            out.reserveCapacity(min(raw.count, cols + 16))
+            var visibleColumns = 0
+            var idx = raw.startIndex
+            while idx < raw.endIndex {
+                let scalar = raw[idx].unicodeScalars.first?.value
+                if scalar == 0x1B {
+                    let end = consumeEscapeSequence(in: raw, from: idx)
+                    out.append(contentsOf: raw[idx..<end])
+                    idx = end
+                    continue
+                }
+                if visibleColumns >= cols {
+                    break
+                }
+                out.append(raw[idx])
+                visibleColumns += 1
+                idx = raw.index(after: idx)
+            }
+            return out
+        }
+
+        private func consumeEscapeSequence(in raw: String, from start: String.Index) -> String.Index {
+            var idx = raw.index(after: start)
+            guard idx < raw.endIndex else {
+                return idx
+            }
+            let lead = raw[idx].unicodeScalars.first?.value ?? 0
+            // CSI: ESC [ ... final-byte(@..~)
+            if lead == 0x5B {
+                idx = raw.index(after: idx)
+                while idx < raw.endIndex {
+                    let value = raw[idx].unicodeScalars.first?.value ?? 0
+                    idx = raw.index(after: idx)
+                    if value >= 0x40 && value <= 0x7E {
+                        break
+                    }
+                }
+                return idx
+            }
+            // OSC: ESC ] ... BEL or ST(ESC \)
+            if lead == 0x5D {
+                idx = raw.index(after: idx)
+                while idx < raw.endIndex {
+                    let value = raw[idx].unicodeScalars.first?.value ?? 0
+                    if value == 0x07 {
+                        return raw.index(after: idx)
+                    }
+                    if value == 0x1B {
+                        let next = raw.index(after: idx)
+                        if next < raw.endIndex, (raw[next].unicodeScalars.first?.value ?? 0) == 0x5C {
+                            return raw.index(after: next)
+                        }
+                    }
+                    idx = raw.index(after: idx)
+                }
+                return raw.endIndex
+            }
+            // DCS/SOS/PM/APC: ESC P/X/^/_ ... ST(ESC \)
+            if lead == 0x50 || lead == 0x58 || lead == 0x5E || lead == 0x5F {
+                idx = raw.index(after: idx)
+                while idx < raw.endIndex {
+                    let value = raw[idx].unicodeScalars.first?.value ?? 0
+                    if value == 0x1B {
+                        let next = raw.index(after: idx)
+                        if next < raw.endIndex, (raw[next].unicodeScalars.first?.value ?? 0) == 0x5C {
+                            return raw.index(after: next)
+                        }
+                    }
+                    idx = raw.index(after: idx)
+                }
+                return raw.endIndex
+            }
+            // Generic two-byte escape sequence.
+            return raw.index(after: idx)
         }
 
         private func updateFocusIfNeeded(terminal: TerminalView) {
