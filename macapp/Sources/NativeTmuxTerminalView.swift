@@ -429,6 +429,7 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
         private weak var terminalView: TerminalView?
         private var currentPaneID = ""
         private var lastRenderedContent = ""
+        private var lastRenderedLines: [String] = [""]
         private var lastCursorX: Int?
         private var lastCursorY: Int?
         private var lastPaneCols: Int?
@@ -442,6 +443,7 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
         private var interactiveInputEnabled = true
         private var didConfigureAppearance = false
         private var appearanceModeIsDark = true
+        private let maxCachedLines = 2400
 
         init(
             onInputBytes: @escaping ([UInt8]) -> Void,
@@ -455,6 +457,7 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
             terminalView = nil
             currentPaneID = ""
             lastRenderedContent = ""
+            lastRenderedLines = [""]
             lastCursorX = nil
             lastCursorY = nil
             lastPaneCols = nil
@@ -489,6 +492,7 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
             if paneID != currentPaneID {
                 currentPaneID = paneID
                 lastRenderedContent = ""
+                lastRenderedLines = [""]
                 lastCursorX = nil
                 lastCursorY = nil
                 lastPaneCols = nil
@@ -527,14 +531,33 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
                 return
             }
 
-            let repaint = buildAbsoluteRepaintFrame(
-                terminal: terminal,
-                content: content,
-                cursorX: cursorX,
-                cursorY: cursorY,
-                paneCols: paneCols,
-                paneRows: paneRows
-            )
+            if contentChanged {
+                lastRenderedLines = updatedCachedLines(
+                    previousContent: lastRenderedContent,
+                    nextContent: content,
+                    previousLines: lastRenderedLines
+                )
+            }
+
+            let repaint: RepaintFrame
+            if !force, !contentChanged, !paneSizeChanged, cursorChanged {
+                repaint = buildCursorOnlyFrame(
+                    terminal: terminal,
+                    cursorX: cursorX,
+                    cursorY: cursorY,
+                    paneCols: paneCols,
+                    paneRows: paneRows
+                )
+            } else {
+                repaint = buildAbsoluteRepaintFrame(
+                    terminal: terminal,
+                    lines: lastRenderedLines,
+                    cursorX: cursorX,
+                    cursorY: cursorY,
+                    paneCols: paneCols,
+                    paneRows: paneRows
+                )
+            }
             terminal.feed(text: repaint.frame)
             if let imeTerminal = terminal as? IMEAwareTerminalView {
                 imeTerminal.updateCompositionMetrics(
@@ -558,6 +581,50 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
             return normalized
         }
 
+        private func updatedCachedLines(
+            previousContent: String,
+            nextContent: String,
+            previousLines: [String]
+        ) -> [String] {
+            if previousContent.isEmpty || previousLines.isEmpty {
+                return splitLines(nextContent)
+            }
+            guard nextContent.count >= previousContent.count,
+                  nextContent.hasPrefix(previousContent) else {
+                return splitLines(nextContent)
+            }
+            let suffix = nextContent.dropFirst(previousContent.count)
+            if suffix.isEmpty {
+                return previousLines
+            }
+            var lines = previousLines
+            if lines.isEmpty {
+                lines = [""]
+            }
+            for ch in suffix {
+                if ch == "\n" {
+                    lines.append("")
+                } else {
+                    lines[lines.count - 1].append(ch)
+                }
+            }
+            if lines.count > maxCachedLines {
+                lines = Array(lines.suffix(maxCachedLines))
+            }
+            return lines
+        }
+
+        private func splitLines(_ content: String) -> [String] {
+            let lines = content.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+            if lines.isEmpty {
+                return [""]
+            }
+            if lines.count > maxCachedLines {
+                return Array(lines.suffix(maxCachedLines))
+            }
+            return lines
+        }
+
         private struct RepaintFrame {
             let frame: String
             let cursorX: Int?
@@ -568,7 +635,7 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
 
         private func buildAbsoluteRepaintFrame(
             terminal: TerminalView,
-            content: String,
+            lines sourceLines: [String],
             cursorX: Int?,
             cursorY: Int?,
             paneCols: Int?,
@@ -578,10 +645,7 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
             let terminalCols = max(1, terminal.getTerminal().cols)
             let sourceRows = max(1, paneRows ?? terminalRows)
             let sourceCols = max(1, paneCols ?? terminalCols)
-            var lines = content.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-            if lines.isEmpty {
-                lines = [""]
-            }
+            var lines = sourceLines.isEmpty ? [""] : sourceLines
             let maxBufferedLines = max(sourceRows, min(max(sourceRows * 12, 500), 3000))
             if lines.count > maxBufferedLines {
                 lines = Array(lines.suffix(maxBufferedLines))
@@ -623,7 +687,8 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
             mappedCursorY = min(max(mappedCursorY, 0), terminalRows - 1)
 
             var out = ""
-            out.reserveCapacity(max(content.count + 256, lines.count * min(terminalCols, 160)))
+            let estimatedContentChars = lines.reduce(into: 0) { $0 += min($1.count, terminalCols) + 1 }
+            out.reserveCapacity(max(estimatedContentChars + 256, lines.count * min(terminalCols, 160)))
 
             // Paint from a complete snapshot while preserving internal scrollback.
             out += "\u{001B}[?25l" // hide cursor
@@ -651,6 +716,74 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
                 paneCols: terminalCols,
                 paneRows: terminalRows
             )
+        }
+
+        private func buildCursorOnlyFrame(
+            terminal: TerminalView,
+            cursorX: Int?,
+            cursorY: Int?,
+            paneCols: Int?,
+            paneRows: Int?
+        ) -> RepaintFrame {
+            let terminalRows = max(1, terminal.getTerminal().rows)
+            let terminalCols = max(1, terminal.getTerminal().cols)
+            let sourceRows = max(1, paneRows ?? terminalRows)
+            let sourceCols = max(1, paneCols ?? terminalCols)
+            let lines = lastRenderedLines.isEmpty ? [""] : lastRenderedLines
+            var sourceWindowLines = Array(lines.suffix(sourceRows))
+            if sourceWindowLines.count < sourceRows {
+                sourceWindowLines.insert(
+                    contentsOf: Array(repeating: "", count: sourceRows - sourceWindowLines.count),
+                    at: 0
+                )
+            }
+
+            let inferredCursorY = inferCursorRow(lines: sourceWindowLines)
+            let sourceCursorY = min(max(cursorY ?? inferredCursorY, 0), sourceRows - 1)
+            let sourceCursorLineIndex = min(max(sourceCursorY, 0), max(sourceWindowLines.count - 1, 0))
+            let inferredCursorX = inferCursorColumn(
+                line: sourceWindowLines[sourceCursorLineIndex],
+                maxCols: sourceCols
+            )
+            let sourceCursorX = min(max(cursorX ?? inferredCursorX, 0), sourceCols - 1)
+
+            let mapped = mapCursorPosition(
+                sourceCursorX: sourceCursorX,
+                sourceCursorY: sourceCursorY,
+                sourceCols: sourceCols,
+                sourceRows: sourceRows,
+                terminalCols: terminalCols,
+                terminalRows: terminalRows
+            )
+            let frame = "\u{001B}[?25l\u{001B}[\(mapped.y + 1);\(mapped.x + 1)H\u{001B}[?25h"
+            return RepaintFrame(
+                frame: frame,
+                cursorX: mapped.x,
+                cursorY: mapped.y,
+                paneCols: terminalCols,
+                paneRows: terminalRows
+            )
+        }
+
+        private func mapCursorPosition(
+            sourceCursorX: Int,
+            sourceCursorY: Int,
+            sourceCols: Int,
+            sourceRows: Int,
+            terminalCols: Int,
+            terminalRows: Int
+        ) -> (x: Int, y: Int) {
+            var mappedCursorY: Int
+            if sourceRows > terminalRows {
+                let start = sourceRows - terminalRows
+                mappedCursorY = sourceCursorY - start
+            } else {
+                let topPadding = terminalRows - sourceRows
+                mappedCursorY = sourceCursorY + topPadding
+            }
+            mappedCursorY = min(max(mappedCursorY, 0), terminalRows - 1)
+            let mappedCursorX = min(max(sourceCursorX, 0), min(sourceCols - 1, terminalCols - 1))
+            return (mappedCursorX, mappedCursorY)
         }
 
         private func inferCursorRow(lines: [String]) -> Int {
