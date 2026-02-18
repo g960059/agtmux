@@ -576,29 +576,41 @@ struct AGTMUXCLIClient {
     }
 
     func fetchSnapshot() async throws -> DashboardSnapshot {
-        try await withDaemonFallback(
-            daemonCommand: "/v1/snapshot",
-            daemonOperation: { transport in
-                let snapshot = try await transport.dashboardSnapshot(target: nil)
+        if let daemonTransport {
+            do {
+                let snapshot = try await daemonTransport.dashboardSnapshot(target: nil)
                 return DashboardSnapshot(
                     targets: snapshot.targets,
                     sessions: snapshot.sessions,
                     windows: snapshot.windows,
                     panes: snapshot.panes
                 )
-            },
-            fallback: {
-                async let targets = fetchTargets()
-                async let sessions = fetchSessions()
-                async let windows = fetchWindows()
-                async let panes = fetchPanes()
-                return try await DashboardSnapshot(
-                    targets: targets,
-                    sessions: sessions,
-                    windows: windows,
-                    panes: panes
-                )
+            } catch let daemonError as DaemonUnixClientError {
+                if case .status(let path, let statusCode, _, _) = daemonError,
+                   path == "/v1/snapshot",
+                   statusCode == httpNotFoundStatusCode {
+                    return try await fetchSnapshotViaCLI()
+                }
+                throw daemonError.asRuntimeError(command: "/v1/snapshot")
             }
+        }
+        return try await fetchSnapshotViaCLI()
+    }
+
+    private var httpNotFoundStatusCode: Int {
+        404
+    }
+
+    private func fetchSnapshotViaCLI() async throws -> DashboardSnapshot {
+        async let targets = fetchTargets()
+        async let sessions = fetchSessions()
+        async let windows = fetchWindows()
+        async let panes = fetchPanes()
+        return try await DashboardSnapshot(
+            targets: targets,
+            sessions: sessions,
+            windows: windows,
+            panes: panes
         )
     }
 

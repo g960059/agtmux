@@ -117,7 +117,7 @@ final class CommandRuntimeTests: XCTestCase {
         XCTAssertTrue(snapshot.panes.isEmpty)
     }
 
-    func testFetchSnapshotFallsBackToCLIWhenDaemonTransportUnavailable() async throws {
+    func testFetchSnapshotDoesNotFallbackToCLIWhenDaemonTransportUnavailable() async throws {
         var transport = StubTerminalTransport()
         transport.dashboardSnapshotHandler = { _ in
             throw DaemonUnixClientError.unavailable("snapshot unavailable")
@@ -127,37 +127,18 @@ final class CommandRuntimeTests: XCTestCase {
             appBinaryPath: "/usr/bin/true",
             daemonTransport: transport,
             commandRunner: { _, args in
-                if args.contains("targets") {
-                    return """
-                    {"targets":[{"target_id":"local","target_name":"local","kind":"local","connection_ref":"","is_default":true,"health":"ok"}]}
-                    """
-                }
-                if args.contains("sessions") {
-                    return """
-                    {"items":[{"identity":{"target":"local","session_name":"s1"},"total_panes":1,"by_state":{"idle":1},"by_agent":{"none":1}}]}
-                    """
-                }
-                if args.contains("windows") {
-                    return """
-                    {"items":[{"identity":{"target":"local","session_name":"s1","window_id":"@1"},"top_state":"idle","waiting_count":0,"running_count":0,"total_panes":1}]}
-                    """
-                }
-                if args.contains("panes") {
-                    return """
-                    {"items":[{"identity":{"target":"local","session_name":"s1","window_id":"@1","pane_id":"%1"},"state":"idle","updated_at":"2026-02-18T00:00:00Z"}]}
-                    """
-                }
-                XCTFail("unexpected args: \(args)")
-                return "{}"
+                XCTFail("snapshot must not fallback to CLI for unavailable daemon transport")
+                return ""
             }
         )
-
-        let snapshot = try await client.fetchSnapshot()
-        XCTAssertEqual(snapshot.targets.count, 1)
-        XCTAssertEqual(snapshot.sessions.count, 1)
-        XCTAssertEqual(snapshot.windows.count, 1)
-        XCTAssertEqual(snapshot.panes.count, 1)
-        XCTAssertEqual(snapshot.panes.first?.identity.paneID, "%1")
+        do {
+            _ = try await client.fetchSnapshot()
+            XCTFail("expected fetchSnapshot to fail when daemon transport is unavailable")
+        } catch RuntimeError.commandFailed(let command, _, _) {
+            XCTAssertTrue(command.contains("daemon /v1/snapshot"))
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
     }
 
     func testFetchSnapshotFallsBackToCLIWhenSnapshotEndpointIsNotFound() async throws {

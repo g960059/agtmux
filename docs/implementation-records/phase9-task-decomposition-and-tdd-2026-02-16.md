@@ -371,3 +371,26 @@ Phase 9 実装開始条件:
   - `cd macapp && swift test --filter CommandRuntimeTests` PASS
   - `cd macapp && swift test` PASS
   - `cd macapp && ./scripts/install-app.sh` 実施後、アプリ再起動確認済み
+
+### 7.9 TASK-953 Step（Snapshot fallback 方針の厳格化）
+
+- 目的:
+  - daemon 不調時に `fetchSnapshot()` が CLI 4プロセス fallback を連発する経路を止め、UI 遅延/CPUスパイクを抑える
+  - 後方互換（旧daemon）だけは維持するため、`/v1/snapshot` が 404 の場合のみ CLI fallback を許可する
+- RED:
+  - `macapp/Tests/CommandRuntimeTests.swift`
+    - `testFetchSnapshotDoesNotFallbackToCLIWhenDaemonTransportUnavailable`
+    - `testFetchSnapshotFallsBackToCLIWhenSnapshotEndpointIsNotFound`
+- GREEN:
+  - `macapp/Sources/CommandRuntime.swift`
+    - `fetchSnapshot()` を専用分岐へ変更
+      - daemon transport 成功: `/v1/snapshot` を採用
+      - daemon transport 404(`/v1/snapshot`): CLI fallback
+      - それ以外の daemon エラー: 即エラー返却（fallbackしない）
+    - CLI fallback 経路を `fetchSnapshotViaCLI()` に分離
+- REFACTOR:
+  - snapshot だけ fallback ポリシーを明示化し、他APIと混在した暗黙 fallback を回避
+- 検証:
+  - `cd macapp && swift test --filter CommandRuntimeTests` PASS
+  - `cd macapp && swift test` PASS
+  - `cd macapp && ./scripts/install-app.sh` 後、`/v1/snapshot` 応答と app/daemon 起動を確認済み
