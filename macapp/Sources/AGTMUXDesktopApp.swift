@@ -427,8 +427,8 @@ private struct CockpitView: View {
         .frame(maxHeight: .infinity, alignment: .top)
         .background {
             ZStack {
-                Rectangle().fill(.ultraThinMaterial).opacity(0.10)
-                Rectangle().fill(Color.black.opacity(colorScheme == .dark ? 0.14 : 0.06))
+                Rectangle().fill(.ultraThinMaterial).opacity(colorScheme == .dark ? 0.22 : 0.10)
+                Rectangle().fill(Color.black.opacity(colorScheme == .dark ? 0.54 : 0.18))
             }
         }
         .clipped()

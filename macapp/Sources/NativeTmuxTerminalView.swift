@@ -376,6 +376,52 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
         return NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
     }
 
+    private static func ansi8(_ red: UInt16, _ green: UInt16, _ blue: UInt16) -> SwiftTerm.Color {
+        SwiftTerm.Color(red: red * 257, green: green * 257, blue: blue * 257)
+    }
+
+    private static func preferredANSIPalette(darkMode: Bool) -> [SwiftTerm.Color] {
+        if darkMode {
+            // Lift color0 from pure black to reduce heavy black blocks in CLI prompt UIs.
+            return [
+                ansi8(12, 20, 31),   // black
+                ansi8(214, 92, 92),  // red
+                ansi8(111, 214, 154), // green
+                ansi8(224, 196, 120), // yellow
+                ansi8(120, 164, 255), // blue
+                ansi8(198, 142, 255), // magenta
+                ansi8(111, 203, 224), // cyan
+                ansi8(216, 223, 236), // white
+                ansi8(52, 70, 95),    // bright black
+                ansi8(255, 138, 138), // bright red
+                ansi8(152, 235, 188), // bright green
+                ansi8(245, 218, 148), // bright yellow
+                ansi8(152, 186, 255), // bright blue
+                ansi8(226, 172, 255), // bright magenta
+                ansi8(148, 225, 245), // bright cyan
+                ansi8(238, 243, 251), // bright white
+            ]
+        }
+        return [
+            ansi8(20, 25, 33),
+            ansi8(196, 58, 58),
+            ansi8(39, 143, 84),
+            ansi8(165, 120, 35),
+            ansi8(52, 109, 207),
+            ansi8(142, 78, 196),
+            ansi8(33, 131, 150),
+            ansi8(230, 234, 241),
+            ansi8(98, 108, 124),
+            ansi8(223, 85, 85),
+            ansi8(47, 167, 98),
+            ansi8(186, 137, 45),
+            ansi8(72, 127, 222),
+            ansi8(164, 101, 215),
+            ansi8(47, 151, 171),
+            ansi8(245, 247, 251),
+        ]
+    }
+
     final class Coordinator: NSObject, TerminalViewDelegate {
         private let onInputBytes: ([UInt8]) -> Void
         private let onResize: (_ cols: Int, _ rows: Int) -> Void
@@ -540,48 +586,39 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
             if lines.count > maxBufferedLines {
                 lines = Array(lines.suffix(maxBufferedLines))
             }
-
-            if lines.count < sourceRows {
-                let clampedCursorY = min(max(cursorY ?? (lines.count - 1), 0), sourceRows - 1)
-                let leadingPadding = max(0, min(sourceRows - lines.count, clampedCursorY + 1 - lines.count))
-                if leadingPadding > 0 {
-                    lines.insert(contentsOf: Array(repeating: "", count: leadingPadding), at: 0)
-                }
-                if lines.count < sourceRows {
-                    lines.append(contentsOf: Array(repeating: "", count: sourceRows - lines.count))
-                }
+            // Snapshot is pane-sized in tmux terms. Normalize to terminal-sized viewport.
+            var sourceWindowLines = Array(lines.suffix(sourceRows))
+            if sourceWindowLines.count < sourceRows {
+                sourceWindowLines.insert(
+                    contentsOf: Array(repeating: "", count: sourceRows - sourceWindowLines.count),
+                    at: 0
+                )
             }
 
-            let historyOffset = max(0, lines.count - sourceRows)
-            let visibleWindowLines = Array(lines.suffix(sourceRows))
-            let inferredSourceCursorY = inferCursorRow(lines: visibleWindowLines)
-            let effectiveSourceCursorY = min(
-                max(cursorY ?? inferredSourceCursorY, 0),
-                sourceRows - 1
-            )
-            let sourceCursorLineIndex = min(
-                max(0, historyOffset + effectiveSourceCursorY),
-                max(lines.count - 1, 0)
-            )
+            let inferredSourceCursorY = inferCursorRow(lines: sourceWindowLines)
+            let effectiveSourceCursorY = min(max(cursorY ?? inferredSourceCursorY, 0), sourceRows - 1)
+            let sourceCursorLineIndex = min(max(effectiveSourceCursorY, 0), max(sourceWindowLines.count - 1, 0))
             let inferredSourceCursorX = inferCursorColumn(
-                line: lines[sourceCursorLineIndex],
+                line: sourceWindowLines[sourceCursorLineIndex],
                 maxCols: sourceCols
             )
-            let effectiveSourceCursorX = min(
-                max(cursorX ?? inferredSourceCursorX, 0),
-                sourceCols - 1
-            )
+            let effectiveSourceCursorX = min(max(cursorX ?? inferredSourceCursorX, 0), sourceCols - 1)
 
-            var visibleRowsForOverlay = sourceRows
+            var renderLines: [String]
             var mappedCursorY: Int
-            if terminalRows >= sourceRows {
-                let topPadding = terminalRows - sourceRows
-                mappedCursorY = effectiveSourceCursorY + topPadding
-                visibleRowsForOverlay = terminalRows
-            } else {
+            if sourceRows > terminalRows {
                 let start = sourceRows - terminalRows
+                renderLines = Array(sourceWindowLines.suffix(terminalRows))
                 mappedCursorY = effectiveSourceCursorY - start
-                visibleRowsForOverlay = terminalRows
+            } else {
+                let topPadding = terminalRows - sourceRows
+                renderLines = Array(repeating: "", count: topPadding) + sourceWindowLines
+                mappedCursorY = effectiveSourceCursorY + topPadding
+            }
+            if renderLines.count < terminalRows {
+                renderLines += Array(repeating: "", count: terminalRows - renderLines.count)
+            } else if renderLines.count > terminalRows {
+                renderLines = Array(renderLines.suffix(terminalRows))
             }
             mappedCursorY = min(max(mappedCursorY, 0), terminalRows - 1)
 
@@ -593,19 +630,16 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
             out += "\u{001B}[?7l"  // disable line wrap
             out += "\u{001B}[H"
             out += "\u{001B}[2J"
-            for (idx, rawLine) in lines.enumerated() {
+            for (idx, rawLine) in renderLines.enumerated() {
                 out += clampLine(rawLine, toColumns: terminalCols)
-                if idx < lines.count - 1 {
+                // Extend current line attributes (including background color) to full width.
+                out += "\u{001B}[K"
+                if idx < renderLines.count - 1 {
                     out += "\r\n"
                 }
             }
-
-            let upFromBottom = max(0, sourceRows - 1 - effectiveSourceCursorY)
-            if upFromBottom > 0 {
-                out += "\u{001B}[\(upFromBottom)A"
-            }
             let clampedX = min(max(effectiveSourceCursorX, 0), min(sourceCols - 1, terminalCols - 1))
-            out += "\u{001B}[\(clampedX + 1)G"
+            out += "\u{001B}[\(mappedCursorY + 1);\(clampedX + 1)H"
 
             out += "\u{001B}[?7h"  // enable line wrap
             out += "\u{001B}[?25h" // show cursor
@@ -615,7 +649,7 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
                 cursorX: mappedCursorX,
                 cursorY: mappedCursorY,
                 paneCols: terminalCols,
-                paneRows: visibleRowsForOverlay
+                paneRows: terminalRows
             )
         }
 
@@ -637,7 +671,25 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
             guard maxCols > 0 else {
                 return 0
             }
-            return min(max(0, line.count), maxCols - 1)
+            return min(max(0, visibleColumnCount(line)), maxCols - 1)
+        }
+
+        private func visibleColumnCount(_ raw: String) -> Int {
+            guard !raw.isEmpty else {
+                return 0
+            }
+            var count = 0
+            var idx = raw.startIndex
+            while idx < raw.endIndex {
+                let scalar = raw[idx].unicodeScalars.first?.value
+                if scalar == 0x1B {
+                    idx = consumeEscapeSequence(in: raw, from: idx)
+                    continue
+                }
+                count += 1
+                idx = raw.index(after: idx)
+            }
+            return count
         }
 
         private func clampLine(_ raw: String, toColumns cols: Int) -> String {
@@ -743,6 +795,8 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
             }
             didConfigureAppearance = true
             appearanceModeIsDark = darkMode
+            terminal.installColors(NativeTmuxTerminalView.preferredANSIPalette(darkMode: darkMode))
+            terminal.useBrightColors = true
             if darkMode {
                 terminal.nativeBackgroundColor = .clear
                 terminal.nativeForegroundColor = NSColor(
