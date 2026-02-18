@@ -153,6 +153,28 @@ final class AppViewModelTerminalProxyTests: XCTestCase {
         }
     }
 
+    func testSelectedPaneStartsStreamWhenCapabilitiesCommandFails() async throws {
+        let fixture = try makeModelFixture(
+            streamMode: "attached_then_output",
+            streamContent: "caps-failed-but-streamed",
+            autoStreamOnSelection: true,
+            capabilitiesAvailable: false
+        )
+        let model = fixture.model
+        let pane = makePane(sessionName: "s1", paneID: "%1")
+        model.panes = [pane]
+
+        model.selectedPane = pane
+
+        await waitUntil("stream still starts when capabilities fail", timeout: 2.0) {
+            self.logContainsAttach(for: "%1", in: self.readLog(at: fixture.logURL))
+        }
+        await waitUntil("follow-up stream frame renders content", timeout: 2.0) {
+            model.outputPreview == "caps-failed-but-streamed"
+        }
+        XCTAssertNotEqual(model.infoMessage, "terminal stream waiting for daemon capabilities...")
+    }
+
     func testAutoAttachIncludesRuntimeAndStateGuards() async throws {
         let fixture = try makeModelFixture(
             streamMode: "output_only",
@@ -354,12 +376,14 @@ final class AppViewModelTerminalProxyTests: XCTestCase {
         attachDelaySeconds: String? = nil,
         streamMode: String,
         streamContent: String,
-        autoStreamOnSelection: Bool
+        autoStreamOnSelection: Bool,
+        capabilitiesAvailable: Bool = true
     ) throws -> ModelFixture {
         try makeModelFixture(
             attachDelaySeconds: attachDelaySeconds,
             streamMode: streamMode,
             streamContent: streamContent,
+            capabilitiesAvailable: capabilitiesAvailable,
             autoStreamConfig: .explicit(autoStreamOnSelection)
         )
     }
@@ -367,12 +391,14 @@ final class AppViewModelTerminalProxyTests: XCTestCase {
     private func makeModelFixtureWithDefaultAuto(
         attachDelaySeconds: String? = nil,
         streamMode: String,
-        streamContent: String
+        streamContent: String,
+        capabilitiesAvailable: Bool = true
     ) throws -> ModelFixture {
         try makeModelFixture(
             attachDelaySeconds: attachDelaySeconds,
             streamMode: streamMode,
             streamContent: streamContent,
+            capabilitiesAvailable: capabilitiesAvailable,
             autoStreamConfig: .useDefaultInitializer
         )
     }
@@ -381,6 +407,7 @@ final class AppViewModelTerminalProxyTests: XCTestCase {
         attachDelaySeconds: String? = nil,
         streamMode: String,
         streamContent: String,
+        capabilitiesAvailable: Bool = true,
         autoStreamConfig: AutoStreamSelectionConfig
     ) throws -> ModelFixture {
         let fm = FileManager.default
@@ -395,6 +422,7 @@ final class AppViewModelTerminalProxyTests: XCTestCase {
         try Data().write(to: stateURL)
 
         let attachDelay = attachDelaySeconds ?? "0"
+        let capabilitiesFlag = capabilitiesAvailable ? "1" : "0"
         let script = """
         #!/usr/bin/env bash
         set -euo pipefail
@@ -404,6 +432,7 @@ final class AppViewModelTerminalProxyTests: XCTestCase {
         ATTACH_DELAY='\(attachDelay)'
         STREAM_MODE='\(streamMode)'
         STREAM_CONTENT='\(streamContent)'
+        CAPABILITIES_AVAILABLE='\(capabilitiesFlag)'
         DEFAULT_SESSION_PREFIX='term'
         args=("$@")
         if [[ "${args[0]:-}" == "--socket" ]]; then
@@ -433,6 +462,10 @@ final class AppViewModelTerminalProxyTests: XCTestCase {
         fi
 
         if [[ "$cmd" == "terminal" && "$sub" == "capabilities" ]]; then
+          if [[ "$CAPABILITIES_AVAILABLE" != "1" ]]; then
+            echo "capabilities unavailable" >&2
+            exit 2
+          fi
           cat <<'JSON'
         {"capabilities":{"embedded_terminal":true,"terminal_read":true,"terminal_resize":true,"terminal_write_via_action_send":true,"terminal_attach":true,"terminal_write":true,"terminal_stream":true,"terminal_proxy_mode":"daemon-proxy-pty-poc","terminal_frame_protocol":"terminal-stream-v1"}}
         JSON

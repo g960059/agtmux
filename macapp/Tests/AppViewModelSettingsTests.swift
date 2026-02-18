@@ -728,6 +728,95 @@ final class AppViewModelSettingsTests: XCTestCase {
         XCTAssertEqual(model.infoMessage, "")
     }
 
+    func testPerformKillSessionBuildsLocalTmuxKillCommand() async throws {
+        let capture = ExternalTerminalRunCapture()
+        let model = try makeModel(externalTerminalCommandRunner: { executable, args in
+            capture.set(executable: executable, args: args)
+            return ""
+        })
+
+        model.performKillSession(target: "local", sessionName: "s1")
+        let ok = await waitUntil {
+            capture.snapshot().executable == "/bin/zsh"
+        }
+        XCTAssertTrue(ok)
+
+        let captured = capture.snapshot()
+        XCTAssertEqual(captured.executable, "/bin/zsh")
+        XCTAssertEqual(captured.args.count, 2)
+        XCTAssertEqual(captured.args[0], "-lc")
+        XCTAssertTrue(captured.args[1].contains("tmux kill-session -t 's1'"))
+        XCTAssertEqual(model.errorMessage, "")
+        XCTAssertTrue(model.infoMessage.contains("session killed"))
+    }
+
+    func testPerformKillSessionBuildsSSHCommand() async throws {
+        let capture = ExternalTerminalRunCapture()
+        let model = try makeModel(externalTerminalCommandRunner: { executable, args in
+            capture.set(executable: executable, args: args)
+            return ""
+        })
+        model.targets = [
+            TargetItem(
+                targetID: "vm1",
+                targetName: "vm1",
+                kind: "ssh",
+                connectionRef: "ssh://devvm",
+                isDefault: false,
+                health: "ok"
+            )
+        ]
+
+        model.performKillSession(target: "vm1", sessionName: "sprint")
+        let ok = await waitUntil {
+            capture.snapshot().executable == "/bin/zsh"
+        }
+        XCTAssertTrue(ok)
+
+        let captured = capture.snapshot()
+        XCTAssertEqual(captured.executable, "/bin/zsh")
+        XCTAssertEqual(captured.args.count, 2)
+        XCTAssertEqual(captured.args[0], "-lc")
+        XCTAssertTrue(captured.args[1].contains("ssh 'devvm'"))
+        XCTAssertTrue(captured.args[1].contains("tmux kill-session -t 'sprint'"))
+        XCTAssertEqual(model.errorMessage, "")
+    }
+
+    func testPerformKillSessionFailsWhenTargetIsUnavailable() async throws {
+        let capture = ExternalTerminalRunCapture()
+        let model = try makeModel(externalTerminalCommandRunner: { executable, args in
+            capture.set(executable: executable, args: args)
+            return ""
+        })
+
+        model.performKillSession(target: "missing-target", sessionName: "s1")
+        let ok = await waitUntil {
+            !model.errorMessage.isEmpty
+        }
+        XCTAssertTrue(ok)
+
+        let captured = capture.snapshot()
+        XCTAssertEqual(captured.executable, "")
+        XCTAssertTrue(captured.args.isEmpty)
+        XCTAssertTrue(model.errorMessage.contains("target is unavailable"))
+    }
+
+    func testPerformKillSessionRemovesSessionFromLocalStateImmediately() async throws {
+        let model = try makeModel(externalTerminalCommandRunner: { _, _ in "" })
+        let removed = makePane(paneID: "%1", displayCategory: "idle", target: "local", sessionName: "remove-me")
+        let remaining = makePane(paneID: "%2", displayCategory: "idle", target: "local", sessionName: "keep-me")
+        model.panes = [removed, remaining]
+        model.selectedPane = removed
+
+        model.performKillSession(target: "local", sessionName: "remove-me")
+        let ok = await waitUntil {
+            !model.panes.contains(where: { $0.identity.sessionName == "remove-me" })
+        }
+        XCTAssertTrue(ok)
+        XCTAssertNil(model.selectedPane)
+        XCTAssertTrue(model.panes.contains(where: { $0.identity.sessionName == "keep-me" }))
+    }
+
     func testInteractiveTerminalInputPreferenceDefaultsToTrueAndPersists() throws {
         let suiteName = "AGTMUXDesktopTests-InteractiveInput-\(UUID().uuidString)"
         guard let defaults = UserDefaults(suiteName: suiteName) else {
@@ -844,4 +933,20 @@ private func assertSubsequenceOrder(_ text: String, expected parts: [String], fi
         }
         lowerBound = found.upperBound
     }
+}
+
+@MainActor
+private func waitUntil(
+    timeout: TimeInterval = 1.0,
+    pollIntervalNanoseconds: UInt64 = 20_000_000,
+    condition: @escaping () -> Bool
+) async -> Bool {
+    let deadline = Date().addingTimeInterval(timeout)
+    while Date() < deadline {
+        if condition() {
+            return true
+        }
+        try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
+    }
+    return condition()
 }

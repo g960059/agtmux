@@ -4282,7 +4282,7 @@ func TestTerminalReadReturnsDeltaOnContinuousCursor(t *testing.T) {
 	if secondResp.Frame.FrameType != "delta" {
 		t.Fatalf("expected delta frame, got %+v", secondResp.Frame)
 	}
-	if secondResp.Frame.Content != "line3\n" {
+	if secondResp.Frame.Content != "\nline3" {
 		t.Fatalf("expected appended delta content, got %q", secondResp.Frame.Content)
 	}
 }
@@ -4353,7 +4353,7 @@ func TestTerminalReadReturnsResetOnContentDiscontinuity(t *testing.T) {
 	if secondResp.Frame.FrameType != "reset" || secondResp.Frame.ResetReason != "content_discontinuity" {
 		t.Fatalf("expected content reset frame, got %+v", secondResp.Frame)
 	}
-	if secondResp.Frame.Content != "xyz\n" {
+	if secondResp.Frame.Content != "xyz" {
 		t.Fatalf("expected full content on reset, got %q", secondResp.Frame.Content)
 	}
 }

@@ -109,9 +109,12 @@ private struct CockpitView: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var pendingKillAction: KillAction?
     @State private var pendingKillPane: PaneItem?
+    @State private var pendingKillSession: SessionKillRequest?
     @State private var detailPane: PaneItem?
     @State private var windowTopInset: CGFloat = 0
     @State private var hoveringPaneID: String?
+    @State private var showSortPopover = false
+    @State private var showSettingsPopover = false
 
     private struct WindowPaneGroup: Identifiable {
         let id: String
@@ -145,6 +148,13 @@ private struct CockpitView: View {
         }
     }
 
+    private struct SessionKillRequest: Identifiable {
+        let target: String
+        let sessionName: String
+
+        var id: String { "\(target)|\(sessionName)" }
+    }
+
     var body: some View {
         ZStack {
             WindowBackdropView()
@@ -152,16 +162,16 @@ private struct CockpitView: View {
 
             workspaceBoard
                 .padding(0)
-                .padding(.top, -max(0, windowTopInset - 28))
+                .padding(.top, -max(0, windowTopInset))
                 .ignoresSafeArea(.container, edges: .all)
         }
         .background(WindowStyleConfigurator { inset in
-            // Keep content flush with the draggable titlebar area.
             let normalized = max(0, min(80, inset))
             if abs(normalized - windowTopInset) > 0.5 {
                 windowTopInset = normalized
             }
         })
+        .preferredColorScheme(.dark)
         .onAppear {
             selectDefaultPaneIfNeeded()
         }
@@ -202,6 +212,32 @@ private struct CockpitView: View {
                 Text(action.message)
             }
         }
+        .confirmationDialog(
+            "Confirm Session Kill",
+            isPresented: Binding(
+                get: { pendingKillSession != nil },
+                set: { newValue in
+                    if !newValue {
+                        pendingKillSession = nil
+                    }
+                }
+            ),
+            titleVisibility: .visible
+        ) {
+            if let request = pendingKillSession {
+                Button("Kill Session", role: .destructive) {
+                    model.performKillSession(target: request.target, sessionName: request.sessionName)
+                    pendingKillSession = nil
+                }
+            }
+            Button("Cancel", role: .cancel) {
+                pendingKillSession = nil
+            }
+        } message: {
+            if let request = pendingKillSession {
+                Text("This will terminate tmux session '\(request.sessionName)' on target '\(request.target)'.")
+            }
+        }
         .sheet(item: $detailPane) { pane in
             paneDetailSheet(for: pane)
                 .frame(minWidth: 460, minHeight: 340)
@@ -211,20 +247,24 @@ private struct CockpitView: View {
     private var workspaceBoard: some View {
         HSplitView {
             paneNavigatorPanel
-                .frame(minWidth: 300, maxWidth: 430)
+                .frame(minWidth: 220, idealWidth: 250, maxWidth: 320)
+                .zIndex(10)
             terminalWorkspacePanel
                 .frame(minWidth: 560, maxWidth: .infinity)
+                .zIndex(1)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background {
             ZStack {
-                Rectangle().fill(.ultraThinMaterial)
+                Rectangle().fill(.ultraThinMaterial).opacity(0.18)
                 LinearGradient(
-                    colors: [palette.workspaceTintTop, palette.workspaceTintBottom],
+                    colors: [
+                        Color(red: 0.05, green: 0.09, blue: 0.14).opacity(0.18),
+                        Color(red: 0.02, green: 0.03, blue: 0.06).opacity(0.12),
+                    ],
                     startPoint: .topLeading,
                     endPoint: .bottomTrailing
                 )
-                .opacity(0.14)
             }
         }
         .overlay {
@@ -237,7 +277,7 @@ private struct CockpitView: View {
         VStack(spacing: 10) {
             contentBoard
                 .padding(.horizontal, 10)
-                .padding(.top, 28)
+                .padding(.top, 34)
             sidebarFooter
                 .padding(.horizontal, 10)
                 .padding(.bottom, 10)
@@ -276,45 +316,42 @@ private struct CockpitView: View {
                             .font(.system(size: 11, weight: .regular, design: .monospaced))
                             .foregroundStyle(palette.textMuted)
                     }
+                    .frame(height: 22)
                     .padding(.horizontal, 10)
-                    .padding(.top, 16)
+                    .padding(.top, 9)
                     .padding(.bottom, 8)
                     .transition(.opacity)
                 }
 
-                LinearGradient(
-                    colors: [palette.terminalDividerLeading, palette.terminalDividerTrailing],
-                    startPoint: .leading,
-                    endPoint: .trailing
-                )
-                .frame(height: 1)
-                .padding(.horizontal, 10)
-                .padding(.bottom, 8)
-
                 if let pane = model.selectedPane,
                    model.nativeTmuxTerminalEnabled,
                    model.supportsNativeTmuxTerminal(for: pane) {
-                    NativeTmuxTerminalView(
-                        pane: pane,
-                        darkMode: colorScheme == .dark,
-                        content: model.outputPreview,
-                        cursorX: model.terminalCursorX,
-                        cursorY: model.terminalCursorY,
-                        paneCols: model.terminalPaneCols,
-                        paneRows: model.terminalPaneRows,
-                        interactiveInputEnabled: model.interactiveTerminalInputEnabled,
-                        onInputBytes: { bytes in
-                            model.performInteractiveInput(bytes: bytes)
-                        },
-                        onResize: { cols, rows in
-                            model.performTerminalResize(cols: cols, rows: rows)
-                        }
-                    )
-                    .id("native-terminal-\(pane.id)")
+                    ZStack {
+                        NativeTmuxTerminalView(
+                            pane: pane,
+                            darkMode: colorScheme == .dark,
+                            content: model.outputPreview,
+                            cursorX: model.terminalCursorX,
+                            cursorY: model.terminalCursorY,
+                            paneCols: model.terminalPaneCols,
+                            paneRows: model.terminalPaneRows,
+                            interactiveInputEnabled: model.interactiveTerminalInputEnabled,
+                            onInputBytes: { bytes in
+                                model.performInteractiveInput(bytes: bytes)
+                            },
+                            onResize: { cols, rows in
+                                model.performTerminalResize(cols: cols, rows: rows)
+                            }
+                        )
+                        .id("native-terminal-\(pane.id)")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(Color.clear)
+                        .clipShape(Rectangle())
+                        .clipped()
+                        .padding(15)
+                    }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(palette.terminalBackground)
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    .padding(.horizontal, 10)
+                    .clipped()
                 } else {
                     VStack(spacing: 8) {
                         Image(systemName: "exclamationmark.triangle")
@@ -329,7 +366,6 @@ private struct CockpitView: View {
                         RoundedRectangle(cornerRadius: 10, style: .continuous)
                             .fill(palette.surfaceMuted)
                     )
-                    .padding(.horizontal, 10)
                 }
 
                 if !model.errorMessage.isEmpty {
@@ -363,6 +399,13 @@ private struct CockpitView: View {
             }
         }
         .frame(maxHeight: .infinity, alignment: .top)
+        .background {
+            ZStack {
+                Rectangle().fill(.ultraThinMaterial).opacity(0.10)
+                Rectangle().fill(Color.black.opacity(colorScheme == .dark ? 0.14 : 0.06))
+            }
+        }
+        .clipped()
     }
 
     private var contentBoard: some View {
@@ -395,9 +438,6 @@ private struct CockpitView: View {
             Text("Sessions")
                 .font(.system(size: 15, weight: .semibold, design: .rounded))
                 .foregroundStyle(palette.textPrimary)
-            Text("\(model.sessionSections.count)")
-                .font(.system(size: 11, weight: .medium, design: .monospaced))
-                .foregroundStyle(palette.textMuted)
             Spacer(minLength: 0)
             Button {
                 model.infoMessage = "Session creation UI is coming soon."
@@ -405,44 +445,29 @@ private struct CockpitView: View {
                 Image(systemName: "folder.badge.plus")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(palette.textMuted)
-                    .frame(width: 24, height: 22)
+                    .frame(width: 30, height: 26)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .help("Add new session")
 
-            Menu {
-                Picker("Organize", selection: $model.viewMode) {
-                    Text("By Session").tag(AppViewModel.ViewMode.bySession)
-                    Text("By Status").tag(AppViewModel.ViewMode.byStatus)
-                    Text("By Chronological").tag(AppViewModel.ViewMode.byChronological)
-                }
-                Picker("Session Order", selection: $model.sessionSortMode) {
-                    Text("Stable").tag(AppViewModel.SessionSortMode.stable)
-                    Text("Recent Activity").tag(AppViewModel.SessionSortMode.recentActivity)
-                    Text("Name").tag(AppViewModel.SessionSortMode.name)
-                }
-                Divider()
-                Toggle("Group By tmux Window", isOn: $model.showWindowGroupBackground)
+            Button {
+                showSortPopover.toggle()
             } label: {
                 Image(systemName: "line.3.horizontal.decrease")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(palette.textMuted)
-                    .frame(width: 24, height: 22)
+                    .frame(width: 30, height: 26)
                     .contentShape(Rectangle())
             }
-            .menuStyle(.borderlessButton)
+            .buttonStyle(.plain)
             .help("Sort / filter")
+            .popover(isPresented: $showSortPopover, arrowEdge: .top) {
+                sortPopoverContent
+            }
         }
         .padding(.horizontal, 2)
-        .overlay(alignment: .bottomLeading) {
-            Text(model.sessionSortMode == .stable ? "stable order" : model.sessionSortMode.title.lowercased())
-                .font(.system(size: 10, weight: .regular, design: .monospaced))
-                .foregroundStyle(palette.textMuted)
-                .padding(.leading, 2)
-                .padding(.top, 24)
-        }
-        .padding(.bottom, 16)
+        .padding(.bottom, 8)
     }
 
     private var sidebarFooter: some View {
@@ -461,24 +486,8 @@ private struct CockpitView: View {
                     .foregroundStyle(palette.textMuted)
             }
             Spacer(minLength: 0)
-            Menu {
-                Picker("Window Grouping", selection: $model.windowGrouping) {
-                    Text("Off").tag(AppViewModel.WindowGrouping.off)
-                    Text("Auto").tag(AppViewModel.WindowGrouping.auto)
-                    Text("On").tag(AppViewModel.WindowGrouping.on)
-                }
-                Divider()
-                Toggle("Show Unmanaged Panes", isOn: Binding(
-                    get: { !model.hideUnmanagedCategory },
-                    set: { model.hideUnmanagedCategory = !$0 }
-                ))
-                Toggle("Show Unknown Panes", isOn: $model.showUnknownCategory)
-                Toggle("Show Window Group Cards", isOn: $model.showWindowGroupBackground)
-                Toggle("Show Technical Details", isOn: $model.showTechnicalDetails)
-                Divider()
-                Button("Refresh Now") {
-                    model.manualRefresh()
-                }
+            Button {
+                showSettingsPopover.toggle()
             } label: {
                 Image(systemName: "gearshape")
                     .font(.system(size: 12, weight: .semibold))
@@ -489,11 +498,69 @@ private struct CockpitView: View {
                             .fill(palette.rowFill)
                     )
             }
-            .menuStyle(.borderlessButton)
+            .buttonStyle(.plain)
             .help("View settings")
+            .popover(isPresented: $showSettingsPopover, arrowEdge: .bottom) {
+                settingsPopoverContent
+            }
         }
         .padding(.horizontal, 2)
         .padding(.bottom, 1)
+    }
+
+    private var sortPopoverContent: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Organize")
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .foregroundStyle(palette.textPrimary)
+            Picker("View", selection: $model.viewMode) {
+                Text("By Session").tag(AppViewModel.ViewMode.bySession)
+                Text("By Status").tag(AppViewModel.ViewMode.byStatus)
+                Text("By Chronological").tag(AppViewModel.ViewMode.byChronological)
+            }
+            .pickerStyle(.menu)
+            Picker("Session Order", selection: $model.sessionSortMode) {
+                Text("Stable").tag(AppViewModel.SessionSortMode.stable)
+                Text("Recent Activity").tag(AppViewModel.SessionSortMode.recentActivity)
+                Text("Name").tag(AppViewModel.SessionSortMode.name)
+            }
+            .pickerStyle(.menu)
+            Toggle("Group By tmux Window", isOn: $model.showWindowGroupBackground)
+                .toggleStyle(.switch)
+        }
+        .padding(12)
+        .frame(width: 250)
+    }
+
+    private var settingsPopoverContent: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Settings")
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .foregroundStyle(palette.textPrimary)
+            Picker("Window Grouping", selection: $model.windowGrouping) {
+                Text("Off").tag(AppViewModel.WindowGrouping.off)
+                Text("Auto").tag(AppViewModel.WindowGrouping.auto)
+                Text("On").tag(AppViewModel.WindowGrouping.on)
+            }
+            .pickerStyle(.menu)
+            Toggle("Show Unmanaged Panes", isOn: Binding(
+                get: { !model.hideUnmanagedCategory },
+                set: { model.hideUnmanagedCategory = !$0 }
+            ))
+            .toggleStyle(.switch)
+            Toggle("Show Unknown Panes", isOn: $model.showUnknownCategory)
+                .toggleStyle(.switch)
+            Toggle("Show Window Group Cards", isOn: $model.showWindowGroupBackground)
+                .toggleStyle(.switch)
+            Toggle("Show Technical Details", isOn: $model.showTechnicalDetails)
+                .toggleStyle(.switch)
+            Divider()
+            Button("Refresh Now") {
+                model.manualRefresh()
+            }
+        }
+        .padding(12)
+        .frame(width: 260)
     }
 
     private func sessionSection(_ section: AppViewModel.SessionSection) -> some View {
@@ -523,6 +590,12 @@ private struct CockpitView: View {
                         Capsule(style: .continuous)
                             .fill(palette.rowFill)
                     )
+            }
+            .contentShape(Rectangle())
+            .contextMenu {
+                Button("Kill Session", role: .destructive) {
+                    requestSessionKill(section)
+                }
             }
 
             paneList(
@@ -686,6 +759,13 @@ private struct CockpitView: View {
         pendingKillAction = action
     }
 
+    private func requestSessionKill(_ section: AppViewModel.SessionSection) {
+        pendingKillSession = SessionKillRequest(
+            target: section.target,
+            sessionName: section.sessionName
+        )
+    }
+
     private func copyPanePath(_ pane: PaneItem) {
         let value = "\(pane.identity.target)/\(pane.identity.sessionName)/\(pane.identity.windowID)/\(pane.identity.paneID)"
         let pb = NSPasteboard.general
@@ -814,7 +894,7 @@ private struct CockpitPalette {
                 workspaceTintTop: Color(red: 0.03, green: 0.05, blue: 0.09),
                 workspaceTintBottom: Color(red: 0.04, green: 0.06, blue: 0.10),
                 workspaceStroke: Color.white.opacity(0.08),
-                sidebarFill: Color.clear,
+                sidebarFill: Color(red: 0.10, green: 0.22, blue: 0.33).opacity(0.34),
                 sidebarDivider: Color.white.opacity(0.06),
                 surfaceMuted: Color.white.opacity(0.05),
                 windowGroupFill: Color.white.opacity(0.045),
@@ -845,7 +925,7 @@ private struct CockpitPalette {
             workspaceTintTop: Color(red: 0.89, green: 0.93, blue: 0.99),
             workspaceTintBottom: Color(red: 0.85, green: 0.90, blue: 0.97),
             workspaceStroke: Color.black.opacity(0.05),
-            sidebarFill: Color.clear,
+            sidebarFill: Color(red: 0.82, green: 0.88, blue: 0.96).opacity(0.50),
             sidebarDivider: Color.black.opacity(0.05),
             surfaceMuted: Color.black.opacity(0.03),
             windowGroupFill: Color.black.opacity(0.04),
@@ -919,8 +999,33 @@ private struct WindowStyleConfigurator: NSViewRepresentable {
         window.backgroundColor = .clear
         window.hasShadow = true
         window.styleMask.insert(.fullSizeContentView)
+        applyTrafficLightInsets(window)
         let inset = max(0, window.frame.height - window.contentLayoutRect.height)
         onInsetChanged(inset)
+    }
+
+    private func applyTrafficLightInsets(_ window: NSWindow) {
+        guard
+            let closeButton = window.standardWindowButton(.closeButton),
+            let minimizeButton = window.standardWindowButton(.miniaturizeButton),
+            let zoomButton = window.standardWindowButton(.zoomButton),
+            let container = closeButton.superview
+        else {
+            return
+        }
+
+        let buttons = [closeButton, minimizeButton, zoomButton]
+        let leftInset: CGFloat = 15
+        let topInset: CGFloat = 15
+        let spacing: CGFloat = 6
+        let buttonWidth = closeButton.frame.width
+        let buttonHeight = closeButton.frame.height
+        let y = max(0, container.bounds.height - buttonHeight - topInset)
+
+        for (index, button) in buttons.enumerated() {
+            let x = leftInset + CGFloat(index) * (buttonWidth + spacing)
+            button.setFrameOrigin(NSPoint(x: x, y: y))
+        }
     }
 }
 

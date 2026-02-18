@@ -1858,10 +1858,6 @@ func (s *Server) terminalStreamHandler(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadGateway, model.ErrTargetUnreachable, "failed to read terminal stream output")
 		return
 	}
-	// Stream endpoint is consumed by the embedded interactive terminal.
-	// Keep only the current viewport rows so cursor metadata and visible content stay aligned.
-	captureOutput = trimSnapshotToVisibleRows(captureOutput, paneRows)
-
 	frameType := "output"
 	content := captureOutput
 	resetReason := ""
@@ -2036,6 +2032,9 @@ func (s *Server) terminalReadHandler(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadGateway, model.ErrTargetUnreachable, "failed to read pane output")
 		return
 	}
+	// Keep read endpoint aligned with stream endpoint:
+	// cursor coordinates are pane-local, so normalize snapshot to visible rows.
+	captureOutput = trimSnapshotToVisibleRows(captureOutput, paneRows)
 	frameType := "snapshot"
 	resetReason := ""
 	content := captureOutput
@@ -4719,8 +4718,19 @@ func parseTerminalSnapshotWithCursor(raw string) (string, *int, *int, *int, *int
 	if errX != nil || errY != nil || errCols != nil || errRows != nil {
 		return raw, nil, nil, nil, nil
 	}
-	content := raw[:markerPos]
+	content := normalizeCapturedSnapshotContent(raw[:markerPos])
 	return content, intPtr(x), intPtr(y), intPtr(cols), intPtr(rows)
+}
+
+func normalizeCapturedSnapshotContent(content string) string {
+	normalized := strings.ReplaceAll(content, "\r\n", "\n")
+	normalized = strings.ReplaceAll(normalized, "\r", "\n")
+	// tmux capture-pane output includes a trailing newline separator.
+	// Keep pane rows stable by removing exactly one terminal newline.
+	if strings.HasSuffix(normalized, "\n") {
+		normalized = normalized[:len(normalized)-1]
+	}
+	return normalized
 }
 
 func trimSnapshotToVisibleRows(content string, paneRows *int) string {

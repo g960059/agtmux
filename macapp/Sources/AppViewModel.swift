@@ -306,8 +306,8 @@ final class AppViewModel: ObservableObject {
     private let queueLimit = 250
     private let currentUIPrefsVersion = 6
     private let terminalCapabilitiesCacheTTLSeconds: TimeInterval = 60
-    private let terminalStreamPollIntervalSeconds: TimeInterval = 0.12
-    private let terminalStreamLines = 120
+    private let terminalStreamPollIntervalSeconds: TimeInterval = 0.20
+    private let terminalStreamLines = 800
     private let terminalOutputMaxChars = 60_000
 
     init(
@@ -380,6 +380,33 @@ final class AppViewModel: ObservableObject {
         } catch {
             infoMessage = ""
             errorMessage = error.localizedDescription
+        }
+    }
+
+    func performKillSession(target: String, sessionName: String) {
+        let targetToken = target.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sessionToken = sessionName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !targetToken.isEmpty, !sessionToken.isEmpty else {
+            infoMessage = ""
+            errorMessage = "session identity is incomplete"
+            return
+        }
+        Task {
+            do {
+                let invocation = try buildSessionKillInvocation(target: targetToken, sessionName: sessionToken)
+                _ = try externalTerminalCommandRunner(invocation.executable, invocation.args)
+                if let selected = selectedPane,
+                   selected.identity.target == targetToken,
+                   selected.identity.sessionName == sessionToken {
+                    selectedPane = nil
+                }
+                removeSessionFromLocalState(target: targetToken, sessionName: sessionToken)
+                infoMessage = "session killed: \(sessionToken)"
+                errorMessage = ""
+            } catch {
+                infoMessage = ""
+                errorMessage = error.localizedDescription
+            }
         }
     }
 
@@ -1584,18 +1611,27 @@ final class AppViewModel: ObservableObject {
                 if await shouldUseTerminalProxy(for: paneID) {
                     let sessionID = try await ensureTerminalProxySession(for: pane, generation: generation)
                     let cursor = await terminalSessionController.cursor(for: paneID)
-                    let resp = try await client.terminalStream(
+                    let firstResp = try await client.terminalStream(
                         sessionID: sessionID,
                         cursor: cursor,
                         lines: terminalStreamLines
                     )
+                    var frame = firstResp.frame
+                    if frame.frameType == "attached" {
+                        let followResp = try await client.terminalStream(
+                            sessionID: sessionID,
+                            cursor: frame.cursor,
+                            lines: terminalStreamLines
+                        )
+                        frame = followResp.frame
+                    }
                     guard generation == terminalStreamGeneration, selectedPane?.id == paneID else {
                         return
                     }
-                    await terminalSessionController.setCursor(resp.frame.cursor, for: paneID)
-                    applyTerminalStreamFrame(resp.frame, paneID: paneID)
+                    await terminalSessionController.setCursor(frame.cursor, for: paneID)
+                    applyTerminalStreamFrame(frame, paneID: paneID)
                     await terminalSessionController.recordSuccess(for: paneID)
-                } else if await shouldUseTerminalRead() {
+                } else {
                     let cursor = await terminalSessionController.cursor(for: paneID)
                     let resp = try await client.terminalRead(
                         target: pane.identity.target,
@@ -1608,15 +1644,7 @@ final class AppViewModel: ObservableObject {
                     }
                     await terminalSessionController.setCursor(resp.frame.cursor, for: paneID)
                     applyTerminalFrame(resp.frame, paneID: paneID)
-                } else {
-                    let outcome = await terminalSessionController.recordFailure(for: paneID)
-                    if selectedPane?.id == paneID, outcome.didEnterDegradedMode {
-                        infoMessage = "interactive terminal degraded to snapshot mode"
-                    } else if selectedPane?.id == paneID, outcome.delayMillis >= 1000 {
-                        infoMessage = "terminal stream waiting for daemon capabilities..."
-                    }
-                    try? await Task.sleep(for: .milliseconds(outcome.delayMillis))
-                    continue
+                    await terminalSessionController.recordSuccess(for: paneID)
                 }
                 try await Task.sleep(for: .milliseconds(Int(terminalStreamPollIntervalSeconds * 1000)))
             } catch {
@@ -1655,10 +1683,10 @@ final class AppViewModel: ObservableObject {
         let content = frame.content ?? ""
         if frame.frameType == "delta" {
             if !content.isEmpty {
-                outputPreview += content
+                setOutputPreviewIfChanged(outputPreview + content)
             }
         } else {
-            outputPreview = content
+            setOutputPreviewIfChanged(content)
         }
         trimOutputPreviewIfNeeded()
     }
@@ -1678,9 +1706,9 @@ final class AppViewModel: ObservableObject {
         case "attached":
             return
         case "output":
-            outputPreview = frame.content ?? ""
+            setOutputPreviewIfChanged(frame.content ?? "")
         case "reset":
-            outputPreview = frame.content ?? ""
+            setOutputPreviewIfChanged(frame.content ?? "")
         case "error":
             let reason = frame.errorCode ?? frame.message ?? "unknown"
             errorMessage = "terminal-stream error: \(reason)"
@@ -1704,7 +1732,7 @@ final class AppViewModel: ObservableObject {
         if outputPreview.count <= terminalOutputMaxChars {
             return
         }
-        outputPreview = String(outputPreview.suffix(terminalOutputMaxChars))
+        setOutputPreviewIfChanged(String(outputPreview.suffix(terminalOutputMaxChars)))
     }
 
     private func updateTerminalRenderMetadata(
@@ -1715,21 +1743,51 @@ final class AppViewModel: ObservableObject {
         clearCursorIfMissing: Bool = false
     ) {
         if let paneCols, paneCols > 0 {
-            terminalPaneCols = paneCols
+            setTerminalPaneColsIfChanged(paneCols)
         }
         if let paneRows, paneRows > 0 {
-            terminalPaneRows = paneRows
+            setTerminalPaneRowsIfChanged(paneRows)
         }
         if clearCursorIfMissing, (cursorX == nil || cursorY == nil) {
-            terminalCursorX = nil
-            terminalCursorY = nil
+            setTerminalCursorXIfChanged(nil)
+            setTerminalCursorYIfChanged(nil)
             return
         }
         guard let cursorX, let cursorY, cursorX >= 0, cursorY >= 0 else {
             return
         }
-        terminalCursorX = cursorX
-        terminalCursorY = cursorY
+        setTerminalCursorXIfChanged(cursorX)
+        setTerminalCursorYIfChanged(cursorY)
+    }
+
+    private func setOutputPreviewIfChanged(_ next: String) {
+        if outputPreview != next {
+            outputPreview = next
+        }
+    }
+
+    private func setTerminalCursorXIfChanged(_ next: Int?) {
+        if terminalCursorX != next {
+            terminalCursorX = next
+        }
+    }
+
+    private func setTerminalCursorYIfChanged(_ next: Int?) {
+        if terminalCursorY != next {
+            terminalCursorY = next
+        }
+    }
+
+    private func setTerminalPaneColsIfChanged(_ next: Int?) {
+        if terminalPaneCols != next {
+            terminalPaneCols = next
+        }
+    }
+
+    private func setTerminalPaneRowsIfChanged(_ next: Int?) {
+        if terminalPaneRows != next {
+            terminalPaneRows = next
+        }
     }
 
     private func ensureTerminalProxySession(for pane: PaneItem, generation: Int? = nil) async throws -> String {
@@ -1771,13 +1829,15 @@ final class AppViewModel: ObservableObject {
     }
 
     private func shouldUseTerminalProxy(for paneID: String) async -> Bool {
+        guard await terminalSessionController.shouldUseProxy(for: paneID) else {
+            return false
+        }
         guard let caps = await fetchTerminalCapabilities() else {
-            return false
+            // Capabilities fetch can transiently fail during daemon restarts.
+            // Keep embedded terminal usable by optimistically attempting proxy.
+            return true
         }
-        guard shouldUseTerminalProxy(caps: caps) else {
-            return false
-        }
-        return await terminalSessionController.shouldUseProxy(for: paneID)
+        return shouldUseTerminalProxy(caps: caps)
     }
 
     func shouldUseTerminalProxy(caps: CapabilityFlags) -> Bool {
@@ -1817,7 +1877,9 @@ final class AppViewModel: ObservableObject {
 
     private func shouldUseTerminalRead() async -> Bool {
         guard let caps = await fetchTerminalCapabilities() else {
-            return false
+            // Optimistic fallback keeps terminal-read path alive when
+            // capabilities endpoint is temporarily unavailable.
+            return true
         }
         return caps.embeddedTerminal && caps.terminalRead
     }
@@ -1976,6 +2038,82 @@ final class AppViewModel: ObservableObject {
                 "-e", "tell application \"Terminal\" to do script \"\(escapedCommand)\"",
             ]
         )
+    }
+
+    private func buildSessionKillInvocation(target targetToken: String, sessionName: String) throws -> ExternalTerminalInvocation {
+        let target = targetToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        let session = sessionName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !target.isEmpty, !session.isEmpty else {
+            throw RuntimeError.commandFailed("kill session", 1, "session identity is incomplete")
+        }
+
+        let resolvedTarget = targetRecord(for: target)
+        let targetKind: String
+        if let resolvedTarget {
+            switch normalizedToken(resolvedTarget.kind) {
+            case "local":
+                targetKind = "local"
+            case "ssh":
+                targetKind = "ssh"
+            case nil:
+                throw RuntimeError.commandFailed("kill session", 1, "target kind is unavailable")
+            default:
+                throw RuntimeError.commandFailed("kill session", 1, "unsupported target kind")
+            }
+        } else if normalizedToken(target) == "local" {
+            targetKind = "local"
+        } else {
+            throw RuntimeError.commandFailed("kill session", 1, "target is unavailable")
+        }
+
+        if targetKind == "local" {
+            return ExternalTerminalInvocation(
+                executable: "/bin/zsh",
+                args: [
+                    "-lc",
+                    "tmux kill-session -t \(shellQuote(session))",
+                ]
+            )
+        }
+
+        let connectionRef = normalizedSSHConnectionRef(resolvedTarget?.connectionRef)
+        guard let connectionRef else {
+            throw RuntimeError.commandFailed("kill session", 1, "ssh target connection_ref is unavailable")
+        }
+        return ExternalTerminalInvocation(
+            executable: "/bin/zsh",
+            args: [
+                "-lc",
+                "ssh \(shellQuote(connectionRef)) tmux kill-session -t \(shellQuote(session))",
+            ]
+        )
+    }
+
+    private func removeSessionFromLocalState(target: String, sessionName: String) {
+        let targetToken = target.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sessionToken = sessionName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !targetToken.isEmpty, !sessionToken.isEmpty else {
+            return
+        }
+        panes = panes.filter {
+            !($0.identity.target == targetToken && $0.identity.sessionName == sessionToken)
+        }
+        windows = windows.filter {
+            !($0.identity.target == targetToken && $0.identity.sessionName == sessionToken)
+        }
+        sessions = sessions.filter {
+            !($0.identity.target == targetToken && $0.identity.sessionName == sessionToken)
+        }
+        reviewQueue = reviewQueue.filter {
+            !($0.target == targetToken && $0.sessionName == sessionToken)
+        }
+        let sessionKey = paneSessionKey(target: targetToken, sessionName: sessionToken)
+        if sessionStableOrder.removeValue(forKey: sessionKey) != nil {
+            persistSessionStableOrder()
+        }
+        paneObservations = paneObservations.filter { key, _ in
+            !key.hasPrefix("\(targetToken)|\(sessionToken)|")
+        }
     }
 
     private func targetRecord(for targetToken: String) -> TargetItem? {
