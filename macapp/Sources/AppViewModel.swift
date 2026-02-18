@@ -410,6 +410,67 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    func performAddTarget(
+        name: String,
+        kind: String,
+        connectionRef: String,
+        isDefault: Bool,
+        connectAfterAdd: Bool
+    ) {
+        let targetName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !targetName.isEmpty else {
+            infoMessage = ""
+            errorMessage = "target name is required"
+            return
+        }
+
+        let normalizedKind = normalizedToken(kind) ?? "ssh"
+        if normalizedKind != "local" && normalizedKind != "ssh" {
+            infoMessage = ""
+            errorMessage = "target kind must be local or ssh"
+            return
+        }
+
+        let normalizedConnectionRef = normalizedConnectionRefForTargetAdd(
+            kind: normalizedKind,
+            rawConnectionRef: connectionRef
+        )
+        if normalizedKind == "ssh", normalizedConnectionRef == nil {
+            infoMessage = ""
+            errorMessage = "ssh target requires connection reference"
+            return
+        }
+
+        Task {
+            var didAddTarget = false
+            do {
+                let created = try await client.addTarget(
+                    name: targetName,
+                    kind: normalizedKind,
+                    connectionRef: normalizedConnectionRef,
+                    isDefault: isDefault
+                )
+                didAddTarget = true
+                let addedName = created.first?.targetName ?? targetName
+                if connectAfterAdd {
+                    _ = try await client.connectTarget(name: targetName)
+                }
+                await refresh()
+                infoMessage = connectAfterAdd ? "target added and connected: \(addedName)" : "target added: \(addedName)"
+                errorMessage = ""
+            } catch {
+                if didAddTarget {
+                    await refresh()
+                    infoMessage = "target added: \(targetName) (connect failed)"
+                    errorMessage = error.localizedDescription
+                } else {
+                    infoMessage = ""
+                    errorMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
     var hasSelectedPane: Bool {
         selectedPane != nil
     }
@@ -2134,6 +2195,19 @@ final class AppViewModel: ObservableObject {
             ref.removeFirst("ssh://".count)
         }
         return trimmedNonEmpty(ref)
+    }
+
+    private func normalizedConnectionRefForTargetAdd(kind: String, rawConnectionRef: String) -> String? {
+        guard kind == "ssh" else {
+            return nil
+        }
+        guard let trimmed = trimmedNonEmpty(rawConnectionRef) else {
+            return nil
+        }
+        if trimmed.hasPrefix("ssh://") {
+            return trimmed
+        }
+        return "ssh://\(trimmed)"
     }
 
     private func shellQuote(_ raw: String) -> String {

@@ -115,10 +115,32 @@ private struct CockpitView: View {
     @State private var hoveringPaneID: String?
     @State private var showSortPopover = false
     @State private var showSettingsPopover = false
+    @State private var showAddTargetSheet = false
+    @State private var newTargetName = ""
+    @State private var newTargetKind: AddTargetKind = .ssh
+    @State private var newTargetConnectionRef = ""
+    @State private var newTargetIsDefault = false
+    @State private var newTargetConnectAfterAdd = true
 
     private struct WindowPaneGroup: Identifiable {
         let id: String
         let panes: [PaneItem]
+    }
+
+    private enum AddTargetKind: String, CaseIterable, Identifiable {
+        case ssh
+        case local
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .ssh:
+                return "SSH"
+            case .local:
+                return "Local"
+            }
+        }
     }
 
     private var palette: CockpitPalette {
@@ -241,6 +263,10 @@ private struct CockpitView: View {
         .sheet(item: $detailPane) { pane in
             paneDetailSheet(for: pane)
                 .frame(minWidth: 460, minHeight: 340)
+        }
+        .sheet(isPresented: $showAddTargetSheet) {
+            addTargetSheet
+                .frame(minWidth: 460, minHeight: 320)
         }
     }
 
@@ -440,7 +466,8 @@ private struct CockpitView: View {
                 .foregroundStyle(palette.textPrimary)
             Spacer(minLength: 0)
             Button {
-                model.infoMessage = "Session creation UI is coming soon."
+                resetAddTargetForm()
+                showAddTargetSheet = true
             } label: {
                 Image(systemName: "folder.badge.plus")
                     .font(.system(size: 12, weight: .semibold))
@@ -449,7 +476,7 @@ private struct CockpitView: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help("Add new session")
+            .help("Add target")
 
             Button {
                 showSortPopover.toggle()
@@ -561,6 +588,82 @@ private struct CockpitView: View {
         }
         .padding(12)
         .frame(width: 260)
+    }
+
+    private var addTargetSheet: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Add Target")
+                .font(.system(size: 18, weight: .bold, design: .rounded))
+                .foregroundStyle(palette.textPrimary)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Target Name")
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .foregroundStyle(palette.textMuted)
+                TextField("e.g. dev-vm", text: $newTargetName)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 13, weight: .regular, design: .rounded))
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Kind")
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .foregroundStyle(palette.textMuted)
+                Picker("Kind", selection: $newTargetKind) {
+                    ForEach(AddTargetKind.allCases) { kind in
+                        Text(kind.title).tag(kind)
+                    }
+                }
+                .pickerStyle(.segmented)
+            }
+
+            if newTargetKind == .ssh {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("SSH Connection Ref")
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .foregroundStyle(palette.textMuted)
+                    TextField("vm-host or ssh://vm-host", text: $newTargetConnectionRef)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 13, weight: .regular, design: .rounded))
+                    Text("Uses your local SSH config aliases.")
+                        .font(.system(size: 11, weight: .regular, design: .rounded))
+                        .foregroundStyle(palette.textMuted)
+                }
+            }
+
+            Toggle("Set as default target", isOn: $newTargetIsDefault)
+                .toggleStyle(.switch)
+                .font(.system(size: 12, weight: .regular, design: .rounded))
+
+            if newTargetKind == .ssh {
+                Toggle("Connect immediately after add", isOn: $newTargetConnectAfterAdd)
+                    .toggleStyle(.switch)
+                    .font(.system(size: 12, weight: .regular, design: .rounded))
+            }
+
+            Spacer(minLength: 0)
+
+            HStack(spacing: 10) {
+                Spacer(minLength: 0)
+                Button("Cancel") {
+                    showAddTargetSheet = false
+                }
+                .buttonStyle(.bordered)
+                Button("Add Target") {
+                    submitAddTarget()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!canSubmitAddTarget)
+            }
+        }
+        .padding(18)
+        .background(
+            LinearGradient(
+                colors: [palette.windowTop, palette.windowBottom],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        )
     }
 
     private func sessionSection(_ section: AppViewModel.SessionSection) -> some View {
@@ -772,6 +875,37 @@ private struct CockpitView: View {
         pb.clearContents()
         pb.setString(value, forType: .string)
         model.infoMessage = "Copied pane path"
+    }
+
+    private var canSubmitAddTarget: Bool {
+        let name = newTargetName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else {
+            return false
+        }
+        if newTargetKind == .ssh {
+            let conn = newTargetConnectionRef.trimmingCharacters(in: .whitespacesAndNewlines)
+            return !conn.isEmpty
+        }
+        return true
+    }
+
+    private func submitAddTarget() {
+        model.performAddTarget(
+            name: newTargetName,
+            kind: newTargetKind.rawValue,
+            connectionRef: newTargetConnectionRef,
+            isDefault: newTargetIsDefault,
+            connectAfterAdd: newTargetKind == .ssh ? newTargetConnectAfterAdd : false
+        )
+        showAddTargetSheet = false
+    }
+
+    private func resetAddTargetForm() {
+        newTargetName = ""
+        newTargetKind = .ssh
+        newTargetConnectionRef = ""
+        newTargetIsDefault = false
+        newTargetConnectAfterAdd = true
     }
 
     private func paneDetailSheet(for pane: PaneItem) -> some View {

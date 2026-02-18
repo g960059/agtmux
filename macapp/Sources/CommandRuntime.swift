@@ -578,6 +578,52 @@ struct AGTMUXCLIClient {
         return try decodeSingleJSONLine(out, as: TargetsEnvelope.self).targets
     }
 
+    func addTarget(
+        name: String,
+        kind: String,
+        connectionRef: String? = nil,
+        isDefault: Bool = false
+    ) async throws -> [TargetItem] {
+        let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedName.isEmpty else {
+            throw RuntimeError.commandFailed("agtmux-app target add", 2, "target name is required")
+        }
+        let normalizedKind = kind.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard normalizedKind == "local" || normalizedKind == "ssh" else {
+            throw RuntimeError.commandFailed("agtmux-app target add", 2, "target kind must be local or ssh")
+        }
+        let normalizedConnectionRef = connectionRef?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if normalizedKind == "ssh", (normalizedConnectionRef ?? "").isEmpty {
+            throw RuntimeError.commandFailed("agtmux-app target add", 2, "ssh target requires connection_ref")
+        }
+
+        var args = [
+            "target", "add", normalizedName,
+            "--kind", normalizedKind,
+            "--json",
+        ]
+        if let normalizedConnectionRef, !normalizedConnectionRef.isEmpty {
+            args += ["--connection-ref", normalizedConnectionRef]
+        }
+        if isDefault {
+            args.append("--default")
+        }
+
+        let out = try await runAppCommand(args)
+        return try decodeSingleJSONLine(out, as: TargetsEnvelope.self).targets
+    }
+
+    func connectTarget(name: String) async throws -> [TargetItem] {
+        let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedName.isEmpty else {
+            throw RuntimeError.commandFailed("agtmux-app target connect", 2, "target name is required")
+        }
+        let out = try await runAppCommand([
+            "target", "connect", normalizedName, "--json",
+        ])
+        return try decodeSingleJSONLine(out, as: TargetsEnvelope.self).targets
+    }
+
     func fetchSessions() async throws -> [SessionItem] {
         let out = try await runAppCommand(["view", "sessions", "--json"])
         return try decodeSingleJSONLine(out, as: SessionEnvelope.self).items

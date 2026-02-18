@@ -3,6 +3,109 @@ import XCTest
 @testable import AGTMUXDesktop
 
 final class CommandRuntimeTests: XCTestCase {
+    func testAddTargetIncludesSSHConnectionAndDefaultFlag() async throws {
+        let capture = ArgsCapture()
+        let client = AGTMUXCLIClient(
+            socketPath: "/tmp/agtmux-test.sock",
+            appBinaryPath: "/usr/bin/true",
+            commandRunner: { _, args in
+                capture.set(args)
+                return """
+                {"targets":[{"target_id":"vm-1","target_name":"vm-1","kind":"ssh","connection_ref":"ssh://dev-vm","is_default":true,"health":"ok"}]}
+                """
+            }
+        )
+
+        let targets = try await client.addTarget(
+            name: "vm-1",
+            kind: "ssh",
+            connectionRef: "ssh://dev-vm",
+            isDefault: true
+        )
+
+        let joined = capture.snapshot().joined(separator: " ")
+        XCTAssertTrue(joined.contains("target add vm-1"))
+        XCTAssertTrue(joined.contains("--kind ssh"))
+        XCTAssertTrue(joined.contains("--connection-ref ssh://dev-vm"))
+        XCTAssertTrue(joined.contains("--default"))
+        XCTAssertTrue(joined.contains("--json"))
+        XCTAssertEqual(targets.first?.targetName, "vm-1")
+        XCTAssertEqual(targets.first?.kind, "ssh")
+    }
+
+    func testAddTargetLocalOmitsConnectionRef() async throws {
+        let capture = ArgsCapture()
+        let client = AGTMUXCLIClient(
+            socketPath: "/tmp/agtmux-test.sock",
+            appBinaryPath: "/usr/bin/true",
+            commandRunner: { _, args in
+                capture.set(args)
+                return """
+                {"targets":[{"target_id":"local2","target_name":"local2","kind":"local","connection_ref":"","is_default":false,"health":"ok"}]}
+                """
+            }
+        )
+
+        _ = try await client.addTarget(
+            name: "local2",
+            kind: "local",
+            connectionRef: nil,
+            isDefault: false
+        )
+
+        let joined = capture.snapshot().joined(separator: " ")
+        XCTAssertTrue(joined.contains("target add local2"))
+        XCTAssertTrue(joined.contains("--kind local"))
+        XCTAssertFalse(joined.contains("--connection-ref"))
+        XCTAssertFalse(joined.contains("--default"))
+    }
+
+    func testConnectTargetBuildsArgs() async throws {
+        let capture = ArgsCapture()
+        let client = AGTMUXCLIClient(
+            socketPath: "/tmp/agtmux-test.sock",
+            appBinaryPath: "/usr/bin/true",
+            commandRunner: { _, args in
+                capture.set(args)
+                return """
+                {"targets":[{"target_id":"vm-2","target_name":"vm-2","kind":"ssh","connection_ref":"ssh://vm-2","is_default":false,"health":"ok"}]}
+                """
+            }
+        )
+
+        let targets = try await client.connectTarget(name: "vm-2")
+        let joined = capture.snapshot().joined(separator: " ")
+        XCTAssertTrue(joined.contains("target connect vm-2"))
+        XCTAssertTrue(joined.contains("--json"))
+        XCTAssertEqual(targets.first?.targetName, "vm-2")
+    }
+
+    func testAddTargetRejectsSSHWithoutConnectionRef() async throws {
+        let client = AGTMUXCLIClient(
+            socketPath: "/tmp/agtmux-test.sock",
+            appBinaryPath: "/usr/bin/true",
+            commandRunner: { _, _ in
+                XCTFail("command runner should not be called")
+                return "{}"
+            }
+        )
+
+        do {
+            _ = try await client.addTarget(
+                name: "vm-3",
+                kind: "ssh",
+                connectionRef: nil,
+                isDefault: false
+            )
+            XCTFail("expected validation error")
+        } catch RuntimeError.commandFailed(let command, _, let message) {
+            XCTAssertTrue(command.contains("target add"))
+            XCTAssertTrue(message.contains("connection_ref"))
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+    }
+
     func testTerminalWriteDoesNotFallbackWhenDaemonTransportUnavailable() async throws {
         var transport = StubTerminalTransport()
         transport.terminalWriteHandler = { _, _, _, _, _, _ in

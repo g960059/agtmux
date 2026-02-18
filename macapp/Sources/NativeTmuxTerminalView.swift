@@ -5,7 +5,9 @@ import SwiftUI
 final class IMEAwareTerminalView: TerminalView {
     private var markedTextStorage: NSAttributedString?
     private var markedSelection: NSRange = NSRange(location: 0, length: 0)
+    private weak var markedOverlayContainer: NSView?
     private weak var markedOverlayLabel: NSTextField?
+    private var cursorHiddenForComposition = false
     private var compositionCursorX: Int = 0
     private var compositionCursorY: Int = 0
     private var compositionPaneCols: Int = 1
@@ -16,23 +18,32 @@ final class IMEAwareTerminalView: TerminalView {
     override var isOpaque: Bool { false }
 
     override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        let nextMarkedText: NSAttributedString?
         if let attributed = string as? NSAttributedString {
-            markedTextStorage = attributed
+            nextMarkedText = attributed
         } else if let plain = string as? String {
-            markedTextStorage = NSAttributedString(string: plain)
+            nextMarkedText = NSAttributedString(string: plain)
         } else if let plain = string as? NSString {
-            markedTextStorage = NSAttributedString(string: plain as String)
+            nextMarkedText = NSAttributedString(string: plain as String)
         } else {
-            markedTextStorage = nil
+            nextMarkedText = nil
         }
+        guard let nextMarkedText, nextMarkedText.length > 0 else {
+            unmarkText()
+            return
+        }
+        markedTextStorage = nextMarkedText
         markedSelection = selectedRange
         updateMarkedTextOverlay()
+        applyCursorVisibilityForComposition()
     }
 
     override func unmarkText() {
         markedTextStorage = nil
         markedSelection = NSRange(location: 0, length: 0)
+        markedOverlayContainer?.isHidden = true
         markedOverlayLabel?.isHidden = true
+        applyCursorVisibilityForComposition()
     }
 
     override func hasMarkedText() -> Bool {
@@ -78,6 +89,7 @@ final class IMEAwareTerminalView: TerminalView {
         if hasMarkedText() {
             updateMarkedTextOverlay()
         }
+        applyCursorVisibilityForComposition()
     }
 
     override func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
@@ -92,12 +104,24 @@ final class IMEAwareTerminalView: TerminalView {
         if hasMarkedText() {
             updateMarkedTextOverlay()
         }
+        applyCursorVisibilityForComposition()
     }
 
-    private func ensureMarkedOverlayLabel() -> NSTextField {
-        if let label = markedOverlayLabel {
-            return label
+    func syncCursorVisibilityForComposition() {
+        applyCursorVisibilityForComposition()
+    }
+
+    private func ensureMarkedOverlayComponents() -> (NSView, NSTextField) {
+        if let container = markedOverlayContainer, let label = markedOverlayLabel {
+            return (container, label)
         }
+        let container = NSView(frame: .zero)
+        container.wantsLayer = true
+        container.layer?.cornerRadius = 3
+        container.layer?.masksToBounds = true
+        container.isHidden = true
+        addSubview(container)
+
         let label = NSTextField(labelWithString: "")
         label.isEditable = false
         label.isBordered = false
@@ -108,31 +132,62 @@ final class IMEAwareTerminalView: TerminalView {
         label.alphaValue = 0.95
         label.font = font
         label.isHidden = true
-        addSubview(label)
+        container.addSubview(label)
+        markedOverlayContainer = container
         markedOverlayLabel = label
-        return label
+        return (container, label)
     }
 
     private func updateMarkedTextOverlay() {
         guard let markedTextStorage, markedTextStorage.length > 0 else {
+            markedOverlayContainer?.isHidden = true
             markedOverlayLabel?.isHidden = true
             return
         }
 
-        let label = ensureMarkedOverlayLabel()
+        let (container, label) = ensureMarkedOverlayComponents()
         let overlayString = NSMutableAttributedString(attributedString: markedTextStorage)
+        let fullRange = NSRange(location: 0, length: overlayString.length)
+        let accentColor = caretColor.withAlphaComponent(0.95)
+        let selectionBackground = opaqueAccentColor(caretColor)
         overlayString.addAttributes([
-            .underlineStyle: NSUnderlineStyle.single.rawValue,
-            .foregroundColor: NSColor.labelColor,
-            .backgroundColor: NSColor.clear,
-        ], range: NSRange(location: 0, length: overlayString.length))
+            .underlineStyle: NSUnderlineStyle.thick.rawValue,
+            .underlineColor: accentColor,
+            .foregroundColor: NSColor.black,
+        ], range: fullRange)
+        if let selectionRange = clampedMarkedSelection(totalLength: overlayString.length) {
+            overlayString.addAttributes([
+                .backgroundColor: selectionBackground,
+                .foregroundColor: NSColor.black,
+            ], range: selectionRange)
+        }
         label.font = font
         label.attributedStringValue = overlayString
         label.sizeToFit()
-        let origin = overlayOrigin(labelSize: label.frame.size)
-        var frame = label.frame
-        frame.origin = origin
-        label.frame = frame.integral
+
+        let horizontalPadding: CGFloat = 0
+        let verticalPadding: CGFloat = 0
+        let labelSize = label.frame.size
+        label.frame = CGRect(
+            x: horizontalPadding,
+            y: verticalPadding,
+            width: labelSize.width,
+            height: labelSize.height
+        ).integral
+        let containerSize = NSSize(
+            width: labelSize.width + (horizontalPadding * 2),
+            height: labelSize.height + (verticalPadding * 2)
+        )
+        let origin = overlayOrigin(labelSize: containerSize)
+        // Keep the opaque preedit background strictly limited to the composing text width.
+        container.layer?.backgroundColor = opaqueAccentColor(caretColor).cgColor
+        container.frame = CGRect(
+            x: origin.x,
+            y: origin.y,
+            width: containerSize.width,
+            height: containerSize.height
+        ).integral
+        container.isHidden = false
         label.isHidden = false
     }
 
@@ -187,6 +242,45 @@ final class IMEAwareTerminalView: TerminalView {
             return gridIMECaretRectInLocalCoordinates()
         }
         return localRect
+    }
+
+    private func applyCursorVisibilityForComposition() {
+        let shouldHideCursor = hasMarkedText()
+        guard shouldHideCursor != cursorHiddenForComposition else {
+            return
+        }
+        cursorHiddenForComposition = shouldHideCursor
+        if shouldHideCursor {
+            getTerminal().hideCursor()
+        } else {
+            getTerminal().showCursor()
+        }
+    }
+
+    private func clampedMarkedSelection(totalLength: Int) -> NSRange? {
+        guard totalLength > 0 else {
+            return nil
+        }
+        guard markedSelection.location != NSNotFound else {
+            return nil
+        }
+        let location = min(max(markedSelection.location, 0), totalLength)
+        let maxLength = max(0, totalLength - location)
+        let length = min(max(markedSelection.length, 0), maxLength)
+        if length > 0 {
+            return NSRange(location: location, length: length)
+        }
+        if location < totalLength {
+            return NSRange(location: location, length: 1)
+        }
+        return NSRange(location: max(0, totalLength - 1), length: 1)
+    }
+
+    private func opaqueAccentColor(_ color: NSColor) -> NSColor {
+        if let rgb = color.usingColorSpace(.deviceRGB) {
+            return rgb.withAlphaComponent(1.0)
+        }
+        return NSColor.systemBlue
     }
 
     private func clampOverlayOrigin(_ origin: CGPoint, labelSize: NSSize) -> CGPoint {
@@ -403,6 +497,7 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
                     paneCols: repaint.paneCols,
                     paneRows: repaint.paneRows
                 )
+                imeTerminal.syncCursorVisibilityForComposition()
             }
             lastRenderedContent = content
             lastCursorX = cursorX
