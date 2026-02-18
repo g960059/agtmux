@@ -136,7 +136,12 @@ enum DaemonUnixClientError: Error {
         switch self {
         case .unavailable, .invalidResponse:
             return true
-        case .status:
+        case .status(let path, let statusCode, _, _):
+            // Forward-compatible snapshot fetch:
+            // older daemons may not expose /v1/snapshot yet.
+            if path == "/v1/snapshot" && statusCode == 404 {
+                return true
+            }
             return false
         }
     }
