@@ -20,6 +20,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -43,6 +45,7 @@ const maxTerminalReadLines = 2000
 const maxTerminalStateBytes = 256 * 1024
 const defaultTerminalStateTTL = 5 * time.Minute
 const defaultTerminalProxySessionTTL = 5 * time.Minute
+const minTerminalStreamCaptureInterval = 70 * time.Millisecond
 const resizePolicySingleClientApply = "single_client_apply"
 const resizePolicyMultiClientSkip = "multi_client_skip"
 const resizePolicyInspectionFallbackSkip = "inspection_fallback_skip"
@@ -101,6 +104,11 @@ type terminalProxySession struct {
 	AttachedSent bool
 	LastContent  string
 	LastSeq      int64
+	LastCursorX  *int
+	LastCursorY  *int
+	LastPaneCols *int
+	LastPaneRows *int
+	LastCapture  time.Time
 }
 
 func NewServer(cfg config.Config) *Server {
@@ -1729,9 +1737,13 @@ func (s *Server) terminalWriteHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if len(decoded) > 0 {
-			cmd = append(cmd, "-H")
-			for _, b := range decoded {
-				cmd = append(cmd, fmt.Sprintf("%02x", b))
+			if literalText, ok := decodeLiteralSendKeysText(decoded); ok {
+				cmd = append(cmd, "-l", literalText)
+			} else {
+				cmd = append(cmd, "-H")
+				for _, b := range decoded {
+					cmd = append(cmd, fmt.Sprintf("%02x", b))
+				}
 			}
 		}
 	}
@@ -1794,7 +1806,8 @@ func (s *Server) terminalStreamHandler(w http.ResponseWriter, r *http.Request) {
 		lines = maxTerminalReadLines
 	}
 	s.pruneExpiredTerminalCaches(time.Now().UTC())
-	cursorStreamID, cursorSeq, _, err := parseCursor(r.URL.Query().Get("cursor"))
+	rawCursor := strings.TrimSpace(r.URL.Query().Get("cursor"))
+	cursorStreamID, cursorSeq, _, err := parseCursor(rawCursor)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, model.ErrCursorInvalid, "invalid cursor")
 		return
@@ -1848,6 +1861,53 @@ func (s *Server) terminalStreamHandler(w http.ResponseWriter, r *http.Request) {
 		s.writeActionResolveError(w, resolveErr)
 		return
 	}
+	frameType := "output"
+	content := ""
+	resetReason := ""
+	if rawCursor != "" {
+		if cursorStreamID != s.streamID {
+			frameType = "reset"
+			resetReason = "cursor_mismatch"
+		} else if session.LastSeq != cursorSeq {
+			frameType = "reset"
+			resetReason = "cursor_discontinuity"
+		}
+	}
+
+	shouldServeCached := frameType == "reset" && rawCursor != "" && !session.LastCapture.IsZero() && now.Sub(session.LastCapture) < minTerminalStreamCaptureInterval
+	if shouldServeCached {
+		content = session.LastContent
+		seq := s.sequence.Add(1)
+		cursor := fmt.Sprintf("%s:%d", s.streamID, seq)
+		session.LastSeq = seq
+		session.UpdatedAt = now
+		if !s.updateTerminalProxySession(sessionID, session) {
+			s.writeError(w, http.StatusNotFound, model.ErrRefNotFound, "terminal session not found")
+			return
+		}
+
+		resp := api.TerminalStreamEnvelope{
+			SchemaVersion: "v1",
+			GeneratedAt:   now,
+			Frame: api.TerminalStreamFrame{
+				FrameType:   frameType,
+				StreamID:    s.streamID,
+				Cursor:      cursor,
+				CursorX:     session.LastCursorX,
+				CursorY:     session.LastCursorY,
+				PaneCols:    session.LastPaneCols,
+				PaneRows:    session.LastPaneRows,
+				SessionID:   sessionID,
+				Target:      session.TargetName,
+				PaneID:      session.PaneID,
+				Content:     content,
+				ResetReason: resetReason,
+			},
+		}
+		s.writeJSON(w, http.StatusOK, resp)
+		return
+	}
+
 	captureOutput, cursorX, cursorY, paneCols, paneRows, runErr := s.capturePaneSnapshotWithCursor(
 		r.Context(),
 		tg,
@@ -1858,23 +1918,23 @@ func (s *Server) terminalStreamHandler(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadGateway, model.ErrTargetUnreachable, "failed to read terminal stream output")
 		return
 	}
-	frameType := "output"
-	content := captureOutput
-	resetReason := ""
-	if rawCursor := strings.TrimSpace(r.URL.Query().Get("cursor")); rawCursor != "" {
-		if cursorStreamID != s.streamID {
-			frameType = "reset"
-			resetReason = "cursor_mismatch"
-		} else if session.LastSeq != cursorSeq {
-			frameType = "reset"
-			resetReason = "cursor_discontinuity"
-		}
+	content = captureOutput
+	clippedCapture := clipTerminalStateContent(captureOutput)
+	if frameType == "output" && session.LastContent == clippedCapture {
+		// No visible diff: return lightweight delta frame to avoid resending full snapshots.
+		frameType = "delta"
+		content = ""
 	}
 
 	seq := s.sequence.Add(1)
 	cursor := fmt.Sprintf("%s:%d", s.streamID, seq)
 	session.LastSeq = seq
-	session.LastContent = clipTerminalStateContent(captureOutput)
+	session.LastContent = clippedCapture
+	session.LastCursorX = cursorX
+	session.LastCursorY = cursorY
+	session.LastPaneCols = paneCols
+	session.LastPaneRows = paneRows
+	session.LastCapture = now
 	session.UpdatedAt = now
 	if !s.updateTerminalProxySession(sessionID, session) {
 		s.writeError(w, http.StatusNotFound, model.ErrRefNotFound, "terminal session not found")
@@ -4755,6 +4815,22 @@ func trimSnapshotToVisibleRows(content string, paneRows *int) string {
 
 func intPtr(v int) *int {
 	return &v
+}
+
+func decodeLiteralSendKeysText(decoded []byte) (string, bool) {
+	if len(decoded) == 0 || !utf8.Valid(decoded) {
+		return "", false
+	}
+	text := string(decoded)
+	for _, r := range text {
+		if r == '\x00' || r == '\x1b' {
+			return "", false
+		}
+		if unicode.IsControl(r) && r != '\n' && r != '\r' && r != '\t' {
+			return "", false
+		}
+	}
+	return text, true
 }
 
 func deriveTerminalDelta(previous, current string) (string, bool) {

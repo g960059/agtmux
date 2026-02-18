@@ -362,6 +362,33 @@ final class AppViewModelTerminalProxyTests: XCTestCase {
         XCTAssertEqual(model.errorMessage, "")
     }
 
+    func testEnqueueInteractiveInputBatchesRapidBytesIntoSingleWrite() async throws {
+        let fixture = try makeModelFixture(
+            streamMode: "output_only",
+            streamContent: "interactive-batched-ok",
+            autoStreamOnSelection: false
+        )
+        let model = fixture.model
+        let pane = makePane(sessionName: "s1", paneID: "%1")
+        model.panes = [pane]
+        model.selectedPane = pane
+
+        model.enqueueInteractiveInput(bytes: Array("a".utf8))
+        model.enqueueInteractiveInput(bytes: Array("b".utf8))
+        model.enqueueInteractiveInput(bytes: Array("c".utf8))
+
+        await waitUntil("batched terminal write", timeout: 2.0) {
+            let log = self.readLog(at: fixture.logURL)
+            return log.contains("terminal write --session term-1 --json --bytes-b64")
+        }
+
+        let log = readLog(at: fixture.logURL)
+        XCTAssertEqual(
+            occurrenceCount(in: log, token: "terminal write --session term-1 --json --bytes-b64"),
+            1
+        )
+    }
+
     private struct ModelFixture {
         let model: AppViewModel
         let logURL: URL

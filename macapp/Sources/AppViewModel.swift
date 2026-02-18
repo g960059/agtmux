@@ -129,6 +129,12 @@ final class AppViewModel: ObservableObject {
         let awaitingKind: String
     }
 
+    private struct InteractiveInputError: LocalizedError {
+        let message: String
+
+        var errorDescription: String? { message }
+    }
+
     private enum PreferenceKey {
         static let uiPrefsVersion = "ui.prefs_version"
         static let viewMode = "ui.view_mode"
@@ -160,6 +166,7 @@ final class AppViewModel: ObservableObject {
             if oldValue?.id != selectedPane?.id {
                 terminalStreamTask?.cancel()
                 if let oldPaneID = oldValue?.id {
+                    cancelBufferedInteractiveInput(for: oldPaneID)
                     Task { [weak self] in
                         guard let self else {
                             return
@@ -301,13 +308,25 @@ final class AppViewModel: ObservableObject {
     private var didBootstrap = false
     private var recoveryInFlight = false
     private var lastRecoveryAttemptAt: Date?
+    private var bufferedInteractiveBytesByPaneID: [String: [UInt8]] = [:]
+    private var bufferedInteractiveFlushTaskByPaneID: [String: Task<Void, Never>] = [:]
+    private var lastInteractiveInputAtByPaneID: [String: Date] = [:]
     private let queueDedupeWindowSeconds: TimeInterval = 30
     private let recoveryCooldownSeconds: TimeInterval = 6
     private let queueLimit = 250
     private let currentUIPrefsVersion = 6
     private let terminalCapabilitiesCacheTTLSeconds: TimeInterval = 60
-    private let terminalStreamPollIntervalSeconds: TimeInterval = 0.20
-    private let terminalStreamLines = 800
+    private let snapshotPollIntervalSeconds: TimeInterval = 2
+    private let snapshotPollIntervalStreamingSeconds: TimeInterval = 4
+    private let terminalStreamPollFastMillis = 90
+    private let terminalStreamPollNormalMillis = 180
+    private let terminalStreamPollIdleMillis = 280
+    private let terminalStreamFastWindowSeconds: TimeInterval = 1.2
+    private let terminalStreamDefaultLines = 160
+    private let terminalStreamMinLines = 120
+    private let terminalStreamMaxLines = 320
+    private let interactiveInputBatchWindowMillis = 12
+    private let interactiveInputBatchChunkBytes = 320
     private let terminalOutputMaxChars = 60_000
 
     init(
@@ -522,10 +541,11 @@ final class AppViewModel: ObservableObject {
                         }
                         if shouldPerformImmediateWriteRefresh(for: pane.id, generation: streamGeneration) {
                             let currentCursor = await terminalSessionController.cursor(for: pane.id)
+                            let lines = currentTerminalStreamLineBudget(for: pane.id)
                             let streamResp = try await client.terminalStream(
                                 sessionID: sessionID,
                                 cursor: currentCursor,
-                                lines: terminalStreamLines
+                                lines: lines
                             )
                             await terminalSessionController.setCursor(streamResp.frame.cursor, for: pane.id)
                             applyTerminalStreamFrame(streamResp.frame, paneID: pane.id)
@@ -533,7 +553,7 @@ final class AppViewModel: ObservableObject {
                                 let followResp = try await client.terminalStream(
                                     sessionID: sessionID,
                                     cursor: streamResp.frame.cursor,
-                                    lines: terminalStreamLines
+                                    lines: lines
                                 )
                                 await terminalSessionController.setCursor(followResp.frame.cursor, for: pane.id)
                                 applyTerminalStreamFrame(followResp.frame, paneID: pane.id)
@@ -609,85 +629,14 @@ final class AppViewModel: ObservableObject {
                     return
                 }
                 let streamGeneration = terminalStreamGeneration
-                let guardOptions = writeGuardOptions(for: pane)
-                if await shouldUseTerminalProxy(for: pane.id) {
-                    do {
-                        let sessionID = try await ensureTerminalProxySession(for: pane, generation: streamGeneration)
-                        guard selectedPane?.id == pane.id else {
-                            return
-                        }
-                        let resp = try await client.terminalWrite(
-                            sessionID: sessionID,
-                            text: hasText ? inputText : nil,
-                            key: hasKey ? inputKey : nil,
-                            bytes: hasBytes ? inputBytes : nil,
-                            enter: false,
-                            paste: false
-                        )
-                        if resp.resultCode != "completed" {
-                            let reason = resp.errorCode ?? "unknown"
-                            errorMessage = "terminal-write failed: \(reason)"
-                            return
-                        }
-                        // Avoid a synchronous follow-up stream roundtrip while auto-stream is active.
-                        // This keeps keypress latency low in embedded terminal mode.
-                        if shouldPerformImmediateWriteRefresh(for: pane.id, generation: streamGeneration) {
-                            let currentCursor = await terminalSessionController.cursor(for: pane.id)
-                            let streamResp = try await client.terminalStream(
-                                sessionID: sessionID,
-                                cursor: currentCursor,
-                                lines: terminalStreamLines
-                            )
-                            await terminalSessionController.setCursor(streamResp.frame.cursor, for: pane.id)
-                            applyTerminalStreamFrame(streamResp.frame, paneID: pane.id)
-                            if streamResp.frame.frameType == "attached" {
-                                let followResp = try await client.terminalStream(
-                                    sessionID: sessionID,
-                                    cursor: streamResp.frame.cursor,
-                                    lines: terminalStreamLines
-                                )
-                                await terminalSessionController.setCursor(followResp.frame.cursor, for: pane.id)
-                                applyTerminalStreamFrame(followResp.frame, paneID: pane.id)
-                            }
-                        }
-                        await terminalSessionController.recordSuccess(for: pane.id)
-                    } catch {
-                        if error is CancellationError {
-                            throw error
-                        }
-                        let outcome = await terminalSessionController.recordFailure(for: pane.id)
-                        if shouldResetTerminalProxySession(error: error),
-                           let staleSessionID = await terminalSessionController.clearProxySession(for: pane.id) {
-                            await terminalSessionController.clearCursor(for: pane.id)
-                            await detachTerminalProxySession(sessionID: staleSessionID)
-                        }
-                        if outcome.didEnterDegradedMode {
-                            infoMessage = "interactive terminal degraded to snapshot mode"
-                        }
-                        throw error
-                    }
-                } else if hasText {
-                    let requestRef = "macapp-send-key-\(UUID().uuidString)"
-                    _ = try await client.sendText(
-                        target: pane.identity.target,
-                        paneID: pane.identity.paneID,
-                        text: inputText,
-                        requestRef: requestRef,
-                        enter: false,
-                        paste: false,
-                        ifRuntime: guardOptions.ifRuntime,
-                        ifState: guardOptions.ifState,
-                        ifUpdatedWithin: guardOptions.ifUpdatedWithin,
-                        forceStale: guardOptions.forceStale
-                    )
-                    await refresh()
-                } else if hasBytes {
-                    errorMessage = "interactive byte input requires terminal proxy support"
-                    return
-                } else {
-                    errorMessage = "interactive key input requires terminal proxy support"
-                    return
-                }
+                try await performInteractiveInputCore(
+                    pane: pane,
+                    inputText: inputText,
+                    inputKey: inputKey,
+                    inputBytes: inputBytes,
+                    streamGeneration: streamGeneration,
+                    performImmediateRefresh: true
+                )
                 errorMessage = ""
             } catch is CancellationError {
                 errorMessage = ""
@@ -703,6 +652,143 @@ final class AppViewModel: ObservableObject {
             return
         }
         performInteractiveInput(text: nil, key: nil, bytes: bytes)
+    }
+
+    func enqueueInteractiveInput(bytes: [UInt8]) {
+        guard !bytes.isEmpty else {
+            return
+        }
+        guard let pane = selectedPane else {
+            return
+        }
+        guard supportsNativeTmuxTerminal(for: pane) else {
+            return
+        }
+
+        let paneID = pane.id
+        markInteractiveInput(for: paneID)
+        bufferedInteractiveBytesByPaneID[paneID, default: []].append(contentsOf: bytes)
+        guard bufferedInteractiveFlushTaskByPaneID[paneID] == nil else {
+            return
+        }
+        let streamGeneration = terminalStreamGeneration
+        let delay = interactiveInputBatchWindowMillis
+        bufferedInteractiveFlushTaskByPaneID[paneID] = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(delay))
+            await self?.flushBufferedInteractiveInput(for: paneID, generation: streamGeneration)
+        }
+    }
+
+    private func performInteractiveInputCore(
+        pane: PaneItem,
+        inputText: String,
+        inputKey: String,
+        inputBytes: [UInt8],
+        streamGeneration: Int,
+        performImmediateRefresh: Bool
+    ) async throws {
+        let hasText = !inputText.isEmpty
+        let hasKey = !inputKey.isEmpty
+        let hasBytes = !inputBytes.isEmpty
+        let guardOptions = writeGuardOptions(for: pane)
+        if await shouldUseTerminalProxy(for: pane.id) {
+            do {
+                let sessionID = try await ensureTerminalProxySession(for: pane, generation: streamGeneration)
+                guard selectedPane?.id == pane.id else {
+                    return
+                }
+                let resp = try await client.terminalWrite(
+                    sessionID: sessionID,
+                    text: hasText ? inputText : nil,
+                    key: hasKey ? inputKey : nil,
+                    bytes: hasBytes ? inputBytes : nil,
+                    enter: false,
+                    paste: false
+                )
+                if resp.resultCode != "completed" {
+                    let reason = resp.errorCode ?? "unknown"
+                    throw InteractiveInputError(message: "terminal-write failed: \(reason)")
+                }
+                markInteractiveInput(for: pane.id)
+                if performImmediateRefresh && shouldPerformImmediateWriteRefresh(for: pane.id, generation: streamGeneration) {
+                    let currentCursor = await terminalSessionController.cursor(for: pane.id)
+                    let lines = currentTerminalStreamLineBudget(for: pane.id)
+                    let streamResp = try await client.terminalStream(
+                        sessionID: sessionID,
+                        cursor: currentCursor,
+                        lines: lines
+                    )
+                    await terminalSessionController.setCursor(streamResp.frame.cursor, for: pane.id)
+                    applyTerminalStreamFrame(streamResp.frame, paneID: pane.id)
+                    if streamResp.frame.frameType == "attached" {
+                        let followResp = try await client.terminalStream(
+                            sessionID: sessionID,
+                            cursor: streamResp.frame.cursor,
+                            lines: lines
+                        )
+                        await terminalSessionController.setCursor(followResp.frame.cursor, for: pane.id)
+                        applyTerminalStreamFrame(followResp.frame, paneID: pane.id)
+                    }
+                }
+                await terminalSessionController.recordSuccess(for: pane.id)
+                return
+            } catch {
+                if error is CancellationError {
+                    throw error
+                }
+                let outcome = await terminalSessionController.recordFailure(for: pane.id)
+                if shouldResetTerminalProxySession(error: error),
+                   let staleSessionID = await terminalSessionController.clearProxySession(for: pane.id) {
+                    await terminalSessionController.clearCursor(for: pane.id)
+                    await detachTerminalProxySession(sessionID: staleSessionID)
+                }
+                if outcome.didEnterDegradedMode {
+                    infoMessage = "interactive terminal degraded to snapshot mode"
+                }
+                throw error
+            }
+        }
+
+        if hasText {
+            let requestRef = "macapp-send-key-\(UUID().uuidString)"
+            _ = try await client.sendText(
+                target: pane.identity.target,
+                paneID: pane.identity.paneID,
+                text: inputText,
+                requestRef: requestRef,
+                enter: false,
+                paste: false,
+                ifRuntime: guardOptions.ifRuntime,
+                ifState: guardOptions.ifState,
+                ifUpdatedWithin: guardOptions.ifUpdatedWithin,
+                forceStale: guardOptions.forceStale
+            )
+            await refresh()
+            return
+        }
+        if hasBytes {
+            throw InteractiveInputError(message: "interactive byte input requires terminal proxy support")
+        }
+        throw InteractiveInputError(message: "interactive key input requires terminal proxy support")
+    }
+
+    private func performInteractiveInputBytes(
+        pane: PaneItem,
+        bytes: [UInt8],
+        generation: Int,
+        performImmediateRefresh: Bool
+    ) async throws {
+        guard !bytes.isEmpty else {
+            return
+        }
+        try await performInteractiveInputCore(
+            pane: pane,
+            inputText: "",
+            inputKey: "",
+            inputBytes: bytes,
+            streamGeneration: generation,
+            performImmediateRefresh: performImmediateRefresh
+        )
     }
 
     func performTerminalResize(cols: Int, rows: Int) {
@@ -1295,9 +1381,67 @@ final class AppViewModel: ObservableObject {
         pollingTask = Task {
             while !Task.isCancelled {
                 await refresh()
-                try? await Task.sleep(for: .seconds(2))
+                let interval = currentSnapshotPollInterval()
+                try? await Task.sleep(for: .milliseconds(Int(interval * 1000)))
             }
         }
+    }
+
+    private func currentSnapshotPollInterval() -> TimeInterval {
+        if autoStreamOnSelection, selectedPane != nil {
+            return snapshotPollIntervalStreamingSeconds
+        }
+        return snapshotPollIntervalSeconds
+    }
+
+    private func flushBufferedInteractiveInput(for paneID: String, generation: Int) async {
+        defer {
+            bufferedInteractiveFlushTaskByPaneID[paneID] = nil
+        }
+        guard generation == terminalStreamGeneration else {
+            bufferedInteractiveBytesByPaneID.removeValue(forKey: paneID)
+            return
+        }
+        guard selectedPane?.id == paneID else {
+            bufferedInteractiveBytesByPaneID.removeValue(forKey: paneID)
+            return
+        }
+        guard let pane = panes.first(where: { $0.id == paneID }) else {
+            bufferedInteractiveBytesByPaneID.removeValue(forKey: paneID)
+            return
+        }
+        var payload = bufferedInteractiveBytesByPaneID.removeValue(forKey: paneID) ?? []
+        guard !payload.isEmpty else {
+            return
+        }
+
+        do {
+            while !payload.isEmpty {
+                guard generation == terminalStreamGeneration, selectedPane?.id == paneID else {
+                    return
+                }
+                let chunkCount = min(payload.count, interactiveInputBatchChunkBytes)
+                let chunk = Array(payload.prefix(chunkCount))
+                payload.removeFirst(chunkCount)
+                try await performInteractiveInputBytes(
+                    pane: pane,
+                    bytes: chunk,
+                    generation: generation,
+                    performImmediateRefresh: false
+                )
+            }
+            errorMessage = ""
+        } catch is CancellationError {
+            return
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func cancelBufferedInteractiveInput(for paneID: String) {
+        bufferedInteractiveFlushTaskByPaneID[paneID]?.cancel()
+        bufferedInteractiveFlushTaskByPaneID.removeValue(forKey: paneID)
+        bufferedInteractiveBytesByPaneID.removeValue(forKey: paneID)
     }
 
     private func refresh() async {
@@ -1327,11 +1471,20 @@ final class AppViewModel: ObservableObject {
     private func applySnapshot(_ snapshot: DashboardSnapshot) {
         observeTransitions(newPanes: snapshot.panes, now: Date())
         updateSessionStableOrder(with: snapshot.panes)
-        targets = snapshot.targets
-        sessions = snapshot.sessions
-        windows = snapshot.windows
-        panes = snapshot.panes
+        if targets != snapshot.targets {
+            targets = snapshot.targets
+        }
+        if sessions != snapshot.sessions {
+            sessions = snapshot.sessions
+        }
+        if windows != snapshot.windows {
+            windows = snapshot.windows
+        }
+        if panes != snapshot.panes {
+            panes = snapshot.panes
+        }
         let paneIDs = Set(panes.map(\.id))
+        lastInteractiveInputAtByPaneID = lastInteractiveInputAtByPaneID.filter { paneIDs.contains($0.key) }
         Task { [weak self] in
             guard let self else {
                 return
@@ -1342,8 +1495,12 @@ final class AppViewModel: ObservableObject {
             }
         }
         if let current = selectedPane {
-            selectedPane = panes.first(where: { $0.id == current.id })
-            if selectedPane == nil {
+            if let nextSelected = panes.first(where: { $0.id == current.id }) {
+                if nextSelected != current {
+                    selectedPane = nextSelected
+                }
+            } else {
+                selectedPane = nil
                 infoMessage = "選択中 pane が消えました。再選択してください。"
             }
         }
@@ -1644,6 +1801,30 @@ final class AppViewModel: ObservableObject {
         return true
     }
 
+    private func currentTerminalStreamLineBudget(for _: String) -> Int {
+        let baseRows = max(0, terminalPaneRows ?? 0)
+        let baseline = baseRows > 0 ? baseRows + 48 : terminalStreamDefaultLines
+        return min(max(baseline, terminalStreamMinLines), terminalStreamMaxLines)
+    }
+
+    private func markInteractiveInput(for paneID: String, now: Date = Date()) {
+        lastInteractiveInputAtByPaneID[paneID] = now
+    }
+
+    private func currentTerminalStreamPollIntervalMillis(for paneID: String, now: Date = Date()) -> Int {
+        if let lastInput = lastInteractiveInputAtByPaneID[paneID],
+           now.timeIntervalSince(lastInput) <= terminalStreamFastWindowSeconds {
+            return terminalStreamPollFastMillis
+        }
+        if let pane = panes.first(where: { $0.id == paneID }) {
+            let category = displayCategory(for: pane)
+            if category == "running" || category == "attention" {
+                return terminalStreamPollNormalMillis
+            }
+        }
+        return terminalStreamPollIdleMillis
+    }
+
     private func restartTerminalStreamForSelectedPane() {
         terminalStreamTask?.cancel()
         guard let pane = selectedPane else {
@@ -1672,17 +1853,18 @@ final class AppViewModel: ObservableObject {
                 if await shouldUseTerminalProxy(for: paneID) {
                     let sessionID = try await ensureTerminalProxySession(for: pane, generation: generation)
                     let cursor = await terminalSessionController.cursor(for: paneID)
+                    let lines = currentTerminalStreamLineBudget(for: paneID)
                     let firstResp = try await client.terminalStream(
                         sessionID: sessionID,
                         cursor: cursor,
-                        lines: terminalStreamLines
+                        lines: lines
                     )
                     var frame = firstResp.frame
                     if frame.frameType == "attached" {
                         let followResp = try await client.terminalStream(
                             sessionID: sessionID,
                             cursor: frame.cursor,
-                            lines: terminalStreamLines
+                            lines: lines
                         )
                         frame = followResp.frame
                     }
@@ -1698,7 +1880,7 @@ final class AppViewModel: ObservableObject {
                         target: pane.identity.target,
                         paneID: pane.identity.paneID,
                         cursor: cursor,
-                        lines: terminalStreamLines
+                        lines: currentTerminalStreamLineBudget(for: paneID)
                     )
                     guard generation == terminalStreamGeneration, selectedPane?.id == paneID else {
                         return
@@ -1707,7 +1889,8 @@ final class AppViewModel: ObservableObject {
                     applyTerminalFrame(resp.frame, paneID: paneID)
                     await terminalSessionController.recordSuccess(for: paneID)
                 }
-                try await Task.sleep(for: .milliseconds(Int(terminalStreamPollIntervalSeconds * 1000)))
+                let waitMillis = currentTerminalStreamPollIntervalMillis(for: paneID)
+                try await Task.sleep(for: .milliseconds(waitMillis))
             } catch {
                 if error is CancellationError || Task.isCancelled || generation != terminalStreamGeneration {
                     return
@@ -1768,6 +1951,10 @@ final class AppViewModel: ObservableObject {
             return
         case "output":
             setOutputPreviewIfChanged(frame.content ?? "")
+        case "delta":
+            if let delta = frame.content, !delta.isEmpty {
+                setOutputPreviewIfChanged(outputPreview + delta)
+            }
         case "reset":
             setOutputPreviewIfChanged(frame.content ?? "")
         case "error":

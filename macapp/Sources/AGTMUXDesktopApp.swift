@@ -363,7 +363,7 @@ private struct CockpitView: View {
                             paneRows: model.terminalPaneRows,
                             interactiveInputEnabled: model.interactiveTerminalInputEnabled,
                             onInputBytes: { bytes in
-                                model.performInteractiveInput(bytes: bytes)
+                                model.enqueueInteractiveInput(bytes: bytes)
                             },
                             onResize: { cols, rows in
                                 model.performTerminalResize(cols: cols, rows: rows)

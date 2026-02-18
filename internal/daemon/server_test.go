@@ -3359,8 +3359,71 @@ func TestTerminalWriteAcceptsBytesBase64Payload(t *testing.T) {
 	}
 	lastCall := runner.calls[len(runner.calls)-1]
 	got := strings.Join(lastCall.args, " ")
-	if got != "send-keys -t %1 -H 2f e3 81 82" {
-		t.Fatalf("expected hex send-keys call, got %q", got)
+	if got != "send-keys -t %1 -l /あ" {
+		t.Fatalf("expected literal send-keys call, got %q", got)
+	}
+}
+
+func TestTerminalWriteBytesFallsBackToHexForControlSequences(t *testing.T) {
+	runner := &scriptedRunner{}
+	srv, store := newAPITestServer(t, runner)
+	seedTarget(t, store, "t1", "t1")
+	now := time.Now().UTC()
+	pid := int64(9112)
+	seedPaneRuntimeState(t, store,
+		model.Pane{
+			TargetID:    "t1",
+			PaneID:      "%1",
+			SessionName: "s1",
+			WindowID:    "@1",
+			WindowName:  "w1",
+			CurrentCmd:  "codex",
+			UpdatedAt:   now,
+		},
+		model.Runtime{
+			RuntimeID:        "rt-1",
+			TargetID:         "t1",
+			PaneID:           "%1",
+			TmuxServerBootID: "boot-1",
+			PaneEpoch:        1,
+			AgentType:        "codex",
+			PID:              &pid,
+			StartedAt:        now,
+		},
+		model.StateRow{
+			TargetID:     "t1",
+			PaneID:       "%1",
+			RuntimeID:    "rt-1",
+			State:        model.StateIdle,
+			ReasonCode:   "idle",
+			Confidence:   "high",
+			StateVersion: 1,
+			LastSeenAt:   now,
+			UpdatedAt:    now,
+		},
+	)
+
+	attachRec := doJSONRequest(t, srv.httpSrv.Handler, http.MethodPost, "/v1/terminal/attach", map[string]any{
+		"target":  "t1",
+		"pane_id": "%1",
+	})
+	if attachRec.Code != http.StatusOK {
+		t.Fatalf("attach expected 200, got %d body=%s", attachRec.Code, attachRec.Body.String())
+	}
+	attachResp := decodeJSON[api.TerminalAttachResponse](t, attachRec)
+
+	payload := []byte{0x1b, '[', 'A'}
+	writeRec := doJSONRequest(t, srv.httpSrv.Handler, http.MethodPost, "/v1/terminal/write", map[string]any{
+		"session_id": attachResp.SessionID,
+		"bytes_b64":  base64.StdEncoding.EncodeToString(payload),
+	})
+	if writeRec.Code != http.StatusOK {
+		t.Fatalf("write expected 200, got %d body=%s", writeRec.Code, writeRec.Body.String())
+	}
+	lastCall := runner.calls[len(runner.calls)-1]
+	got := strings.Join(lastCall.args, " ")
+	if got != "send-keys -t %1 -H 1b 5b 41" {
+		t.Fatalf("expected hex send-keys fallback, got %q", got)
 	}
 }
 
