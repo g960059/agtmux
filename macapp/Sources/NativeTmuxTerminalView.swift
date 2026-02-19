@@ -1,4 +1,5 @@
 import AppKit
+import QuartzCore
 import SwiftTerm
 import SwiftUI
 
@@ -457,11 +458,14 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
         private var pendingPaneCols: Int?
         private var pendingPaneRows: Int?
         private var holdRepaintWhileScrolled = false
+        private var renderWorkItem: DispatchWorkItem?
+        private var lastRenderAt: CFTimeInterval = 0
         private var interactiveInputEnabled = true
         private var didConfigureAppearance = false
         private var appearanceModeIsDark = true
         private var paletteVariant: PaletteVariant?
         private let maxCachedLines = 2400
+        private let minimumRenderInterval: CFTimeInterval = 1.0 / 60.0
 
         init(
             onInputBytes: @escaping ([UInt8]) -> Void,
@@ -488,6 +492,9 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
             pendingPaneCols = nil
             pendingPaneRows = nil
             holdRepaintWhileScrolled = false
+            renderWorkItem?.cancel()
+            renderWorkItem = nil
+            lastRenderAt = 0
             paletteVariant = nil
         }
 
@@ -519,6 +526,11 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
             pendingPaneCols = paneCols
             pendingPaneRows = paneRows
             let paneID = pane.identity.paneID.trimmingCharacters(in: .whitespacesAndNewlines)
+            let paneSwitched = paneID != currentPaneID
+            if paneSwitched {
+                renderWorkItem?.cancel()
+                renderWorkItem = nil
+            }
             if paneID != currentPaneID {
                 currentPaneID = paneID
                 lastRenderedContent = ""
@@ -531,15 +543,55 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
                 resetTerminal(terminal)
                 updateFocusIfNeeded(terminal: terminal)
             }
-            renderIfNeeded(
+            scheduleRender(force: paneSwitched)
+        }
+
+        private func scheduleRender(force: Bool) {
+            guard let terminal = terminalView else {
+                return
+            }
+            if force {
+                renderWorkItem?.cancel()
+                renderWorkItem = nil
+                performRenderNow(terminal: terminal, force: true)
+                return
+            }
+            let now = CACurrentMediaTime()
+            let elapsed = now - lastRenderAt
+            if elapsed >= minimumRenderInterval, renderWorkItem == nil {
+                performRenderNow(terminal: terminal, force: false)
+                return
+            }
+            if renderWorkItem != nil {
+                return
+            }
+            let delay = max(0, minimumRenderInterval - elapsed)
+            let item = DispatchWorkItem { [weak self] in
+                guard let self else {
+                    return
+                }
+                self.renderWorkItem = nil
+                guard let terminal = self.terminalView else {
+                    return
+                }
+                self.performRenderNow(terminal: terminal, force: false)
+            }
+            renderWorkItem = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+        }
+
+        private func performRenderNow(terminal: TerminalView, force: Bool) {
+            if renderIfNeeded(
                 terminal: terminal,
-                content: normalizedContent,
-                cursorX: cursorX,
-                cursorY: cursorY,
-                paneCols: paneCols,
-                paneRows: paneRows,
-                force: false
-            )
+                content: pendingContent,
+                cursorX: pendingCursorX,
+                cursorY: pendingCursorY,
+                paneCols: pendingPaneCols,
+                paneRows: pendingPaneRows,
+                force: force
+            ) {
+                lastRenderAt = CACurrentMediaTime()
+            }
         }
 
         private func renderIfNeeded(
@@ -550,15 +602,15 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
             paneCols: Int?,
             paneRows: Int?,
             force: Bool
-        ) {
+        ) -> Bool {
             let contentChanged = content != lastRenderedContent
             let cursorChanged = cursorX != lastCursorX || cursorY != lastCursorY
             let paneSizeChanged = paneCols != lastPaneCols || paneRows != lastPaneRows
             guard force || contentChanged || cursorChanged || paneSizeChanged else {
-                return
+                return false
             }
             if holdRepaintWhileScrolled && !force {
-                return
+                return false
             }
 
             if contentChanged {
@@ -604,6 +656,7 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
             lastCursorY = cursorY
             lastPaneCols = paneCols
             lastPaneRows = paneRows
+            return true
         }
 
         private func normalizedTerminalText(_ raw: String) -> String {
@@ -1107,17 +1160,7 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
             }
             if holdRepaintWhileScrolled {
                 holdRepaintWhileScrolled = false
-                if let terminalView {
-                    renderIfNeeded(
-                        terminal: terminalView,
-                        content: pendingContent,
-                        cursorX: pendingCursorX,
-                        cursorY: pendingCursorY,
-                        paneCols: pendingPaneCols,
-                        paneRows: pendingPaneRows,
-                        force: true
-                    )
-                }
+                scheduleRender(force: true)
             }
             onInputBytes(Array(data))
         }
@@ -1127,17 +1170,7 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
             if atBottom {
                 if holdRepaintWhileScrolled {
                     holdRepaintWhileScrolled = false
-                    if let terminalView {
-                        renderIfNeeded(
-                            terminal: terminalView,
-                            content: pendingContent,
-                            cursorX: pendingCursorX,
-                            cursorY: pendingCursorY,
-                            paneCols: pendingPaneCols,
-                            paneRows: pendingPaneRows,
-                            force: true
-                        )
-                    }
+                    scheduleRender(force: true)
                 }
                 return
             }

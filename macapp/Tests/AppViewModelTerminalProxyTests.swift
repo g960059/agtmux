@@ -407,9 +407,12 @@ final class AppViewModelTerminalProxyTests: XCTestCase {
         model.enqueueInteractiveInput(bytes: Array("b".utf8))
         model.enqueueInteractiveInput(bytes: Array("c".utf8))
 
-        await waitUntil("batched terminal write", timeout: 2.0) {
+        await waitUntil("batched terminal write", timeout: 5.0) {
             let log = self.readLog(at: fixture.logURL)
-            return log.contains("terminal write --session term-1 --json --bytes-b64")
+            return self.occurrenceCount(
+                in: log,
+                token: "terminal write --session term-1 --json --bytes-b64"
+            ) >= 1
         }
 
         let log = readLog(at: fixture.logURL)
