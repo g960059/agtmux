@@ -1220,6 +1220,75 @@ func TestPanesUnknownDefaultsAndNotFoundTarget(t *testing.T) {
 	}
 }
 
+func TestListPanesIncludesStateEngineV2ShadowFields(t *testing.T) {
+	runner := &stubRunner{}
+	srv, store := newAPITestServer(t, runner)
+	now := time.Now().UTC()
+	seedTarget(t, store, "t1", "t1")
+	pid := int64(4444)
+	seedPaneRuntimeState(t, store,
+		model.Pane{
+			TargetID:    "t1",
+			PaneID:      "%1",
+			SessionName: "s1",
+			WindowID:    "@1",
+			WindowName:  "w1",
+			CurrentCmd:  "codex",
+			UpdatedAt:   now,
+		},
+		model.Runtime{
+			RuntimeID:        "rt-v2-1",
+			TargetID:         "t1",
+			PaneID:           "%1",
+			TmuxServerBootID: "boot",
+			PaneEpoch:        1,
+			AgentType:        "codex",
+			PID:              &pid,
+			StartedAt:        now,
+		},
+		model.StateRow{
+			TargetID:      "t1",
+			PaneID:        "%1",
+			RuntimeID:     "rt-v2-1",
+			State:         model.StateRunning,
+			ReasonCode:    "agent_turn_started",
+			Confidence:    "high",
+			StateVersion:  1,
+			StateSource:   model.SourceNotify,
+			LastEventType: "agent_turn_started",
+			LastSeenAt:    now,
+			UpdatedAt:     now,
+		},
+	)
+	rec := doJSONRequest(t, srv.httpSrv.Handler, http.MethodGet, "/v1/panes?target=t1", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	resp := decodeJSON[api.ListEnvelope[api.PaneItem]](t, rec)
+	if len(resp.Items) != 1 {
+		t.Fatalf("expected one pane item, got %+v", resp.Items)
+	}
+	item := resp.Items[0]
+	if item.StateEngineVer != "v2-shadow" {
+		t.Fatalf("expected v2 shadow marker, got %+v", item)
+	}
+	if item.ProviderV2 != "codex" {
+		t.Fatalf("expected provider_v2=codex, got %+v", item)
+	}
+	if item.ActivityStateV2 == "" {
+		t.Fatalf("expected activity_state_v2, got %+v", item)
+	}
+	if item.EvidenceTraceID == "" {
+		t.Fatalf("expected evidence_trace_id, got %+v", item)
+	}
+	if resp.Summary.ByStateV2[item.ActivityStateV2] == 0 {
+		t.Fatalf("expected summary by_state_v2 to include %q, got %+v", item.ActivityStateV2, resp.Summary.ByStateV2)
+	}
+	if resp.Summary.ByProviderV2["codex"] == 0 {
+		t.Fatalf("expected summary by_provider_v2 codex count, got %+v", resp.Summary.ByProviderV2)
+	}
+}
+
 func TestAttachActionIdempotent(t *testing.T) {
 	runner := &stubRunner{}
 	srv, store := newAPITestServer(t, runner)

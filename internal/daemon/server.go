@@ -31,6 +31,8 @@ import (
 	"github.com/g960059/agtmux/internal/db"
 	"github.com/g960059/agtmux/internal/ingest"
 	"github.com/g960059/agtmux/internal/model"
+	"github.com/g960059/agtmux/internal/provideradapters"
+	"github.com/g960059/agtmux/internal/stateengine"
 	"github.com/g960059/agtmux/internal/target"
 	"github.com/g960059/agtmux/internal/tmuxfmt"
 )
@@ -64,6 +66,7 @@ type Server struct {
 	executor         *target.Executor
 	engine           *ingest.Engine
 	codexEnricher    *codexSessionEnricher
+	stateEngine      *stateengine.Engine
 	streamID         string
 	sequence         atomic.Int64
 	mu               sync.Mutex
@@ -140,6 +143,7 @@ func NewServerWithDeps(cfg config.Config, store *db.Store, executor *target.Exec
 		claudeHistoryTTL: defaultClaudeHistoryCacheTTL,
 		claudePreview:    map[string]claudePreviewCacheEntry{},
 		claudePreviewTTL: defaultClaudePreviewCacheTTL,
+		stateEngine:      stateengine.NewEngine(provideradapters.DefaultRegistry()),
 		snapshotTTL:      defaultActionSnapshotTTL,
 		httpSrv: &http.Server{
 			Handler:           mux,
@@ -2849,6 +2853,9 @@ func (s *Server) buildPaneItems(ctx context.Context, targets []model.Target) ([]
 		ByTarget:             map[string]int{},
 		ByCategory:           map[string]int{},
 		BySessionLabelSource: map[string]int{},
+		ByStateV2:            map[string]int{},
+		ByProviderV2:         map[string]int{},
+		BySourceV2:           map[string]int{},
 	}
 	items := make([]api.PaneItem, 0, len(panes))
 	presentationNow := time.Now().UTC()
@@ -2971,6 +2978,41 @@ func (s *Server) buildPaneItems(ctx context.Context, targets []model.Target) ([]
 			v := lastInteractionAt.Format(time.RFC3339Nano)
 			lastInteractionAtStr = &v
 		}
+		stateV2 := ""
+		activityConfV2 := 0.0
+		activitySrcV2 := ""
+		activityReasonsV2 := []string(nil)
+		providerV2 := ""
+		providerConfV2 := 0.0
+		evidenceTraceID := ""
+		if s.stateEngine != nil {
+			eval := s.stateEngine.Evaluate(stateengine.PaneMeta{
+				TargetID:          p.TargetID,
+				PaneID:            p.PaneID,
+				RuntimeID:         runtimeID,
+				AgentType:         strings.TrimSpace(agentType),
+				CurrentCmd:        strings.TrimSpace(p.CurrentCmd),
+				PaneTitle:         strings.TrimSpace(p.PaneTitle),
+				SessionLabel:      strings.TrimSpace(sessionLabel),
+				RawState:          strings.TrimSpace(state),
+				RawReasonCode:     strings.TrimSpace(reason),
+				RawConfidence:     strings.ToLower(strings.TrimSpace(confidence)),
+				StateSource:       strings.ToLower(strings.TrimSpace(stateSource)),
+				LastEventType:     strings.TrimSpace(lastEventType),
+				LastEventAt:       st.LastEventAt,
+				LastInteractionAt: lastInteractionAt,
+				UpdatedAt:         updatedAt.UTC(),
+			}, presentationNow)
+			stateV2 = eval.ActivityState
+			activityConfV2 = eval.ActivityConfidence
+			activitySrcV2 = eval.ActivitySource
+			if len(eval.ActivityReasons) > 0 {
+				activityReasonsV2 = append([]string(nil), eval.ActivityReasons...)
+			}
+			providerV2 = eval.Provider
+			providerConfV2 = eval.ProviderConfidence
+			evidenceTraceID = eval.EvidenceTraceID
+		}
 		item := api.PaneItem{
 			Identity: api.PaneIdentity{
 				Target:      targetName,
@@ -2997,6 +3039,14 @@ func (s *Server) buildPaneItems(ctx context.Context, targets []model.Target) ([]
 			SessionLabel:    sessionLabel,
 			SessionLabelSrc: sessionLabelSource,
 			LastInputAt:     lastInteractionAtStr,
+			StateEngineVer:  "v2-shadow",
+			ProviderV2:      providerV2,
+			ProviderConfV2:  providerConfV2,
+			ActivityStateV2: stateV2,
+			ActivityConfV2:  activityConfV2,
+			ActivitySrcV2:   activitySrcV2,
+			ActivityWhyV2:   activityReasonsV2,
+			EvidenceTraceID: evidenceTraceID,
 			UpdatedAt:       updatedAt.Format(time.RFC3339Nano),
 		}
 		items = append(items, item)
@@ -3006,6 +3056,15 @@ func (s *Server) buildPaneItems(ctx context.Context, targets []model.Target) ([]
 		summary.ByCategory[displayCategory]++
 		if sessionLabelSource != "" {
 			summary.BySessionLabelSource[sessionLabelSource]++
+		}
+		if stateV2 != "" {
+			summary.ByStateV2[stateV2]++
+		}
+		if providerV2 != "" {
+			summary.ByProviderV2[providerV2]++
+		}
+		if activitySrcV2 != "" {
+			summary.BySourceV2[activitySrcV2]++
 		}
 	}
 	return items, summary, nil

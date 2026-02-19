@@ -58,6 +58,9 @@ type ListSummary struct {
 	ByTarget             map[string]int `json:"by_target,omitempty"`
 	ByCategory           map[string]int `json:"by_category,omitempty"`
 	BySessionLabelSource map[string]int `json:"by_session_label_source,omitempty"`
+	ByStateV2            map[string]int `json:"by_state_v2,omitempty"`
+	ByProviderV2         map[string]int `json:"by_provider_v2,omitempty"`
+	BySourceV2           map[string]int `json:"by_source_v2,omitempty"`
 }
 
 type PaneIdentity struct {
@@ -88,6 +91,14 @@ type PaneItem struct {
 	SessionLabel    string       `json:"session_label,omitempty"`
 	SessionLabelSrc string       `json:"session_label_source,omitempty"`
 	LastInputAt     *string      `json:"last_interaction_at,omitempty"`
+	StateEngineVer  string       `json:"state_engine_version,omitempty"`
+	ProviderV2      string       `json:"provider_v2,omitempty"`
+	ProviderConfV2  float64      `json:"provider_confidence_v2,omitempty"`
+	ActivityStateV2 string       `json:"activity_state_v2,omitempty"`
+	ActivityConfV2  float64      `json:"activity_confidence_v2,omitempty"`
+	ActivitySrcV2   string       `json:"activity_source_v2,omitempty"`
+	ActivityWhyV2   []string     `json:"activity_reasons_v2,omitempty"`
+	EvidenceTraceID string       `json:"evidence_trace_id,omitempty"`
 	UpdatedAt       string       `json:"updated_at"`
 }
 
