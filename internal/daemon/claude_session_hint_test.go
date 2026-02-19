@@ -238,3 +238,112 @@ func TestAssignClaudeWorkspaceHintsToProbesUsesTemporalAffinity(t *testing.T) {
 		t.Fatalf("rt-old hint=%q", got)
 	}
 }
+
+func TestGetClaudeHistoryRecordsUsesMtimeCache(t *testing.T) {
+	home := t.TempDir()
+	workspace := filepath.Join(home, "repo")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+	claudeDir := filepath.Join(home, ".claude")
+	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+		t.Fatalf("mkdir claude dir: %v", err)
+	}
+	historyPath := filepath.Join(claudeDir, "history.jsonl")
+	sessionID := "session-1"
+	writeHistory := func(display string, ts int64) {
+		line := fmt.Sprintf(
+			`{"sessionId":"%s","project":"%s","display":"%s","timestamp":%d}`+"\n",
+			sessionID,
+			workspace,
+			display,
+			ts,
+		)
+		if err := os.WriteFile(historyPath, []byte(line), 0o644); err != nil {
+			t.Fatalf("write history: %v", err)
+		}
+	}
+	writeHistory("first display", time.Now().UTC().Add(-2*time.Minute).UnixMilli())
+	info, err := os.Stat(historyPath)
+	if err != nil {
+		t.Fatalf("stat history: %v", err)
+	}
+	originalMod := info.ModTime().UTC()
+
+	s := &Server{claudeHistoryTTL: time.Hour}
+	records := s.getClaudeHistoryRecords(home)
+	if len(records) != 1 || records[0].display != "first display" {
+		t.Fatalf("unexpected records: %+v", records)
+	}
+
+	writeHistory("second display", time.Now().UTC().Add(-1*time.Minute).UnixMilli())
+	if err := os.Chtimes(historyPath, originalMod, originalMod); err != nil {
+		t.Fatalf("chtimes preserve modtime: %v", err)
+	}
+	cached := s.getClaudeHistoryRecords(home)
+	if len(cached) != 1 || cached[0].display != "first display" {
+		t.Fatalf("expected cached first display, got %+v", cached)
+	}
+
+	updatedMod := originalMod.Add(2 * time.Second)
+	if err := os.Chtimes(historyPath, updatedMod, updatedMod); err != nil {
+		t.Fatalf("chtimes updated modtime: %v", err)
+	}
+	reloaded := s.getClaudeHistoryRecords(home)
+	if len(reloaded) != 1 || reloaded[0].display != "second display" {
+		t.Fatalf("expected refreshed second display, got %+v", reloaded)
+	}
+}
+
+func TestResolveClaudeSessionHintCachedUsesSessionPreviewCache(t *testing.T) {
+	home := t.TempDir()
+	workspace := filepath.Join(home, "repo")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+	projectDir := filepath.Join(home, ".claude", "projects", claudeProjectKey(workspace))
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project dir: %v", err)
+	}
+	sessionID := "764d927d-d3a9-4772-9dc7-63bebabd77a2"
+	sessionPath := filepath.Join(projectDir, sessionID+".jsonl")
+	writeSession := func(prompt string) {
+		content := fmt.Sprintf(`{"type":"user","message":{"content":[{"type":"text","text":"%s"}]}}`+"\n", prompt)
+		if err := os.WriteFile(sessionPath, []byte(content), 0o644); err != nil {
+			t.Fatalf("write session: %v", err)
+		}
+	}
+	writeSession("first prompt")
+	info, err := os.Stat(sessionPath)
+	if err != nil {
+		t.Fatalf("stat session: %v", err)
+	}
+	originalMod := info.ModTime().UTC()
+
+	s := &Server{
+		claudePreview:    map[string]claudePreviewCacheEntry{},
+		claudePreviewTTL: time.Hour,
+	}
+	hint := s.resolveClaudeSessionHintCached(home, workspace, sessionID, model.TargetKindLocal)
+	if hint.label != "first prompt" || hint.source != "claude_session_jsonl" {
+		t.Fatalf("unexpected first hint: %+v", hint)
+	}
+
+	writeSession("second prompt")
+	if err := os.Chtimes(sessionPath, originalMod, originalMod); err != nil {
+		t.Fatalf("chtimes preserve modtime: %v", err)
+	}
+	cachedHint := s.resolveClaudeSessionHintCached(home, workspace, sessionID, model.TargetKindLocal)
+	if cachedHint.label != "first prompt" {
+		t.Fatalf("expected cached first prompt, got %+v", cachedHint)
+	}
+
+	updatedMod := originalMod.Add(2 * time.Second)
+	if err := os.Chtimes(sessionPath, updatedMod, updatedMod); err != nil {
+		t.Fatalf("chtimes updated modtime: %v", err)
+	}
+	refreshed := s.resolveClaudeSessionHintCached(home, workspace, sessionID, model.TargetKindLocal)
+	if refreshed.label != "second prompt" {
+		t.Fatalf("expected refreshed second prompt, got %+v", refreshed)
+	}
+}

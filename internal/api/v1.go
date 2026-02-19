@@ -53,10 +53,11 @@ type TargetError struct {
 }
 
 type ListSummary struct {
-	ByState    map[string]int `json:"by_state,omitempty"`
-	ByAgent    map[string]int `json:"by_agent,omitempty"`
-	ByTarget   map[string]int `json:"by_target,omitempty"`
-	ByCategory map[string]int `json:"by_category,omitempty"`
+	ByState              map[string]int `json:"by_state,omitempty"`
+	ByAgent              map[string]int `json:"by_agent,omitempty"`
+	ByTarget             map[string]int `json:"by_target,omitempty"`
+	ByCategory           map[string]int `json:"by_category,omitempty"`
+	BySessionLabelSource map[string]int `json:"by_session_label_source,omitempty"`
 }
 
 type PaneIdentity struct {

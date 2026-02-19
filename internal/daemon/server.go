@@ -47,6 +47,8 @@ const maxTerminalStateBytes = 256 * 1024
 const defaultTerminalStateTTL = 5 * time.Minute
 const defaultTerminalProxySessionTTL = 5 * time.Minute
 const minTerminalStreamCaptureInterval = 80 * time.Millisecond
+const defaultClaudeHistoryCacheTTL = 5 * time.Second
+const defaultClaudePreviewCacheTTL = 20 * time.Second
 const resizePolicySingleClientApply = "single_client_apply"
 const terminalCursorMarkerPrefix = "__AGTMUX_CURSOR_POSITION__"
 
@@ -75,6 +77,12 @@ type Server struct {
 	codexPaneMu      sync.Mutex
 	codexPaneCache   map[string]codexPaneCacheEntry
 	codexPaneTTL     time.Duration
+	claudeHistoryMu  sync.Mutex
+	claudeHistory    claudeHistoryCacheEntry
+	claudeHistoryTTL time.Duration
+	claudePreviewMu  sync.Mutex
+	claudePreview    map[string]claudePreviewCacheEntry
+	claudePreviewTTL time.Duration
 	snapshotTTL      time.Duration
 	auditEventHook   func(action model.Action, eventType string) error
 	shutdown         sync.Once
@@ -129,6 +137,9 @@ func NewServerWithDeps(cfg config.Config, store *db.Store, executor *target.Exec
 		terminalProxyTTL: defaultTerminalProxySessionTTL,
 		codexPaneCache:   map[string]codexPaneCacheEntry{},
 		codexPaneTTL:     20 * time.Second,
+		claudeHistoryTTL: defaultClaudeHistoryCacheTTL,
+		claudePreview:    map[string]claudePreviewCacheEntry{},
+		claudePreviewTTL: defaultClaudePreviewCacheTTL,
 		snapshotTTL:      defaultActionSnapshotTTL,
 		httpSrv: &http.Server{
 			Handler:           mux,
@@ -2833,10 +2844,11 @@ func (s *Server) buildPaneItems(ctx context.Context, targets []model.Target) ([]
 	claudeHintsByRuntimeID := s.collectClaudeSessionHints(ctx, panes, requestedIDs, stateByPane, runtimeByID, runtimeByPane, targetByID)
 
 	summary := api.ListSummary{
-		ByState:    map[string]int{},
-		ByAgent:    map[string]int{},
-		ByTarget:   map[string]int{},
-		ByCategory: map[string]int{},
+		ByState:              map[string]int{},
+		ByAgent:              map[string]int{},
+		ByTarget:             map[string]int{},
+		ByCategory:           map[string]int{},
+		BySessionLabelSource: map[string]int{},
 	}
 	items := make([]api.PaneItem, 0, len(panes))
 	presentationNow := time.Now().UTC()
@@ -2992,6 +3004,9 @@ func (s *Server) buildPaneItems(ctx context.Context, targets []model.Target) ([]
 		summary.ByAgent[agentType]++
 		summary.ByTarget[targetName]++
 		summary.ByCategory[displayCategory]++
+		if sessionLabelSource != "" {
+			summary.BySessionLabelSource[sessionLabelSource]++
+		}
 	}
 	return items, summary, nil
 }
@@ -3859,6 +3874,19 @@ type claudeProjectSessionFile struct {
 	at        time.Time
 }
 
+type claudeHistoryCacheEntry struct {
+	path      string
+	modTime   time.Time
+	fetchedAt time.Time
+	records   []claudeHistoryRecord
+}
+
+type claudePreviewCacheEntry struct {
+	modTime   time.Time
+	fetchedAt time.Time
+	preview   string
+}
+
 func (s *Server) collectClaudeSessionHints(
 	ctx context.Context,
 	panes []model.Pane,
@@ -3957,7 +3985,7 @@ func (s *Server) collectClaudeSessionHints(
 		}
 		if probe.targetKind != model.TargetKindLocal {
 			if probe.resumeID != "" {
-				if hint := resolveClaudeSessionHint(homeDir, probe.currentPath, probe.resumeID, probe.targetKind); hint.label != "" {
+				if hint := s.resolveClaudeSessionHintCached(homeDir, probe.currentPath, probe.resumeID, probe.targetKind); hint.label != "" {
 					hints[runtimeID] = hint
 				}
 			}
@@ -3966,7 +3994,7 @@ func (s *Server) collectClaudeSessionHints(
 		workspaceKey := normalizeClaudeWorkspacePath(probe.currentPath)
 		if workspaceKey == "" {
 			if probe.resumeID != "" {
-				if hint := resolveClaudeSessionHint(homeDir, probe.currentPath, probe.resumeID, probe.targetKind); hint.label != "" {
+				if hint := s.resolveClaudeSessionHintCached(homeDir, probe.currentPath, probe.resumeID, probe.targetKind); hint.label != "" {
 					hints[runtimeID] = hint
 				}
 			}
@@ -3979,7 +4007,7 @@ func (s *Server) collectClaudeSessionHints(
 		return hints
 	}
 
-	historyRecords := readClaudeHistoryRecords(homeDir)
+	historyRecords := s.getClaudeHistoryRecords(homeDir)
 	workspaces := make([]string, 0, len(localGroups))
 	for workspace := range localGroups {
 		workspaces = append(workspaces, workspace)
@@ -3990,7 +4018,7 @@ func (s *Server) collectClaudeSessionHints(
 		sort.Slice(group, func(i, j int) bool {
 			return claudeProbeComesBefore(group[i], group[j])
 		})
-		sessionHints := buildClaudeWorkspaceSessionHints(homeDir, workspace, historyRecords)
+		sessionHints := s.buildClaudeWorkspaceSessionHints(homeDir, workspace, historyRecords)
 		sessionHintByID := map[string]claudeSessionHint{}
 		for _, candidate := range sessionHints {
 			sessionID := normalizeSessionID(candidate.sessionID)
@@ -4015,7 +4043,7 @@ func (s *Server) collectClaudeSessionHints(
 			}
 			hint, ok := sessionHintByID[resumeID]
 			if !ok || hint.label == "" {
-				hint = resolveClaudeSessionHint(homeDir, workspace, resumeID, model.TargetKindLocal)
+				hint = s.resolveClaudeSessionHintCached(homeDir, workspace, resumeID, model.TargetKindLocal)
 			}
 			if hint.label == "" {
 				unresolved = append(unresolved, probe)
@@ -4233,6 +4261,233 @@ func claudeWorkspaceMatchScore(workspacePath, projectPath string) int {
 		return 1
 	}
 	return 0
+}
+
+func (s *Server) getClaudeHistoryRecords(homeDir string) []claudeHistoryRecord {
+	base := strings.TrimSpace(homeDir)
+	if base == "" {
+		return nil
+	}
+	historyPath := filepath.Join(base, ".claude", "history.jsonl")
+	now := time.Now().UTC()
+	stat, err := os.Stat(historyPath)
+	if err != nil {
+		s.claudeHistoryMu.Lock()
+		s.claudeHistory = claudeHistoryCacheEntry{
+			path:      historyPath,
+			fetchedAt: now,
+			records:   nil,
+		}
+		s.claudeHistoryMu.Unlock()
+		return nil
+	}
+	modTime := stat.ModTime().UTC()
+
+	s.claudeHistoryMu.Lock()
+	cached := s.claudeHistory
+	cacheHit := cached.path == historyPath &&
+		!cached.fetchedAt.IsZero() &&
+		now.Sub(cached.fetchedAt) < s.claudeHistoryTTL &&
+		cached.modTime.Equal(modTime)
+	if cacheHit {
+		records := append([]claudeHistoryRecord(nil), cached.records...)
+		s.claudeHistoryMu.Unlock()
+		return records
+	}
+	s.claudeHistoryMu.Unlock()
+
+	records := readClaudeHistoryRecords(homeDir)
+	s.claudeHistoryMu.Lock()
+	s.claudeHistory = claudeHistoryCacheEntry{
+		path:      historyPath,
+		modTime:   modTime,
+		fetchedAt: now,
+		records:   append([]claudeHistoryRecord(nil), records...),
+	}
+	s.claudeHistoryMu.Unlock()
+	return records
+}
+
+func (s *Server) resolveClaudeSessionHintCached(homeDir, workspacePath, sessionID string, targetKind model.TargetKind) claudeSessionHint {
+	normalizedID := normalizeSessionID(sessionID)
+	if normalizedID == "" {
+		return claudeSessionHint{}
+	}
+	if targetKind == model.TargetKindLocal {
+		if preview, at, ok := s.readClaudeSessionPreviewCached(homeDir, workspacePath, normalizedID); ok && preview != "" {
+			return claudeSessionHint{
+				label:  preview,
+				source: "claude_session_jsonl",
+				at:     at,
+			}
+		}
+	}
+	return claudeSessionHint{
+		label:  "claude " + shortSessionID(normalizedID),
+		source: "claude_resume_id",
+	}
+}
+
+func (s *Server) readClaudeSessionPreviewCached(homeDir, workspacePath, sessionID string) (string, time.Time, bool) {
+	candidates := claudeSessionJSONLCandidates(homeDir, workspacePath, sessionID)
+	now := time.Now().UTC()
+	for _, path := range candidates {
+		stat, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
+		modTime := stat.ModTime().UTC()
+		s.claudePreviewMu.Lock()
+		cached, ok := s.claudePreview[path]
+		if ok && now.Sub(cached.fetchedAt) < s.claudePreviewTTL && cached.modTime.Equal(modTime) {
+			preview := cached.preview
+			s.claudePreviewMu.Unlock()
+			if preview != "" {
+				return preview, modTime, true
+			}
+			continue
+		}
+		s.claudePreviewMu.Unlock()
+
+		preview := readFirstClaudeUserPrompt(path)
+		s.claudePreviewMu.Lock()
+		s.claudePreview[path] = claudePreviewCacheEntry{
+			modTime:   modTime,
+			fetchedAt: now,
+			preview:   preview,
+		}
+		for key, entry := range s.claudePreview {
+			if now.Sub(entry.fetchedAt) > s.claudePreviewTTL*3 {
+				delete(s.claudePreview, key)
+			}
+		}
+		s.claudePreviewMu.Unlock()
+		if preview != "" {
+			return preview, modTime, true
+		}
+	}
+	return "", time.Time{}, false
+}
+
+func (s *Server) buildClaudeWorkspaceSessionHints(homeDir, workspacePath string, historyRecords []claudeHistoryRecord) []claudeWorkspaceSessionHint {
+	workspace := normalizeClaudeWorkspacePath(workspacePath)
+	if workspace == "" {
+		return nil
+	}
+	type historyCandidate struct {
+		record claudeHistoryRecord
+		score  int
+	}
+	bySession := map[string]historyCandidate{}
+	for _, record := range historyRecords {
+		score := claudeWorkspaceMatchScore(workspace, record.projectPath)
+		if score <= 0 {
+			continue
+		}
+		existing, ok := bySession[record.sessionID]
+		if !ok || score > existing.score || (score == existing.score && record.at.After(existing.record.at)) {
+			bySession[record.sessionID] = historyCandidate{record: record, score: score}
+		}
+	}
+	historyCandidates := make([]historyCandidate, 0, len(bySession))
+	for _, candidate := range bySession {
+		historyCandidates = append(historyCandidates, candidate)
+	}
+	sort.Slice(historyCandidates, func(i, j int) bool {
+		lhs := historyCandidates[i]
+		rhs := historyCandidates[j]
+		if lhs.score != rhs.score {
+			return lhs.score > rhs.score
+		}
+		if !lhs.record.at.Equal(rhs.record.at) {
+			if lhs.record.at.IsZero() {
+				return false
+			}
+			if rhs.record.at.IsZero() {
+				return true
+			}
+			return lhs.record.at.After(rhs.record.at)
+		}
+		return lhs.record.sessionID < rhs.record.sessionID
+	})
+	if len(historyCandidates) > 12 {
+		historyCandidates = historyCandidates[:12]
+	}
+	out := make([]claudeWorkspaceSessionHint, 0, len(historyCandidates))
+	for _, candidate := range historyCandidates {
+		hint := s.resolveClaudeSessionHintCached(homeDir, candidate.record.projectPath, candidate.record.sessionID, model.TargetKindLocal)
+		if candidate.record.display != "" && (hint.label == "" || hint.source == "claude_resume_id") {
+			hint = claudeSessionHint{
+				label:  candidate.record.display,
+				source: "claude_history_display",
+				at:     candidate.record.at,
+			}
+		}
+		if hint.label == "" {
+			continue
+		}
+		if hint.at.IsZero() && !candidate.record.at.IsZero() {
+			hint.at = candidate.record.at
+		}
+		out = append(out, claudeWorkspaceSessionHint{
+			sessionID: candidate.record.sessionID,
+			hint:      hint,
+		})
+	}
+	if len(out) > 0 {
+		return out
+	}
+	return s.scanRecentClaudeProjectSessionHints(homeDir, workspace, 8)
+}
+
+func (s *Server) scanRecentClaudeProjectSessionHints(homeDir, workspacePath string, limit int) []claudeWorkspaceSessionHint {
+	if limit <= 0 {
+		return nil
+	}
+	files := make([]claudeProjectSessionFile, 0, limit)
+	for _, projectDir := range collectClaudeProjectDirsForWorkspace(homeDir, workspacePath) {
+		for _, candidate := range listClaudeProjectSessionFiles(projectDir) {
+			files = append(files, candidate)
+		}
+	}
+	if len(files) == 0 {
+		return nil
+	}
+	sort.Slice(files, func(i, j int) bool {
+		lhs := files[i]
+		rhs := files[j]
+		if !lhs.at.Equal(rhs.at) {
+			return lhs.at.After(rhs.at)
+		}
+		if lhs.sessionID != rhs.sessionID {
+			return lhs.sessionID < rhs.sessionID
+		}
+		return lhs.path < rhs.path
+	})
+	seen := map[string]struct{}{}
+	out := make([]claudeWorkspaceSessionHint, 0, limit)
+	for _, file := range files {
+		if len(out) >= limit {
+			break
+		}
+		if _, exists := seen[file.sessionID]; exists {
+			continue
+		}
+		preview, _, ok := s.readClaudeSessionPreviewCached(homeDir, workspacePath, file.sessionID)
+		if !ok || preview == "" {
+			continue
+		}
+		seen[file.sessionID] = struct{}{}
+		out = append(out, claudeWorkspaceSessionHint{
+			sessionID: file.sessionID,
+			hint: claudeSessionHint{
+				label:  preview,
+				source: "claude_project_recent_jsonl",
+				at:     file.at.UTC(),
+			},
+		})
+	}
+	return out
 }
 
 func buildClaudeWorkspaceSessionHints(homeDir, workspacePath string, historyRecords []claudeHistoryRecord) []claudeWorkspaceSessionHint {
