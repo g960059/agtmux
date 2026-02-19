@@ -171,6 +171,7 @@ final class AppViewModel: ObservableObject {
         static let sessionStableOrder = "ui.session_stable_order"
         static let sessionStableOrderNext = "ui.session_stable_order_next"
         static let pinnedSessions = "ui.pinned_sessions"
+        static let paneDisplayNameOverrides = "ui.pane_display_name_overrides"
         static let showPinnedOnly = "ui.show_pinned_only"
         static let windowGrouping = "ui.window_grouping"
         static let interactiveTerminalInputEnabled = "ui.interactive_terminal_input_enabled"
@@ -347,6 +348,7 @@ final class AppViewModel: ObservableObject {
     private var sessionStableOrder: [String: Int] = [:]
     private var nextSessionStableOrder = 0
     private var pinnedSessionKeys: Set<String> = []
+    private var paneDisplayNameOverridesByID: [String: String] = [:]
     private var targetReconnectStateByName: [String: TargetReconnectState] = [:]
     private var targetReconnectInFlightNames: Set<String> = []
     private var targetReconnectSweepInFlight = false
@@ -508,6 +510,151 @@ final class AppViewModel: ObservableObject {
             pinnedSessionKeys.remove(key)
         }
         persistPinnedSessions()
+    }
+
+    func reorderSessionSections(sourceID: String, destinationID: String) {
+        let sourceKey = sourceID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let destinationKey = destinationID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !sourceKey.isEmpty, !destinationKey.isEmpty, sourceKey != destinationKey else {
+            return
+        }
+        var ordered = sessionSections.map(\.id)
+        guard let fromIndex = ordered.firstIndex(of: sourceKey),
+              let toIndex = ordered.firstIndex(of: destinationKey) else {
+            return
+        }
+        let moved = ordered.remove(at: fromIndex)
+        ordered.insert(moved, at: toIndex)
+        applySessionStableOrder(ordered)
+        if sessionSortMode != .stable {
+            sessionSortMode = .stable
+        }
+    }
+
+    func performRenameSession(target: String, sessionName: String, newName: String) {
+        let targetToken = target.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fromSession = sessionName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let toSession = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !targetToken.isEmpty, !fromSession.isEmpty else {
+            infoMessage = ""
+            errorMessage = "session identity is incomplete"
+            return
+        }
+        guard !toSession.isEmpty else {
+            infoMessage = ""
+            errorMessage = "new session name is required"
+            return
+        }
+        guard fromSession != toSession else {
+            infoMessage = ""
+            errorMessage = "session name is unchanged"
+            return
+        }
+        Task {
+            do {
+                let command = "tmux rename-session -t \(shellQuote(fromSession)) \(shellQuote(toSession))"
+                let invocation = try buildTmuxInvocation(target: targetToken, operation: "rename session", command: command)
+                _ = try externalTerminalCommandRunner(invocation.executable, invocation.args)
+                renameSessionInLocalState(target: targetToken, from: fromSession, to: toSession)
+                infoMessage = "session renamed: \(fromSession) -> \(toSession)"
+                errorMessage = ""
+                await refresh()
+            } catch {
+                infoMessage = ""
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    func performCreatePane(target: String, sessionName: String, anchorPaneID: String?) {
+        let targetToken = target.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sessionToken = sessionName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !targetToken.isEmpty, !sessionToken.isEmpty else {
+            infoMessage = ""
+            errorMessage = "session identity is incomplete"
+            return
+        }
+        let anchor = anchorPaneID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let command: String
+        if !anchor.isEmpty {
+            command = "tmux split-window -t \(shellQuote(anchor))"
+        } else {
+            command = "tmux split-window -t \(shellQuote(sessionToken))"
+        }
+        Task {
+            do {
+                let invocation = try buildTmuxInvocation(target: targetToken, operation: "create pane", command: command)
+                _ = try externalTerminalCommandRunner(invocation.executable, invocation.args)
+                infoMessage = "pane created: \(sessionToken)"
+                errorMessage = ""
+                await refresh()
+            } catch {
+                infoMessage = ""
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    func performKillPane(_ pane: PaneItem?) {
+        guard let pane else {
+            infoMessage = ""
+            errorMessage = "Pane を選択してください。"
+            return
+        }
+        let paneToken = pane.identity.paneID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !paneToken.isEmpty else {
+            infoMessage = ""
+            errorMessage = "pane identity is incomplete"
+            return
+        }
+        Task {
+            do {
+                let command = "tmux kill-pane -t \(shellQuote(paneToken))"
+                let invocation = try buildTmuxInvocation(target: pane.identity.target, operation: "kill pane", command: command)
+                _ = try externalTerminalCommandRunner(invocation.executable, invocation.args)
+                removePaneFromLocalState(pane.id)
+                infoMessage = "pane killed: \(paneToken)"
+                errorMessage = ""
+                await refresh()
+            } catch {
+                infoMessage = ""
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    func performRenamePane(_ pane: PaneItem?, newName: String) {
+        guard let pane else {
+            infoMessage = ""
+            errorMessage = "Pane を選択してください。"
+            return
+        }
+        let paneToken = pane.identity.paneID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !paneToken.isEmpty else {
+            infoMessage = ""
+            errorMessage = "pane identity is incomplete"
+            return
+        }
+        let name = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else {
+            infoMessage = ""
+            errorMessage = "pane name is required"
+            return
+        }
+        Task {
+            do {
+                let command = "tmux select-pane -t \(shellQuote(paneToken)) -T \(shellQuote(name))"
+                let invocation = try buildTmuxInvocation(target: pane.identity.target, operation: "rename pane", command: command)
+                _ = try externalTerminalCommandRunner(invocation.executable, invocation.args)
+                setPaneDisplayNameOverride(name: name, paneID: pane.id)
+                infoMessage = "pane renamed: \(name)"
+                errorMessage = ""
+                await refresh()
+            } catch {
+                infoMessage = ""
+                errorMessage = error.localizedDescription
+            }
+        }
     }
 
     func toggleSessionPinned(target: String, sessionName: String) {
@@ -1316,6 +1463,18 @@ final class AppViewModel: ObservableObject {
 
     func displayCategory(for pane: PaneItem) -> String {
         if let cat = normalizedToken(pane.displayCategory) {
+            if cat == "unknown", agentPresence(for: pane) == "managed" {
+                switch activityState(for: pane) {
+                case "running":
+                    return "running"
+                case "waiting_input", "waiting_approval", "error":
+                    return "attention"
+                case "idle":
+                    return "idle"
+                default:
+                    break
+                }
+            }
             return cat
         }
         let presence = agentPresence(for: pane)
@@ -1351,9 +1510,16 @@ final class AppViewModel: ObservableObject {
         if let inferred = inferAttentionStateFromReason(pane.reasonCode) {
             return inferred
         }
+        if let inferred = inferAttentionStateFromEvent(pane.lastEventType) {
+            return inferred
+        }
 
         if let state = normalizedToken(pane.activityState) {
             if state == "completed" {
+                return "idle"
+            }
+            if state == "unknown",
+               shouldDemoteManagedUnknownToIdle(pane) {
                 return "idle"
             }
             return state
@@ -1372,6 +1538,9 @@ final class AppViewModel: ObservableObject {
         case "idle", "completed":
             return "idle"
         default:
+            if shouldDemoteManagedUnknownToIdle(pane) {
+                return "idle"
+            }
             return "unknown"
         }
     }
@@ -1417,6 +1586,9 @@ final class AppViewModel: ObservableObject {
     }
 
     private func basePaneDisplayTitle(for pane: PaneItem) -> String {
+        if let override = trimmedNonEmpty(paneDisplayNameOverridesByID[pane.id]) {
+            return override
+        }
         if let label = trimmedNonEmpty(pane.sessionLabel) {
             return label
         }
@@ -1751,6 +1923,15 @@ final class AppViewModel: ObservableObject {
         terminalRenderCacheByPaneID = terminalRenderCacheByPaneID.filter { paneIDs.contains($0.key) }
         lastInteractiveInputAtByPaneID = lastInteractiveInputAtByPaneID.filter { paneIDs.contains($0.key) }
         pendingInputLatencyStartByPaneID = pendingInputLatencyStartByPaneID.filter { paneIDs.contains($0.key) }
+        if !paneIDs.isEmpty {
+            let removedOverrides = Set(paneDisplayNameOverridesByID.keys).subtracting(paneIDs)
+            if !removedOverrides.isEmpty {
+                for key in removedOverrides {
+                    paneDisplayNameOverridesByID.removeValue(forKey: key)
+                }
+                persistPaneDisplayNameOverrides()
+            }
+        }
         Task { [weak self] in
             guard let self else {
                 return
@@ -1988,6 +2169,7 @@ final class AppViewModel: ObservableObject {
         reviewUnreadOnly = readBoolPreference(PreferenceKey.reviewUnreadOnly, fallback: true)
         restoreSessionStableOrder()
         restorePinnedSessions()
+        restorePaneDisplayNameOverrides()
 
         let storedVersion = defaults.integer(forKey: PreferenceKey.uiPrefsVersion)
         if storedVersion < currentUIPrefsVersion {
@@ -2018,6 +2200,39 @@ final class AppViewModel: ObservableObject {
         if changed {
             persistSessionStableOrder()
         }
+    }
+
+    private func applySessionStableOrder(_ preferredOrder: [String]) {
+        var next: [String: Int] = [:]
+        var index = 0
+        var seen: Set<String> = []
+        for key in preferredOrder {
+            let token = key.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !token.isEmpty, !seen.contains(token) else {
+                continue
+            }
+            seen.insert(token)
+            next[token] = index
+            index += 1
+        }
+
+        let remaining = sessionStableOrder.keys
+            .filter { !seen.contains($0) }
+            .sorted { lhs, rhs in
+                let li = sessionStableOrder[lhs] ?? .max
+                let ri = sessionStableOrder[rhs] ?? .max
+                if li != ri {
+                    return li < ri
+                }
+                return lhs < rhs
+            }
+        for key in remaining {
+            next[key] = index
+            index += 1
+        }
+        sessionStableOrder = next
+        nextSessionStableOrder = index
+        persistSessionStableOrder()
     }
 
     private func stableSessionOrder(for key: String) -> Int {
@@ -2058,6 +2273,21 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    private func restorePaneDisplayNameOverrides() {
+        if let raw = defaults.dictionary(forKey: PreferenceKey.paneDisplayNameOverrides) as? [String: String] {
+            paneDisplayNameOverridesByID = raw.reduce(into: [String: String]()) { out, entry in
+                let key = entry.key.trimmingCharacters(in: .whitespacesAndNewlines)
+                let value = entry.value.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !key.isEmpty, !value.isEmpty else {
+                    return
+                }
+                out[key] = value
+            }
+        } else {
+            paneDisplayNameOverridesByID = [:]
+        }
+    }
+
     private func persistSessionStableOrder() {
         if let data = try? JSONEncoder().encode(sessionStableOrder) {
             defaults.set(data, forKey: PreferenceKey.sessionStableOrder)
@@ -2068,6 +2298,10 @@ final class AppViewModel: ObservableObject {
     private func persistPinnedSessions() {
         let values = Array(pinnedSessionKeys).sorted()
         defaults.set(values, forKey: PreferenceKey.pinnedSessions)
+    }
+
+    private func persistPaneDisplayNameOverrides() {
+        defaults.set(paneDisplayNameOverridesByID, forKey: PreferenceKey.paneDisplayNameOverrides)
     }
 
     private func readBoolPreference(_ key: String, fallback: Bool) -> Bool {
@@ -2670,6 +2904,16 @@ final class AppViewModel: ObservableObject {
         guard !target.isEmpty, !session.isEmpty else {
             throw RuntimeError.commandFailed("kill session", 1, "session identity is incomplete")
         }
+        let command = "tmux kill-session -t \(shellQuote(session))"
+        return try buildTmuxInvocation(target: target, operation: "kill session", command: command)
+    }
+
+    private func buildTmuxInvocation(target targetToken: String, operation: String, command: String) throws -> ExternalTerminalInvocation {
+        let target = targetToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        let commandToken = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !target.isEmpty, !commandToken.isEmpty else {
+            throw RuntimeError.commandFailed(operation, 1, "target/command is incomplete")
+        }
 
         let resolvedTarget = targetRecord(for: target)
         let targetKind: String
@@ -2680,14 +2924,14 @@ final class AppViewModel: ObservableObject {
             case "ssh":
                 targetKind = "ssh"
             case nil:
-                throw RuntimeError.commandFailed("kill session", 1, "target kind is unavailable")
+                throw RuntimeError.commandFailed(operation, 1, "target kind is unavailable")
             default:
-                throw RuntimeError.commandFailed("kill session", 1, "unsupported target kind")
+                throw RuntimeError.commandFailed(operation, 1, "unsupported target kind")
             }
         } else if normalizedToken(target) == "local" {
             targetKind = "local"
         } else {
-            throw RuntimeError.commandFailed("kill session", 1, "target is unavailable")
+            throw RuntimeError.commandFailed(operation, 1, "target is unavailable")
         }
 
         if targetKind == "local" {
@@ -2695,22 +2939,160 @@ final class AppViewModel: ObservableObject {
                 executable: "/bin/zsh",
                 args: [
                     "-lc",
-                    "tmux kill-session -t \(shellQuote(session))",
+                    commandToken,
                 ]
             )
         }
 
         let connectionRef = normalizedSSHConnectionRef(resolvedTarget?.connectionRef)
         guard let connectionRef else {
-            throw RuntimeError.commandFailed("kill session", 1, "ssh target connection_ref is unavailable")
+            throw RuntimeError.commandFailed(operation, 1, "ssh target connection_ref is unavailable")
         }
         return ExternalTerminalInvocation(
             executable: "/bin/zsh",
             args: [
                 "-lc",
-                "ssh \(shellQuote(connectionRef)) tmux kill-session -t \(shellQuote(session))",
+                "ssh \(shellQuote(connectionRef)) \(shellQuote(commandToken))",
             ]
         )
+    }
+
+    private func setPaneDisplayNameOverride(name: String, paneID: String) {
+        let key = paneID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let value = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty, !value.isEmpty else {
+            return
+        }
+        paneDisplayNameOverridesByID[key] = value
+        persistPaneDisplayNameOverrides()
+    }
+
+    private func renameSessionInLocalState(target: String, from: String, to: String) {
+        let targetToken = target.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fromToken = from.trimmingCharacters(in: .whitespacesAndNewlines)
+        let toToken = to.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !targetToken.isEmpty, !fromToken.isEmpty, !toToken.isEmpty else {
+            return
+        }
+        panes = panes.map { pane in
+            guard pane.identity.target == targetToken, pane.identity.sessionName == fromToken else {
+                return pane
+            }
+            let identity = PaneIdentity(
+                target: pane.identity.target,
+                sessionName: toToken,
+                windowID: pane.identity.windowID,
+                paneID: pane.identity.paneID
+            )
+            return PaneItem(
+                identity: identity,
+                windowName: pane.windowName,
+                currentCmd: pane.currentCmd,
+                paneTitle: pane.paneTitle,
+                state: pane.state,
+                reasonCode: pane.reasonCode,
+                confidence: pane.confidence,
+                runtimeID: pane.runtimeID,
+                agentType: pane.agentType,
+                agentPresence: pane.agentPresence,
+                activityState: pane.activityState,
+                displayCategory: pane.displayCategory,
+                needsUserAction: pane.needsUserAction,
+                stateSource: pane.stateSource,
+                lastEventType: pane.lastEventType,
+                lastEventAt: pane.lastEventAt,
+                awaitingResponseKind: pane.awaitingResponseKind,
+                sessionLabel: pane.sessionLabel,
+                sessionLabelSource: pane.sessionLabelSource,
+                lastInteractionAt: pane.lastInteractionAt,
+                updatedAt: pane.updatedAt
+            )
+        }
+        windows = windows.map { window in
+            guard window.identity.target == targetToken, window.identity.sessionName == fromToken else {
+                return window
+            }
+            let identity = WindowIdentity(
+                target: window.identity.target,
+                sessionName: toToken,
+                windowID: window.identity.windowID
+            )
+            return WindowItem(
+                identity: identity,
+                topState: window.topState,
+                topCategory: window.topCategory,
+                byCategory: window.byCategory,
+                waitingCount: window.waitingCount,
+                runningCount: window.runningCount,
+                totalPanes: window.totalPanes
+            )
+        }
+        sessions = sessions.map { session in
+            guard session.identity.target == targetToken, session.identity.sessionName == fromToken else {
+                return session
+            }
+            let identity = SessionIdentity(target: session.identity.target, sessionName: toToken)
+            return SessionItem(
+                identity: identity,
+                topCategory: session.topCategory,
+                totalPanes: session.totalPanes,
+                byState: session.byState,
+                byAgent: session.byAgent,
+                byCategory: session.byCategory
+            )
+        }
+        reviewQueue = reviewQueue.map { item in
+            guard item.target == targetToken, item.sessionName == fromToken else {
+                return item
+            }
+            return ReviewQueueItem(
+                id: item.id,
+                kind: item.kind,
+                target: item.target,
+                sessionName: toToken,
+                paneID: item.paneID,
+                windowID: item.windowID,
+                runtimeID: item.runtimeID,
+                createdAt: item.createdAt,
+                summary: item.summary,
+                unread: item.unread,
+                acknowledgedAt: item.acknowledgedAt
+            )
+        }
+        let fromKey = paneSessionKey(target: targetToken, sessionName: fromToken)
+        let toKey = paneSessionKey(target: targetToken, sessionName: toToken)
+        if let order = sessionStableOrder.removeValue(forKey: fromKey) {
+            sessionStableOrder[toKey] = order
+            persistSessionStableOrder()
+        }
+        if pinnedSessionKeys.remove(fromKey) != nil {
+            pinnedSessionKeys.insert(toKey)
+            persistPinnedSessions()
+        }
+    }
+
+    private func removePaneFromLocalState(_ paneID: String) {
+        let token = paneID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty else {
+            return
+        }
+        panes = panes.filter { $0.id != token }
+        let liveSessionKeys = Set(panes.map { paneSessionKey(target: $0.identity.target, sessionName: $0.identity.sessionName) })
+        let liveWindowKeys = Set(panes.map { "\($0.identity.target)|\($0.identity.sessionName)|\($0.identity.windowID)" })
+        sessions = sessions.filter { liveSessionKeys.contains(paneSessionKey(target: $0.identity.target, sessionName: $0.identity.sessionName)) }
+        windows = windows.filter { liveWindowKeys.contains("\($0.identity.target)|\($0.identity.sessionName)|\($0.identity.windowID)") }
+        reviewQueue = reviewQueue.filter { item in
+            "\(item.target)|\(item.sessionName)|\(item.windowID ?? "")|\(item.paneID)" != token
+        }
+        paneObservations.removeValue(forKey: token)
+        terminalRenderCacheByPaneID.removeValue(forKey: token)
+        lastInteractiveInputAtByPaneID.removeValue(forKey: token)
+        pendingInputLatencyStartByPaneID.removeValue(forKey: token)
+        paneDisplayNameOverridesByID.removeValue(forKey: token)
+        persistPaneDisplayNameOverrides()
+        if selectedPane?.id == token {
+            selectedPane = nil
+        }
     }
 
     private func removeSessionFromLocalState(target: String, sessionName: String) {
@@ -2740,6 +3122,13 @@ final class AppViewModel: ObservableObject {
         }
         paneObservations = paneObservations.filter { key, _ in
             !key.hasPrefix("\(targetToken)|\(sessionToken)|")
+        }
+        let removedPaneIDs = Set(paneDisplayNameOverridesByID.keys.filter { $0.hasPrefix("\(targetToken)|\(sessionToken)|") })
+        if !removedPaneIDs.isEmpty {
+            for key in removedPaneIDs {
+                paneDisplayNameOverridesByID.removeValue(forKey: key)
+            }
+            persistPaneDisplayNameOverrides()
         }
     }
 
@@ -3036,6 +3425,50 @@ final class AppViewModel: ObservableObject {
             return "error"
         }
         return nil
+    }
+
+    private func inferAttentionStateFromEvent(_ eventType: String?) -> String? {
+        guard let event = normalizedToken(eventType) else {
+            return nil
+        }
+        let canonical = event
+            .replacingOccurrences(of: ".", with: "_")
+            .replacingOccurrences(of: "-", with: "_")
+            .replacingOccurrences(of: ":", with: "_")
+        if canonical.contains("approval_requested") || canonical.contains("waiting_approval") {
+            return "waiting_approval"
+        }
+        if canonical.contains("input_requested") || canonical.contains("waiting_input") {
+            return "waiting_input"
+        }
+        if canonical.contains("error") || canonical.contains("failed") {
+            return "error"
+        }
+        if canonical.contains("running") || canonical.contains("active") {
+            return "running"
+        }
+        if canonical.contains("complete") || canonical.contains("finished") || canonical.contains("idle") {
+            return "idle"
+        }
+        return nil
+    }
+
+    private func shouldDemoteManagedUnknownToIdle(_ pane: PaneItem) -> Bool {
+        if agentPresence(for: pane) != "managed" {
+            return false
+        }
+        let reason = normalizedToken(pane.reasonCode) ?? ""
+        let state = normalizedToken(pane.state) ?? ""
+        let event = normalizedToken(pane.lastEventType) ?? ""
+        if reason == "inconclusive" || state == "unknown" || event == "unknown" {
+            if let cmd = normalizedToken(pane.currentCmd), cmd == "claude" || cmd == "codex" {
+                return true
+            }
+            if let agent = normalizedToken(pane.agentType), agent == "claude" || agent == "codex" {
+                return true
+            }
+        }
+        return false
     }
 
     private func isAdministrativeEventType(_ eventType: String?) -> Bool {

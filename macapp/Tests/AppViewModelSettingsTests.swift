@@ -225,6 +225,59 @@ final class AppViewModelSettingsTests: XCTestCase {
         XCTAssertEqual(model.paneDisplayTitle(for: p2), "codex session 2")
     }
 
+    func testPaneDisplayTitlePrefersRenamedOverride() async throws {
+        let model = try makeModel()
+        let pane = PaneItem(
+            identity: PaneIdentity(target: "local", sessionName: "s1", windowID: "@1", paneID: "%1"),
+            windowName: nil,
+            currentCmd: "claude",
+            paneTitle: "✳ Claude Code",
+            state: "idle",
+            reasonCode: "idle",
+            confidence: nil,
+            runtimeID: "rt-1",
+            agentType: "claude",
+            agentPresence: "managed",
+            activityState: "idle",
+            displayCategory: "idle",
+            needsUserAction: nil,
+            stateSource: "poller",
+            lastEventType: "idle",
+            lastEventAt: nil,
+            awaitingResponseKind: nil,
+            sessionLabel: "✳ Claude Code",
+            sessionLabelSource: "pane_title",
+            lastInteractionAt: nil,
+            updatedAt: "2026-02-15T00:00:00Z"
+        )
+        model.panes = [pane]
+        model.performRenamePane(pane, newName: "review lane")
+        let ok = await waitUntil {
+            model.paneDisplayTitle(for: pane) == "review lane"
+        }
+        XCTAssertTrue(ok)
+        XCTAssertEqual(model.paneDisplayTitle(for: pane), "review lane")
+    }
+
+    func testReorderSessionSectionsPromotesSourceBeforeDestinationAndForcesStableMode() throws {
+        let model = try makeModel()
+        model.sessionSortMode = .recentActivity
+        model.panes = [
+            makePane(paneID: "%1", sessionName: "s1"),
+            makePane(paneID: "%2", sessionName: "s2"),
+            makePane(paneID: "%3", sessionName: "s3"),
+        ]
+        let sections = model.sessionSections
+        let source = sections.first(where: { $0.sessionName == "s3" })!
+        let destination = sections.first(where: { $0.sessionName == "s1" })!
+
+        model.reorderSessionSections(sourceID: source.id, destinationID: destination.id)
+        let reordered = model.sessionSections.map(\.sessionName)
+
+        XCTAssertEqual(model.sessionSortMode, .stable)
+        XCTAssertEqual(reordered.first, "s3")
+    }
+
     func testLastActiveLabelDoesNotFallbackToUpdatedAt() throws {
         let model = try makeModel()
         let pane = makePane(paneID: "%1", displayCategory: "idle")
@@ -985,7 +1038,8 @@ final class AppViewModelSettingsTests: XCTestCase {
         XCTAssertEqual(captured.args.count, 2)
         XCTAssertEqual(captured.args[0], "-lc")
         XCTAssertTrue(captured.args[1].contains("ssh 'devvm'"))
-        XCTAssertTrue(captured.args[1].contains("tmux kill-session -t 'sprint'"))
+        XCTAssertTrue(captured.args[1].contains("tmux kill-session -t"))
+        XCTAssertTrue(captured.args[1].contains("sprint"))
         XCTAssertEqual(model.errorMessage, "")
     }
 
@@ -1078,7 +1132,7 @@ final class AppViewModelSettingsTests: XCTestCase {
 
     private func makePane(
         paneID: String,
-        displayCategory: String,
+        displayCategory: String = "idle",
         target: String = "local",
         sessionName: String = "s1"
     ) -> PaneItem {

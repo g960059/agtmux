@@ -732,17 +732,57 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
                     continue
                 }
                 let plain = stripANSI(line).trimmingCharacters(in: .whitespacesAndNewlines)
-                guard plain.hasPrefix("› Try ") || plain.hasPrefix("❯ Try ") || plain.hasPrefix("> Try ") else {
+                guard plain.hasPrefix("› ") || plain.hasPrefix("❯ ") || plain.hasPrefix("> ") else {
                     continue
                 }
-                guard let tryRange = line.range(of: "Try ") else {
+                guard let firstPromptChar = firstPromptInputCharacterRange(in: line) else {
                     continue
                 }
-                let tEnd = line.index(after: tryRange.lowerBound)
-                line.replaceSubrange(tryRange.lowerBound ..< tEnd, with: "\(open)T\(close)")
+                let glyph = String(line[firstPromptChar])
+                line.replaceSubrange(firstPromptChar, with: "\(open)\(glyph)\(close)")
                 lines[idx] = line
             }
             return lines.joined(separator: "\n")
+        }
+
+        private func firstPromptInputCharacterRange(in line: String) -> Range<String.Index>? {
+            let plain = stripANSI(line)
+            guard let symbol = plain.first,
+                  symbol == "›" || symbol == "❯" || symbol == ">" else {
+                return nil
+            }
+            var visibleIndex = 1
+            var plainIndex = plain.index(after: plain.startIndex)
+            while plainIndex < plain.endIndex, plain[plainIndex].isWhitespace {
+                visibleIndex += 1
+                plain.formIndex(after: &plainIndex)
+            }
+            guard plainIndex < plain.endIndex else {
+                return nil
+            }
+            return visibleCharacterRange(in: line, atVisibleIndex: visibleIndex)
+        }
+
+        private func visibleCharacterRange(in raw: String, atVisibleIndex target: Int) -> Range<String.Index>? {
+            guard target >= 0 else {
+                return nil
+            }
+            var visible = 0
+            var idx = raw.startIndex
+            while idx < raw.endIndex {
+                let scalar = raw[idx].unicodeScalars.first?.value
+                if scalar == 0x1B {
+                    idx = consumeEscapeSequence(in: raw, from: idx)
+                    continue
+                }
+                let next = raw.index(after: idx)
+                if visible == target {
+                    return idx ..< next
+                }
+                visible += 1
+                idx = next
+            }
+            return nil
         }
 
         private func stripANSI(_ raw: String) -> String {
@@ -872,7 +912,7 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
             out += "\u{001B}[H"
             out += "\u{001B}[2J"
             for (idx, rawLine) in lines.enumerated() {
-                out += clampLine(rawLine, toColumns: terminalCols)
+                out += rawLine
                 // Extend current line attributes (including background color) to full width.
                 out += "\u{001B}[K"
                 if idx < lines.count - 1 {

@@ -1,6 +1,7 @@
 import AppKit
 import Darwin
 import SwiftUI
+import UniformTypeIdentifiers
 
 @main
 struct AGTMUXDesktopApp: App {
@@ -107,12 +108,16 @@ private struct LaunchErrorView: View {
 private struct CockpitView: View {
     @EnvironmentObject private var model: AppViewModel
     @Environment(\.colorScheme) private var colorScheme
-    @State private var pendingKillAction: KillAction?
-    @State private var pendingKillPane: PaneItem?
     @State private var pendingKillSession: SessionKillRequest?
     @State private var detailPane: PaneItem?
+    @State private var pendingSessionRename: SessionRenameRequest?
+    @State private var pendingPaneRename: PaneRenameRequest?
+    @State private var sessionRenameDraft = ""
+    @State private var paneRenameDraft = ""
     @State private var windowTopInset: CGFloat = 0
     @State private var hoveringPaneID: String?
+    @State private var hoveringSessionID: String?
+    @State private var draggingSessionID: String?
     @State private var showSortPopover = false
     @State private var showSettingsPopover = false
     @State private var showAddTargetSheet = false
@@ -147,34 +152,24 @@ private struct CockpitView: View {
         CockpitPalette.forScheme(colorScheme)
     }
 
-    private enum KillAction {
-        case keyINT
-        case signalTERM
-
-        var title: String {
-            switch self {
-            case .keyINT:
-                return "Kill INT"
-            case .signalTERM:
-                return "Kill TERM"
-            }
-        }
-
-        var message: String {
-            switch self {
-            case .keyINT:
-                return "This sends INT and may interrupt the process in this pane."
-            case .signalTERM:
-                return "This sends TERM and may terminate the process in this pane."
-            }
-        }
-    }
-
     private struct SessionKillRequest: Identifiable {
         let target: String
         let sessionName: String
 
         var id: String { "\(target)|\(sessionName)" }
+    }
+
+    private struct SessionRenameRequest: Identifiable {
+        let target: String
+        let sessionName: String
+
+        var id: String { "\(target)|\(sessionName)" }
+    }
+
+    private struct PaneRenameRequest: Identifiable {
+        let pane: PaneItem
+
+        var id: String { pane.id }
     }
 
     var body: some View {
@@ -201,40 +196,6 @@ private struct CockpitView: View {
             selectDefaultPaneIfNeeded()
         }
         .confirmationDialog(
-            "Confirm Kill Action",
-            isPresented: Binding(
-                get: { pendingKillAction != nil },
-                set: { newValue in
-                    if !newValue {
-                        pendingKillAction = nil
-                        pendingKillPane = nil
-                    }
-                }
-            ),
-            titleVisibility: .visible
-        ) {
-            if let action = pendingKillAction {
-                Button(action.title, role: .destructive) {
-                    switch action {
-                    case .keyINT:
-                        model.performKillKeyINT(for: pendingKillPane)
-                    case .signalTERM:
-                        model.performKillSignalTERM(for: pendingKillPane)
-                    }
-                    pendingKillAction = nil
-                    pendingKillPane = nil
-                }
-            }
-            Button("Cancel", role: .cancel) {
-                pendingKillAction = nil
-                pendingKillPane = nil
-            }
-        } message: {
-            if let action = pendingKillAction {
-                Text(action.message)
-            }
-        }
-        .confirmationDialog(
             "Confirm Session Kill",
             isPresented: Binding(
                 get: { pendingKillSession != nil },
@@ -258,6 +219,68 @@ private struct CockpitView: View {
         } message: {
             if let request = pendingKillSession {
                 Text("This will terminate tmux session '\(request.sessionName)' on target '\(request.target)'.")
+            }
+        }
+        .alert(
+            "Rename Session",
+            isPresented: Binding(
+                get: { pendingSessionRename != nil },
+                set: { newValue in
+                    if !newValue {
+                        pendingSessionRename = nil
+                        sessionRenameDraft = ""
+                    }
+                }
+            )
+        ) {
+            TextField("New session name", text: $sessionRenameDraft)
+            Button("Cancel", role: .cancel) {
+                pendingSessionRename = nil
+                sessionRenameDraft = ""
+            }
+            Button("Rename") {
+                if let request = pendingSessionRename {
+                    model.performRenameSession(
+                        target: request.target,
+                        sessionName: request.sessionName,
+                        newName: sessionRenameDraft
+                    )
+                }
+                pendingSessionRename = nil
+                sessionRenameDraft = ""
+            }
+        } message: {
+            if let request = pendingSessionRename {
+                Text("Rename '\(request.sessionName)'")
+            }
+        }
+        .alert(
+            "Rename Pane",
+            isPresented: Binding(
+                get: { pendingPaneRename != nil },
+                set: { newValue in
+                    if !newValue {
+                        pendingPaneRename = nil
+                        paneRenameDraft = ""
+                    }
+                }
+            )
+        ) {
+            TextField("New pane name", text: $paneRenameDraft)
+            Button("Cancel", role: .cancel) {
+                pendingPaneRename = nil
+                paneRenameDraft = ""
+            }
+            Button("Rename") {
+                if let request = pendingPaneRename {
+                    model.performRenamePane(request.pane, newName: paneRenameDraft)
+                }
+                pendingPaneRename = nil
+                paneRenameDraft = ""
+            }
+        } message: {
+            if let request = pendingPaneRename {
+                Text("Rename \(request.pane.identity.paneID)")
             }
         }
         .sheet(item: $detailPane) { pane in
@@ -682,51 +705,110 @@ private struct CockpitView: View {
     private func sessionSection(_ section: AppViewModel.SessionSection) -> some View {
         let pinned = model.isSessionPinned(target: section.target, sessionName: section.sessionName)
         let targetHealth = model.targetHealth(for: section.target)
+        let targetToken = section.target.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let showTargetLabel = !(targetToken == "local" || targetToken.isEmpty)
+        let hovering = hoveringSessionID == section.id
+        let anchorPaneID = section.panes.first?.identity.paneID
         return VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 8) {
                 HStack(spacing: 7) {
-                    Image(systemName: "folder.fill")
-                        .font(.system(size: 11, weight: .semibold))
+                    Image(systemName: "folder")
+                        .font(.system(size: 10, weight: .regular))
                         .foregroundStyle(palette.textSecondary)
                     Text(section.sessionName)
-                        .font(.system(size: 14, weight: .semibold, design: .rounded))
+                        .font(.system(size: 13, weight: .medium, design: .rounded))
                         .foregroundStyle(palette.textPrimary)
                         .lineLimit(1)
                     if pinned {
                         Image(systemName: "pin.fill")
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(.system(size: 9, weight: .regular))
                             .foregroundStyle(palette.idle)
                     }
                 }
                 .padding(.leading, 4)
                 Spacer(minLength: 0)
-                Text(model.sessionLastActiveShortLabel(for: section))
-                    .font(.system(size: 10, weight: .regular, design: .monospaced))
-                    .foregroundStyle(palette.textMuted)
-                HStack(spacing: 5) {
-                    Circle()
-                        .fill(colorForTargetHealth(targetHealth))
-                        .frame(width: 6, height: 6)
-                    Text(section.target)
-                        .font(.system(size: 10, weight: .regular, design: .monospaced))
-                        .foregroundStyle(palette.textSecondary)
-                        .lineLimit(1)
+                if showTargetLabel {
+                    HStack(spacing: 5) {
+                        Circle()
+                            .fill(colorForTargetHealth(targetHealth))
+                            .frame(width: 5, height: 5)
+                        Text(section.target)
+                            .font(.system(size: 9, weight: .regular, design: .monospaced))
+                            .foregroundStyle(palette.textSecondary)
+                            .lineLimit(1)
+                    }
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(
+                        Capsule(style: .continuous)
+                            .fill(palette.rowFill)
+                    )
                 }
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(
-                    Capsule(style: .continuous)
-                        .fill(palette.rowFill)
-                )
+                if hovering {
+                    Button {
+                        model.performCreatePane(
+                            target: section.target,
+                            sessionName: section.sessionName,
+                            anchorPaneID: anchorPaneID
+                        )
+                    } label: {
+                        Image(systemName: "rectangle.split.2x1.badge.plus")
+                            .font(.system(size: 11, weight: .regular))
+                            .foregroundStyle(palette.textMuted)
+                            .frame(width: 22, height: 20)
+                    }
+                    .buttonStyle(.plain)
+                    .help("New pane")
+
+                    Menu {
+                        Button("Rename Session") {
+                            beginSessionRename(section)
+                        }
+                        Button(pinned ? "Unpin Session" : "Pin Session") {
+                            model.setSessionPinned(
+                                target: section.target,
+                                sessionName: section.sessionName,
+                                pinned: !pinned
+                            )
+                        }
+                        if model.canReconnectTarget(named: section.target) {
+                            Button("Reconnect Target") {
+                                model.reconnectTarget(named: section.target)
+                            }
+                        }
+                        Divider()
+                        Button("Kill Session", role: .destructive) {
+                            requestSessionKill(section)
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis")
+                            .font(.system(size: 12, weight: .regular))
+                            .foregroundStyle(palette.textMuted)
+                            .frame(width: 20, height: 20)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                }
             }
             .contentShape(Rectangle())
+            .onHover { inside in
+                if inside {
+                    hoveringSessionID = section.id
+                } else if hoveringSessionID == section.id {
+                    hoveringSessionID = nil
+                }
+            }
             .contextMenu {
-                Button(pinned ? "Unpin Session" : "Pin Session") {
-                    model.setSessionPinned(
+                Button("Rename Session") { beginSessionRename(section) }
+                Button("New Pane") {
+                    model.performCreatePane(
                         target: section.target,
                         sessionName: section.sessionName,
-                        pinned: !pinned
+                        anchorPaneID: anchorPaneID
                     )
+                }
+                Button(pinned ? "Unpin Session" : "Pin Session") {
+                    model.setSessionPinned(target: section.target, sessionName: section.sessionName, pinned: !pinned)
                 }
                 if model.canReconnectTarget(named: section.target) {
                     Button("Reconnect Target") {
@@ -738,6 +820,19 @@ private struct CockpitView: View {
                     requestSessionKill(section)
                 }
             }
+            .onDrag {
+                draggingSessionID = section.id
+                return NSItemProvider(object: NSString(string: section.id))
+            }
+            .onDrop(
+                of: [UTType.plainText],
+                delegate: SessionReorderDropDelegate(
+                    targetSessionID: section.id,
+                    draggingSessionID: $draggingSessionID
+                ) { sourceID, destinationID in
+                    model.reorderSessionSections(sourceID: sourceID, destinationID: destinationID)
+                }
+            )
 
             paneList(
                 section.panes,
@@ -860,18 +955,18 @@ private struct CockpitView: View {
                 model.openSelectedPaneInExternalTerminal()
             }
             Divider()
+            Button("Rename Pane") {
+                beginPaneRename(pane)
+            }
+            Button("Kill Pane", role: .destructive) {
+                model.performKillPane(pane)
+            }
+            Divider()
             Button("Pane Details") {
                 detailPane = pane
             }
             Button("Copy Pane Path") {
                 copyPanePath(pane)
-            }
-            Divider()
-            Button("Kill INT", role: .destructive) {
-                requestKill(.keyINT, for: pane)
-            }
-            Button("Kill TERM", role: .destructive) {
-                requestKill(.signalTERM, for: pane)
             }
         }
         .help("\(pane.identity.target)/\(pane.identity.sessionName)/\(pane.identity.paneID)")
@@ -894,17 +989,21 @@ private struct CockpitView: View {
         }
     }
 
-    private func requestKill(_ action: KillAction, for pane: PaneItem) {
-        model.selectedPane = pane
-        pendingKillPane = pane
-        pendingKillAction = action
-    }
-
     private func requestSessionKill(_ section: AppViewModel.SessionSection) {
         pendingKillSession = SessionKillRequest(
             target: section.target,
             sessionName: section.sessionName
         )
+    }
+
+    private func beginSessionRename(_ section: AppViewModel.SessionSection) {
+        pendingSessionRename = SessionRenameRequest(target: section.target, sessionName: section.sessionName)
+        sessionRenameDraft = section.sessionName
+    }
+
+    private func beginPaneRename(_ pane: PaneItem) {
+        pendingPaneRename = PaneRenameRequest(pane: pane)
+        paneRenameDraft = model.paneDisplayTitle(for: pane)
     }
 
     private func copyPanePath(_ pane: PaneItem) {
@@ -1038,6 +1137,36 @@ private struct CockpitView: View {
             return
         }
         model.selectedPane = model.panes.first
+    }
+}
+
+private struct SessionReorderDropDelegate: DropDelegate {
+    let targetSessionID: String
+    @Binding var draggingSessionID: String?
+    let onMove: (_ sourceID: String, _ destinationID: String) -> Void
+
+    func dropEntered(info _: DropInfo) {
+        guard let sourceID = draggingSessionID else {
+            return
+        }
+        guard sourceID != targetSessionID else {
+            return
+        }
+        onMove(sourceID, targetSessionID)
+        draggingSessionID = targetSessionID
+    }
+
+    func performDrop(info _: DropInfo) -> Bool {
+        draggingSessionID = nil
+        return true
+    }
+
+    func dropUpdated(info _: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func validateDrop(info _: DropInfo) -> Bool {
+        true
     }
 }
 
