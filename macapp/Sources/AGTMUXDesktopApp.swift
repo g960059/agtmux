@@ -117,7 +117,10 @@ private struct CockpitView: View {
     @State private var windowTopInset: CGFloat = 0
     @State private var hoveringPaneID: String?
     @State private var hoveringSessionID: String?
+    @State private var sessionCursorActiveID: String?
+    @State private var collapsedSessionIDs: Set<String> = []
     @State private var draggingSessionID: String?
+    @State private var dropTargetSessionID: String?
     @State private var showSortPopover = false
     @State private var showSettingsPopover = false
     @State private var showAddTargetSheet = false
@@ -194,6 +197,10 @@ private struct CockpitView: View {
         }
         .onChange(of: model.panes.count) { _, _ in
             selectDefaultPaneIfNeeded()
+        }
+        .onChange(of: model.sessionSections.map(\.id)) { _, ids in
+            let live = Set(ids)
+            collapsedSessionIDs = collapsedSessionIDs.intersection(live)
         }
         .confirmationDialog(
             "Confirm Session Kill",
@@ -707,21 +714,49 @@ private struct CockpitView: View {
         let targetHealth = model.targetHealth(for: section.target)
         let targetToken = section.target.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let showTargetLabel = !(targetToken == "local" || targetToken.isEmpty)
+        let collapsed = collapsedSessionIDs.contains(section.id)
+        let creatingPane = model.isPaneCreationInFlight(target: section.target, sessionName: section.sessionName)
         let hovering = hoveringSessionID == section.id
-        let anchorPaneID = section.panes.first?.identity.paneID
+        let anchorPaneID: String? = {
+            if let selected = model.selectedPane,
+               selected.identity.target == section.target,
+               selected.identity.sessionName == section.sessionName {
+                return selected.identity.paneID
+            }
+            return section.panes.first?.identity.paneID
+        }()
         return VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 8) {
                 HStack(spacing: 7) {
-                    Image(systemName: "folder")
-                        .font(.system(size: 10, weight: .regular))
-                        .foregroundStyle(palette.textSecondary)
+                    if creatingPane {
+                        ProgressView()
+                            .controlSize(.small)
+                            .scaleEffect(0.75)
+                            .frame(width: 12, height: 12)
+                    } else if hovering {
+                        Button {
+                            toggleSessionCollapsed(section.id)
+                        } label: {
+                            Image(systemName: collapsed ? "chevron.right" : "chevron.down")
+                                .font(.system(size: 10, weight: .regular))
+                                .foregroundStyle(palette.textSecondary)
+                                .frame(width: 12, height: 12)
+                        }
+                        .buttonStyle(.plain)
+                        .help(collapsed ? "Expand session" : "Collapse session")
+                    } else {
+                        Image(systemName: "folder")
+                            .font(.system(size: 10, weight: .regular))
+                            .foregroundStyle(palette.textSecondary)
+                            .frame(width: 12, height: 12)
+                    }
                     Text(section.sessionName)
-                        .font(.system(size: 13, weight: .medium, design: .rounded))
+                        .font(.system(size: 13, weight: .regular, design: .rounded))
                         .foregroundStyle(palette.textPrimary)
                         .lineLimit(1)
                     if pinned {
                         Image(systemName: "pin.fill")
-                            .font(.system(size: 9, weight: .regular))
+                            .font(.system(size: 8, weight: .regular))
                             .foregroundStyle(palette.idle)
                     }
                 }
@@ -744,103 +779,120 @@ private struct CockpitView: View {
                             .fill(palette.rowFill)
                     )
                 }
-                if hovering {
-                    Button {
-                        model.performCreatePane(
-                            target: section.target,
-                            sessionName: section.sessionName,
-                            anchorPaneID: anchorPaneID
-                        )
-                    } label: {
-                        Image(systemName: "rectangle.split.2x1.badge.plus")
-                            .font(.system(size: 11, weight: .regular))
-                            .foregroundStyle(palette.textMuted)
+                Group {
+                    if creatingPane {
+                        ProgressView()
+                            .controlSize(.small)
+                            .scaleEffect(0.75)
                             .frame(width: 22, height: 20)
-                    }
-                    .buttonStyle(.plain)
-                    .help("New pane")
-
-                    Menu {
-                        Button("Rename Session") {
-                            beginSessionRename(section)
-                        }
-                        Button(pinned ? "Unpin Session" : "Pin Session") {
-                            model.setSessionPinned(
+                    } else {
+                        Button {
+                            model.performCreatePane(
                                 target: section.target,
                                 sessionName: section.sessionName,
-                                pinned: !pinned
+                                anchorPaneID: anchorPaneID
                             )
+                        } label: {
+                            Image(systemName: "square.and.pencil")
+                                .font(.system(size: 11, weight: .regular))
+                                .foregroundStyle(palette.textMuted)
+                                .frame(width: 22, height: 20)
                         }
-                        if model.canReconnectTarget(named: section.target) {
-                            Button("Reconnect Target") {
-                                model.reconnectTarget(named: section.target)
-                            }
-                        }
-                        Divider()
-                        Button("Kill Session", role: .destructive) {
-                            requestSessionKill(section)
-                        }
-                    } label: {
-                        Image(systemName: "ellipsis")
-                            .font(.system(size: 12, weight: .regular))
-                            .foregroundStyle(palette.textMuted)
-                            .frame(width: 20, height: 20)
+                        .buttonStyle(.plain)
+                        .help("Create New Pane")
                     }
-                    .menuStyle(.borderlessButton)
-                    .fixedSize()
                 }
+                .opacity(hovering ? 1 : 0)
+                .allowsHitTesting(hovering && !creatingPane)
             }
+            .frame(minHeight: 26, maxHeight: 26, alignment: .center)
+            .padding(.horizontal, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(hovering ? palette.rowHoverFill : Color.clear)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .stroke(hovering ? palette.rowHoverStroke : Color.clear, lineWidth: 1)
+            )
             .contentShape(Rectangle())
             .onHover { inside in
                 if inside {
                     hoveringSessionID = section.id
+                    if sessionCursorActiveID != section.id {
+                        if sessionCursorActiveID != nil {
+                            NSCursor.pop()
+                        }
+                        NSCursor.openHand.push()
+                        sessionCursorActiveID = section.id
+                    }
                 } else if hoveringSessionID == section.id {
                     hoveringSessionID = nil
+                    if sessionCursorActiveID == section.id {
+                        NSCursor.pop()
+                        sessionCursorActiveID = nil
+                    }
                 }
             }
             .contextMenu {
                 Button("Rename Session") { beginSessionRename(section) }
-                Button("New Pane") {
-                    model.performCreatePane(
-                        target: section.target,
-                        sessionName: section.sessionName,
-                        anchorPaneID: anchorPaneID
-                    )
-                }
                 Button(pinned ? "Unpin Session" : "Pin Session") {
                     model.setSessionPinned(target: section.target, sessionName: section.sessionName, pinned: !pinned)
-                }
-                if model.canReconnectTarget(named: section.target) {
-                    Button("Reconnect Target") {
-                        model.reconnectTarget(named: section.target)
-                    }
                 }
                 Divider()
                 Button("Kill Session", role: .destructive) {
                     requestSessionKill(section)
                 }
             }
-            .onDrag {
-                draggingSessionID = section.id
-                return NSItemProvider(object: NSString(string: section.id))
-            }
-            .onDrop(
-                of: [UTType.plainText],
-                delegate: SessionReorderDropDelegate(
-                    targetSessionID: section.id,
-                    draggingSessionID: $draggingSessionID
-                ) { sourceID, destinationID in
-                    model.reorderSessionSections(sourceID: sourceID, destinationID: destinationID)
-                }
-            )
 
-            paneList(
-                section.panes,
-                showWindowGroups: model.showWindowGroupBackground,
-                indentWhenFlat: true
-            )
+            if !collapsed {
+                paneList(
+                    section.panes,
+                    showWindowGroups: model.showWindowGroupBackground,
+                    indentWhenFlat: true
+                )
+                .transition(
+                    .asymmetric(
+                        insertion: .move(edge: .top).combined(with: .opacity),
+                        removal: .move(edge: .top).combined(with: .opacity)
+                    )
+                )
+            }
         }
         .padding(.bottom, 2)
+        .animation(.easeInOut(duration: 0.18), value: collapsed)
+        .overlay(alignment: .top) {
+            if dropTargetSessionID == section.id,
+               let dragging = draggingSessionID,
+               dragging != section.id {
+                Rectangle()
+                    .fill(palette.idle.opacity(0.85))
+                    .frame(height: 2)
+                    .padding(.horizontal, 4)
+            }
+        }
+        .contentShape(Rectangle())
+        .onDrag {
+            draggingSessionID = section.id
+            return NSItemProvider(object: NSString(string: section.id))
+        }
+        .onDrop(
+            of: [UTType.plainText],
+            delegate: SessionReorderDropDelegate(
+                targetSessionID: section.id,
+                draggingSessionID: $draggingSessionID,
+                dropTargetSessionID: $dropTargetSessionID
+            ) { sourceID, destinationID in
+                model.reorderSessionSections(sourceID: sourceID, destinationID: destinationID)
+            }
+        )
+        .onDisappear {
+            if sessionCursorActiveID == section.id {
+                NSCursor.pop()
+                sessionCursorActiveID = nil
+            }
+        }
+        .opacity(draggingSessionID == section.id ? 0.8 : 1.0)
     }
 
     private func statusSection(category: String, panes: [PaneItem]) -> some View {
@@ -1006,6 +1058,16 @@ private struct CockpitView: View {
         paneRenameDraft = model.paneDisplayTitle(for: pane)
     }
 
+    private func toggleSessionCollapsed(_ sessionID: String) {
+        withAnimation(.easeInOut(duration: 0.2)) {
+            if collapsedSessionIDs.contains(sessionID) {
+                collapsedSessionIDs.remove(sessionID)
+            } else {
+                collapsedSessionIDs.insert(sessionID)
+            }
+        }
+    }
+
     private func copyPanePath(_ pane: PaneItem) {
         let value = "\(pane.identity.target)/\(pane.identity.sessionName)/\(pane.identity.windowID)/\(pane.identity.paneID)"
         let pb = NSPasteboard.general
@@ -1143,6 +1205,7 @@ private struct CockpitView: View {
 private struct SessionReorderDropDelegate: DropDelegate {
     let targetSessionID: String
     @Binding var draggingSessionID: String?
+    @Binding var dropTargetSessionID: String?
     let onMove: (_ sourceID: String, _ destinationID: String) -> Void
 
     func dropEntered(info _: DropInfo) {
@@ -1150,14 +1213,32 @@ private struct SessionReorderDropDelegate: DropDelegate {
             return
         }
         guard sourceID != targetSessionID else {
+            if dropTargetSessionID == targetSessionID {
+                dropTargetSessionID = nil
+            }
             return
         }
-        onMove(sourceID, targetSessionID)
-        draggingSessionID = targetSessionID
+        dropTargetSessionID = targetSessionID
+    }
+
+    func dropExited(info _: DropInfo) {
+        if dropTargetSessionID == targetSessionID {
+            dropTargetSessionID = nil
+        }
     }
 
     func performDrop(info _: DropInfo) -> Bool {
-        draggingSessionID = nil
+        defer {
+            dropTargetSessionID = nil
+            draggingSessionID = nil
+        }
+        guard let sourceID = draggingSessionID else {
+            return false
+        }
+        guard sourceID != targetSessionID else {
+            return false
+        }
+        onMove(sourceID, targetSessionID)
         return true
     }
 

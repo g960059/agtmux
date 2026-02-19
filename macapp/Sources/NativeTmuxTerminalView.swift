@@ -510,7 +510,7 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
         ) {
             terminalView = terminal
             self.interactiveInputEnabled = interactiveInputEnabled
-            let claudePromptContrast = isLikelyClaudePane(pane)
+            let claudePromptContrast = shouldEnableClaudePromptContrast(pane: pane, content: content)
             applyPalette(
                 darkMode: appearanceModeIsDark,
                 claudePromptContrast: claudePromptContrast,
@@ -678,8 +678,37 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
             if title.contains("claude") {
                 return true
             }
+            return false
+        }
+
+        private func isLikelyCodexPane(_ pane: PaneItem) -> Bool {
+            let agent = pane.agentType?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+            if agent == "codex" {
+                return true
+            }
+            let cmd = pane.currentCmd?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+            if cmd == "codex" || cmd == "node" {
+                return true
+            }
             let label = pane.sessionLabel?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
-            return label.contains("claude")
+            if label.contains("codex") {
+                return true
+            }
+            return false
+        }
+
+        private func shouldEnableClaudePromptContrast(pane: PaneItem, content: String) -> Bool {
+            if isLikelyCodexPane(pane) {
+                return false
+            }
+            if isLikelyClaudePane(pane) {
+                return true
+            }
+            let normalized = content.lowercased()
+            if normalized.contains("claude code"), normalized.contains("-- insert --") {
+                return true
+            }
+            return false
         }
 
         private func applyPalette(
@@ -719,9 +748,9 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
             guard raw.contains("Try ") else {
                 return raw
             }
-            let open = "\u{001B}[38;2;18;24;32;48;2;236;240;246m"
+            let open = "\u{001B}[30;47m"
             let close = "\u{001B}[39;49m"
-            let marker = "48;2;236;240;246m"
+            let marker = "30;47m"
             var lines = raw.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
             guard !lines.isEmpty else {
                 return raw
@@ -747,20 +776,39 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
 
         private func firstPromptInputCharacterRange(in line: String) -> Range<String.Index>? {
             let plain = stripANSI(line)
-            guard let symbol = plain.first,
-                  symbol == "›" || symbol == "❯" || symbol == ">" else {
-                return nil
+            if let symbol = plain.first,
+               symbol == "›" || symbol == "❯" || symbol == ">" {
+                var visibleIndex = 1
+                var plainIndex = plain.index(after: plain.startIndex)
+                while plainIndex < plain.endIndex, plain[plainIndex].isWhitespace {
+                    visibleIndex += 1
+                    plain.formIndex(after: &plainIndex)
+                }
+                guard plainIndex < plain.endIndex else {
+                    return nil
+                }
+                return visibleCharacterRange(in: line, atVisibleIndex: visibleIndex)
             }
-            var visibleIndex = 1
-            var plainIndex = plain.index(after: plain.startIndex)
-            while plainIndex < plain.endIndex, plain[plainIndex].isWhitespace {
-                visibleIndex += 1
-                plain.formIndex(after: &plainIndex)
+
+            if let range = plain.range(of: "Try "), range.lowerBound < plain.endIndex {
+                let visibleIndex = plain.distance(from: plain.startIndex, to: range.lowerBound)
+                return visibleCharacterRange(in: line, atVisibleIndex: visibleIndex)
             }
-            guard plainIndex < plain.endIndex else {
-                return nil
+
+            if plain.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("Try") {
+                var visibleIndex = 0
+                var plainIndex = plain.startIndex
+                while plainIndex < plain.endIndex, plain[plainIndex].isWhitespace {
+                    visibleIndex += 1
+                    plain.formIndex(after: &plainIndex)
+                }
+                guard plainIndex < plain.endIndex else {
+                    return nil
+                }
+                return visibleCharacterRange(in: line, atVisibleIndex: visibleIndex)
             }
-            return visibleCharacterRange(in: line, atVisibleIndex: visibleIndex)
+
+            return nil
         }
 
         private func visibleCharacterRange(in raw: String, atVisibleIndex target: Int) -> Range<String.Index>? {

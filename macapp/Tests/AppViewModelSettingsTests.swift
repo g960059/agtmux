@@ -393,6 +393,90 @@ final class AppViewModelSettingsTests: XCTestCase {
         XCTAssertEqual(model.activityState(for: runningPane), "running")
     }
 
+    func testActivityStatePromotesManagedUnknownToRunningWhenRecentClaudeRunningSignal() throws {
+        let model = try makeModel()
+        let pane = PaneItem(
+            identity: PaneIdentity(target: "local", sessionName: "s1", windowID: "@1", paneID: "%1"),
+            windowName: nil,
+            currentCmd: "claude",
+            paneTitle: nil,
+            state: "unknown",
+            reasonCode: "inconclusive",
+            confidence: nil,
+            runtimeID: "rt-1",
+            agentType: "claude",
+            agentPresence: "managed",
+            activityState: "unknown",
+            displayCategory: "unknown",
+            needsUserAction: nil,
+            stateSource: "poller",
+            lastEventType: "agent.turn.started",
+            lastEventAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-2)),
+            awaitingResponseKind: nil,
+            sessionLabel: nil,
+            sessionLabelSource: nil,
+            lastInteractionAt: nil,
+            updatedAt: "2026-02-15T00:00:00Z"
+        )
+        XCTAssertEqual(model.activityState(for: pane), "running")
+    }
+
+    func testActivityStateDemotesManagedUnknownToIdleWithoutRunningSignal() throws {
+        let model = try makeModel()
+        let pane = PaneItem(
+            identity: PaneIdentity(target: "local", sessionName: "s1", windowID: "@1", paneID: "%1"),
+            windowName: nil,
+            currentCmd: "claude",
+            paneTitle: nil,
+            state: "unknown",
+            reasonCode: "inconclusive",
+            confidence: nil,
+            runtimeID: "rt-1",
+            agentType: "claude",
+            agentPresence: "managed",
+            activityState: "unknown",
+            displayCategory: "unknown",
+            needsUserAction: nil,
+            stateSource: "poller",
+            lastEventType: "unknown",
+            lastEventAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-1)),
+            awaitingResponseKind: nil,
+            sessionLabel: nil,
+            sessionLabelSource: nil,
+            lastInteractionAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-1)),
+            updatedAt: "2026-02-15T00:00:00Z"
+        )
+        XCTAssertEqual(model.activityState(for: pane), "idle")
+    }
+
+    func testActivityStateInfersWaitingInputFromExpandedEventVocabulary() throws {
+        let model = try makeModel()
+        let pane = PaneItem(
+            identity: PaneIdentity(target: "local", sessionName: "s1", windowID: "@1", paneID: "%1"),
+            windowName: nil,
+            currentCmd: "claude",
+            paneTitle: nil,
+            state: "unknown",
+            reasonCode: nil,
+            confidence: nil,
+            runtimeID: "rt-1",
+            agentType: "claude",
+            agentPresence: "managed",
+            activityState: "unknown",
+            displayCategory: "unknown",
+            needsUserAction: nil,
+            stateSource: "hook",
+            lastEventType: "agent.user_input_required",
+            lastEventAt: ISO8601DateFormatter().string(from: Date()),
+            awaitingResponseKind: nil,
+            sessionLabel: nil,
+            sessionLabelSource: nil,
+            lastInteractionAt: nil,
+            updatedAt: "2026-02-15T00:00:00Z"
+        )
+        XCTAssertEqual(model.activityState(for: pane), "waiting_input")
+    }
+
     func testSessionStableOrderPersistsAcrossModelInstances() throws {
         let suiteName = "AGTMUXDesktopTests-SessionOrder-\(UUID().uuidString)"
         guard let defaults = UserDefaults(suiteName: suiteName) else {
@@ -1076,6 +1160,31 @@ final class AppViewModelSettingsTests: XCTestCase {
         XCTAssertTrue(ok)
         XCTAssertNil(model.selectedPane)
         XCTAssertTrue(model.panes.contains(where: { $0.identity.sessionName == "keep-me" }))
+    }
+
+    func testPerformCreatePaneUsesAnchorCurrentPathAndSelectsCreatedPane() async throws {
+        let capture = ExternalTerminalRunCapture()
+        let model = try makeModel(externalTerminalCommandRunner: { executable, args in
+            capture.set(executable: executable, args: args)
+            return "%2\n"
+        })
+        let basePane = makePane(paneID: "%1", displayCategory: "idle", target: "local", sessionName: "proj")
+        let newPane = makePane(paneID: "%2", displayCategory: "idle", target: "local", sessionName: "proj")
+        model.panes = [basePane, newPane]
+        model.selectedPane = basePane
+
+        model.performCreatePane(target: "local", sessionName: "proj", anchorPaneID: "%1")
+        let created = await waitUntil {
+            model.selectedPane?.identity.paneID == "%2"
+        }
+        XCTAssertTrue(created)
+
+        let captured = capture.snapshot()
+        XCTAssertEqual(captured.executable, "/bin/zsh")
+        XCTAssertEqual(captured.args.count, 2)
+        XCTAssertEqual(captured.args[0], "-lc")
+        XCTAssertTrue(captured.args[1].contains("tmux split-window -P -F '#{pane_id}' -t '%1'"))
+        XCTAssertTrue(captured.args[1].contains("-c '#{pane_current_path}'"))
     }
 
     func testInteractiveTerminalInputPreferenceDefaultsToTrueAndPersists() throws {

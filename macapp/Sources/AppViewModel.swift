@@ -192,6 +192,7 @@ final class AppViewModel: ObservableObject {
     @Published var sessions: [SessionItem] = []
     @Published var windows: [WindowItem] = []
     @Published var panes: [PaneItem] = []
+    @Published private(set) var paneCreationInFlightSessionKeys: Set<String> = []
     let nativeTmuxTerminalEnabled: Bool
     @Published var selectedPane: PaneItem? {
         didSet {
@@ -502,6 +503,10 @@ final class AppViewModel: ObservableObject {
         pinnedSessionKeys.contains(paneSessionKey(target: target, sessionName: sessionName))
     }
 
+    func isPaneCreationInFlight(target: String, sessionName: String) -> Bool {
+        paneCreationInFlightSessionKeys.contains(paneSessionKey(target: target, sessionName: sessionName))
+    }
+
     func setSessionPinned(target: String, sessionName: String, pinned: Bool) {
         let key = paneSessionKey(target: target, sessionName: sessionName)
         if pinned {
@@ -574,20 +579,31 @@ final class AppViewModel: ObservableObject {
             errorMessage = "session identity is incomplete"
             return
         }
+        let sessionKey = paneSessionKey(target: targetToken, sessionName: sessionToken)
         let anchor = anchorPaneID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let command: String
         if !anchor.isEmpty {
-            command = "tmux split-window -t \(shellQuote(anchor))"
+            command = "tmux split-window -P -F '#{pane_id}' -t \(shellQuote(anchor)) -c \(shellQuote("#{pane_current_path}"))"
         } else {
-            command = "tmux split-window -t \(shellQuote(sessionToken))"
+            command = "tmux split-window -P -F '#{pane_id}' -t \(shellQuote(sessionToken))"
         }
+        paneCreationInFlightSessionKeys.insert(sessionKey)
         Task {
+            defer {
+                paneCreationInFlightSessionKeys.remove(sessionKey)
+            }
             do {
                 let invocation = try buildTmuxInvocation(target: targetToken, operation: "create pane", command: command)
-                _ = try externalTerminalCommandRunner(invocation.executable, invocation.args)
+                let output = try externalTerminalCommandRunner(invocation.executable, invocation.args)
+                let createdPaneID = parseCreatedPaneID(output)
                 infoMessage = "pane created: \(sessionToken)"
                 errorMessage = ""
                 await refresh()
+                selectCreatedPane(
+                    target: targetToken,
+                    sessionName: sessionToken,
+                    paneID: createdPaneID
+                )
             } catch {
                 infoMessage = ""
                 errorMessage = error.localizedDescription
@@ -1519,6 +1535,10 @@ final class AppViewModel: ObservableObject {
                 return "idle"
             }
             if state == "unknown",
+               shouldTreatManagedUnknownAsRunning(pane) {
+                return "running"
+            }
+            if state == "unknown",
                shouldDemoteManagedUnknownToIdle(pane) {
                 return "idle"
             }
@@ -1538,6 +1558,9 @@ final class AppViewModel: ObservableObject {
         case "idle", "completed":
             return "idle"
         default:
+            if shouldTreatManagedUnknownAsRunning(pane) {
+                return "running"
+            }
             if shouldDemoteManagedUnknownToIdle(pane) {
                 return "idle"
             }
@@ -3435,19 +3458,55 @@ final class AppViewModel: ObservableObject {
             .replacingOccurrences(of: ".", with: "_")
             .replacingOccurrences(of: "-", with: "_")
             .replacingOccurrences(of: ":", with: "_")
-        if canonical.contains("approval_requested") || canonical.contains("waiting_approval") {
+        let approvalTokens = [
+            "approval_requested",
+            "waiting_approval",
+            "needs_approval",
+            "approval_required",
+            "permission_required",
+            "confirm_required",
+        ]
+        if approvalTokens.contains(where: { canonical.contains($0) }) {
             return "waiting_approval"
         }
-        if canonical.contains("input_requested") || canonical.contains("waiting_input") {
+        let inputTokens = [
+            "input_requested",
+            "waiting_input",
+            "needs_input",
+            "input_required",
+            "awaiting_input",
+            "user_input",
+            "resume_required",
+        ]
+        if inputTokens.contains(where: { canonical.contains($0) }) {
             return "waiting_input"
         }
         if canonical.contains("error") || canonical.contains("failed") {
             return "error"
         }
-        if canonical.contains("running") || canonical.contains("active") {
+        let runningTokens = [
+            "running",
+            "active",
+            "working",
+            "in_progress",
+            "processing",
+            "thinking",
+            "streaming",
+            "tool_call",
+            "executing",
+        ]
+        if runningTokens.contains(where: { canonical.contains($0) }) {
             return "running"
         }
-        if canonical.contains("complete") || canonical.contains("finished") || canonical.contains("idle") {
+        let idleTokens = [
+            "complete",
+            "finished",
+            "idle",
+            "ready",
+            "stopped",
+            "quiescent",
+        ]
+        if idleTokens.contains(where: { canonical.contains($0) }) {
             return "idle"
         }
         return nil
@@ -3457,18 +3516,192 @@ final class AppViewModel: ObservableObject {
         if agentPresence(for: pane) != "managed" {
             return false
         }
+        if let inferredFromReason = inferAttentionStateFromReason(pane.reasonCode),
+           inferredFromReason != "idle" {
+            return false
+        }
+        if let inferredFromEvent = inferAttentionStateFromEvent(pane.lastEventType),
+           inferredFromEvent != "idle" {
+            return false
+        }
         let reason = normalizedToken(pane.reasonCode) ?? ""
         let state = normalizedToken(pane.state) ?? ""
         let event = normalizedToken(pane.lastEventType) ?? ""
         if reason == "inconclusive" || state == "unknown" || event == "unknown" {
             if let cmd = normalizedToken(pane.currentCmd), cmd == "claude" || cmd == "codex" {
+                if shouldTreatManagedUnknownAsRunning(pane) {
+                    return false
+                }
                 return true
             }
             if let agent = normalizedToken(pane.agentType), agent == "claude" || agent == "codex" {
+                if shouldTreatManagedUnknownAsRunning(pane) {
+                    return false
+                }
                 return true
             }
         }
         return false
+    }
+
+    private func shouldTreatManagedUnknownAsRunning(_ pane: PaneItem) -> Bool {
+        if agentPresence(for: pane) != "managed" {
+            return false
+        }
+        let reasonToken = canonicalSignalToken(pane.reasonCode)
+        let eventToken = canonicalSignalToken(pane.lastEventType)
+        if hasAttentionSignal(reasonToken) || hasAttentionSignal(eventToken) {
+            return false
+        }
+        if hasIdleOrCompletionSignal(reasonToken) || hasIdleOrCompletionSignal(eventToken) {
+            return false
+        }
+        guard hasRunningSignal(reasonToken) || hasRunningSignal(eventToken) else {
+            return false
+        }
+        let now = Date()
+        if let eventAt = parseTimestamp(pane.lastEventAt ?? ""),
+           !isAdministrativeEventType(pane.lastEventType),
+           now.timeIntervalSince(eventAt) <= 12 {
+            return true
+        }
+        if let interactionAt = parseTimestamp(pane.lastInteractionAt ?? ""),
+           now.timeIntervalSince(interactionAt) <= 12 {
+            return true
+        }
+        return false
+    }
+
+    private func canonicalSignalToken(_ value: String?) -> String {
+        guard let normalized = normalizedToken(value) else {
+            return ""
+        }
+        return normalized
+            .replacingOccurrences(of: ".", with: "_")
+            .replacingOccurrences(of: "-", with: "_")
+            .replacingOccurrences(of: ":", with: "_")
+            .replacingOccurrences(of: " ", with: "_")
+    }
+
+    private func hasRunningSignal(_ token: String) -> Bool {
+        if token.isEmpty {
+            return false
+        }
+        for marker in [
+            "running",
+            "active",
+            "working",
+            "in_progress",
+            "progress",
+            "streaming",
+            "task_started",
+            "session_started",
+            "agent_turn_started",
+            "tool_call",
+            "executing",
+            "thinking",
+        ] {
+            if token.contains(marker) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func hasIdleOrCompletionSignal(_ token: String) -> Bool {
+        if token.isEmpty {
+            return false
+        }
+        for marker in [
+            "idle",
+            "complete",
+            "completed",
+            "finished",
+            "exit",
+            "stopped",
+            "done",
+            "ready",
+            "quiescent",
+        ] {
+            if token.contains(marker) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func hasAttentionSignal(_ token: String) -> Bool {
+        if token.isEmpty {
+            return false
+        }
+        for marker in [
+            "waiting_input",
+            "needs_input",
+            "input_requested",
+            "awaiting_input",
+            "waiting_approval",
+            "approval_required",
+            "approval_requested",
+            "error",
+            "failed",
+            "panic",
+        ] {
+            if token.contains(marker) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func parseCreatedPaneID(_ output: String) -> String? {
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return nil
+        }
+        if let direct = trimmed
+            .split(whereSeparator: \.isWhitespace)
+            .last(where: { $0.hasPrefix("%") }),
+           !direct.isEmpty {
+            return String(direct)
+        }
+        guard let regex = try? NSRegularExpression(pattern: "%\\d+", options: []) else {
+            return nil
+        }
+        let range = NSRange(location: 0, length: (trimmed as NSString).length)
+        let matches = regex.matches(in: trimmed, options: [], range: range)
+        guard let last = matches.last else {
+            return nil
+        }
+        let ns = trimmed as NSString
+        return ns.substring(with: last.range)
+    }
+
+    private func selectCreatedPane(target: String, sessionName: String, paneID: String?) {
+        let targetToken = normalizedTargetLookupKey(target)
+        let sessionToken = sessionName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let panesInSession = panes.filter { pane in
+            normalizedTargetLookupKey(pane.identity.target) == targetToken &&
+                pane.identity.sessionName == sessionToken
+        }
+        guard !panesInSession.isEmpty else {
+            return
+        }
+        if let paneID,
+           let exact = panesInSession.first(where: { $0.identity.paneID == paneID }) {
+            selectedPane = exact
+            return
+        }
+        let sorted = panesInSession.sorted { lhs, rhs in
+            let lDate = paneRecencyDate(for: lhs) ?? Date.distantPast
+            let rDate = paneRecencyDate(for: rhs) ?? Date.distantPast
+            if lDate != rDate {
+                return lDate > rDate
+            }
+            let lNum = Int(lhs.identity.paneID.dropFirst()) ?? 0
+            let rNum = Int(rhs.identity.paneID.dropFirst()) ?? 0
+            return lNum > rNum
+        }
+        selectedPane = sorted.first
     }
 
     private func isAdministrativeEventType(_ eventType: String?) -> Bool {
