@@ -375,13 +375,13 @@ final class AppViewModel: ObservableObject {
     private let terminalCapabilitiesCacheTTLSeconds: TimeInterval = 60
     private let snapshotPollIntervalSeconds: TimeInterval = 2
     private let snapshotPollIntervalStreamingSeconds: TimeInterval = 4
-    private let terminalStreamPollFastMillis = 70
-    private let terminalStreamPollNormalMillis = 120
-    private let terminalStreamPollIdleMillis = 220
+    private let terminalStreamPollFastMillis = 45
+    private let terminalStreamPollNormalMillis = 75
+    private let terminalStreamPollIdleMillis = 140
     private let terminalStreamFastWindowSeconds: TimeInterval = 1.2
-    private let terminalStreamDefaultLines = 120
-    private let terminalStreamMinLines = 90
-    private let terminalStreamMaxLines = 240
+    private let terminalStreamDefaultLines = 240
+    private let terminalStreamMinLines = 160
+    private let terminalStreamMaxLines = 1200
     private let snapshotPollBackoffUnchangedStepCount = 3
     private let snapshotPollBackoffMaxExtraSeconds = 6
     private let snapshotPollUnchangedStreakCap = 120
@@ -2146,7 +2146,7 @@ final class AppViewModel: ObservableObject {
 
     private func currentTerminalStreamLineBudget(for _: String) -> Int {
         let baseRows = max(0, terminalPaneRows ?? 0)
-        let baseline = baseRows > 0 ? baseRows + 32 : terminalStreamDefaultLines
+        let baseline = baseRows > 0 ? baseRows + 200 : terminalStreamDefaultLines
         return min(max(baseline, terminalStreamMinLines), terminalStreamMaxLines)
     }
 

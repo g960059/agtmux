@@ -833,41 +833,34 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
             if lines.count > maxBufferedLines {
                 lines = Array(lines.suffix(maxBufferedLines))
             }
-            // Snapshot is pane-sized in tmux terms. Normalize to terminal-sized viewport.
-            var sourceWindowLines = Array(lines.suffix(sourceRows))
-            if sourceWindowLines.count < sourceRows {
-                sourceWindowLines.insert(
-                    contentsOf: Array(repeating: "", count: sourceRows - sourceWindowLines.count),
+            // Interpret cursorY as row index inside the pane viewport (sourceRows),
+            // then map to absolute line index inside the retained history buffer.
+            var viewportLines = Array(lines.suffix(sourceRows))
+            if viewportLines.count < sourceRows {
+                viewportLines.insert(
+                    contentsOf: Array(repeating: "", count: sourceRows - viewportLines.count),
                     at: 0
                 )
             }
 
-            let inferredSourceCursorY = inferCursorRow(lines: sourceWindowLines)
+            let inferredSourceCursorY = inferCursorRow(lines: viewportLines)
             let effectiveSourceCursorY = min(max(cursorY ?? inferredSourceCursorY, 0), sourceRows - 1)
-            let sourceCursorLineIndex = min(max(effectiveSourceCursorY, 0), max(sourceWindowLines.count - 1, 0))
+            let sourceCursorLineIndex = min(max(effectiveSourceCursorY, 0), max(viewportLines.count - 1, 0))
             let inferredSourceCursorX = inferCursorColumn(
-                line: sourceWindowLines[sourceCursorLineIndex],
+                line: viewportLines[sourceCursorLineIndex],
                 maxCols: sourceCols
             )
             let effectiveSourceCursorX = min(max(cursorX ?? inferredSourceCursorX, 0), sourceCols - 1)
+            let cursorDistanceFromBottom = max(0, sourceRows - 1 - effectiveSourceCursorY)
+            var cursorAbsoluteLine = max(0, lines.count - 1 - cursorDistanceFromBottom)
 
-            var renderLines: [String]
-            var mappedCursorY: Int
-            if sourceRows > terminalRows {
-                let start = sourceRows - terminalRows
-                renderLines = Array(sourceWindowLines.suffix(terminalRows))
-                mappedCursorY = effectiveSourceCursorY - start
-            } else {
-                let topPadding = terminalRows - sourceRows
-                renderLines = Array(repeating: "", count: topPadding) + sourceWindowLines
-                mappedCursorY = effectiveSourceCursorY + topPadding
+            // Keep enough local history for wheel scroll while bounding repaint cost.
+            let maxRenderLines = max(terminalRows * 6, 240)
+            if lines.count > maxRenderLines {
+                let dropCount = lines.count - maxRenderLines
+                lines = Array(lines.suffix(maxRenderLines))
+                cursorAbsoluteLine = max(0, cursorAbsoluteLine - dropCount)
             }
-            if renderLines.count < terminalRows {
-                renderLines += Array(repeating: "", count: terminalRows - renderLines.count)
-            } else if renderLines.count > terminalRows {
-                renderLines = Array(renderLines.suffix(terminalRows))
-            }
-            mappedCursorY = min(max(mappedCursorY, 0), terminalRows - 1)
 
             var out = ""
             let estimatedContentChars = lines.reduce(into: 0) { $0 += min($1.count, terminalCols) + 1 }
@@ -878,14 +871,16 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
             out += "\u{001B}[?7l"  // disable line wrap
             out += "\u{001B}[H"
             out += "\u{001B}[2J"
-            for (idx, rawLine) in renderLines.enumerated() {
+            for (idx, rawLine) in lines.enumerated() {
                 out += clampLine(rawLine, toColumns: terminalCols)
                 // Extend current line attributes (including background color) to full width.
                 out += "\u{001B}[K"
-                if idx < renderLines.count - 1 {
+                if idx < lines.count - 1 {
                     out += "\r\n"
                 }
             }
+            let viewportStart = max(0, lines.count - terminalRows)
+            let mappedCursorY = min(max(cursorAbsoluteLine - viewportStart, 0), terminalRows - 1)
             let clampedX = min(max(effectiveSourceCursorX, 0), min(sourceCols - 1, terminalCols - 1))
             out += "\u{001B}[\(mappedCursorY + 1);\(clampedX + 1)H"
 
@@ -913,60 +908,35 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
             let sourceRows = max(1, paneRows ?? terminalRows)
             let sourceCols = max(1, paneCols ?? terminalCols)
             let lines = lastRenderedLines.isEmpty ? [""] : lastRenderedLines
-            var sourceWindowLines = Array(lines.suffix(sourceRows))
-            if sourceWindowLines.count < sourceRows {
-                sourceWindowLines.insert(
-                    contentsOf: Array(repeating: "", count: sourceRows - sourceWindowLines.count),
+            var viewportLines = Array(lines.suffix(sourceRows))
+            if viewportLines.count < sourceRows {
+                viewportLines.insert(
+                    contentsOf: Array(repeating: "", count: sourceRows - viewportLines.count),
                     at: 0
                 )
             }
 
-            let inferredCursorY = inferCursorRow(lines: sourceWindowLines)
+            let inferredCursorY = inferCursorRow(lines: viewportLines)
             let sourceCursorY = min(max(cursorY ?? inferredCursorY, 0), sourceRows - 1)
-            let sourceCursorLineIndex = min(max(sourceCursorY, 0), max(sourceWindowLines.count - 1, 0))
+            let sourceCursorLineIndex = min(max(sourceCursorY, 0), max(viewportLines.count - 1, 0))
             let inferredCursorX = inferCursorColumn(
-                line: sourceWindowLines[sourceCursorLineIndex],
+                line: viewportLines[sourceCursorLineIndex],
                 maxCols: sourceCols
             )
             let sourceCursorX = min(max(cursorX ?? inferredCursorX, 0), sourceCols - 1)
-
-            let mapped = mapCursorPosition(
-                sourceCursorX: sourceCursorX,
-                sourceCursorY: sourceCursorY,
-                sourceCols: sourceCols,
-                sourceRows: sourceRows,
-                terminalCols: terminalCols,
-                terminalRows: terminalRows
-            )
-            let frame = "\u{001B}[?25l\u{001B}[\(mapped.y + 1);\(mapped.x + 1)H\u{001B}[?25h"
+            let cursorDistanceFromBottom = max(0, sourceRows - 1 - sourceCursorY)
+            let cursorAbsoluteLine = max(0, lines.count - 1 - cursorDistanceFromBottom)
+            let viewportStart = max(0, lines.count - terminalRows)
+            let mappedY = min(max(cursorAbsoluteLine - viewportStart, 0), terminalRows - 1)
+            let mappedX = min(max(sourceCursorX, 0), min(sourceCols - 1, terminalCols - 1))
+            let frame = "\u{001B}[?25l\u{001B}[\(mappedY + 1);\(mappedX + 1)H\u{001B}[?25h"
             return RepaintFrame(
                 frame: frame,
-                cursorX: mapped.x,
-                cursorY: mapped.y,
+                cursorX: mappedX,
+                cursorY: mappedY,
                 paneCols: terminalCols,
                 paneRows: terminalRows
             )
-        }
-
-        private func mapCursorPosition(
-            sourceCursorX: Int,
-            sourceCursorY: Int,
-            sourceCols: Int,
-            sourceRows: Int,
-            terminalCols: Int,
-            terminalRows: Int
-        ) -> (x: Int, y: Int) {
-            var mappedCursorY: Int
-            if sourceRows > terminalRows {
-                let start = sourceRows - terminalRows
-                mappedCursorY = sourceCursorY - start
-            } else {
-                let topPadding = terminalRows - sourceRows
-                mappedCursorY = sourceCursorY + topPadding
-            }
-            mappedCursorY = min(max(mappedCursorY, 0), terminalRows - 1)
-            let mappedCursorX = min(max(sourceCursorX, 0), min(sourceCols - 1, terminalCols - 1))
-            return (mappedCursorX, mappedCursorY)
         }
 
         private func inferCursorRow(lines: [String]) -> Int {
