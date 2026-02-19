@@ -1557,6 +1557,23 @@ final class AppViewModel: ObservableObject {
     }
 
     func displayCategory(for pane: PaneItem) -> String {
+        if pane.stateEngineVersion == "v2-shadow" || normalizedToken(pane.activityStateV2) != nil {
+            let presence = agentPresence(for: pane)
+            let activity = activityState(for: pane)
+            if presence == "none" {
+                return "unmanaged"
+            }
+            switch activity {
+            case "waiting_input", "waiting_approval", "error":
+                return "attention"
+            case "running":
+                return "running"
+            case "idle":
+                return "idle"
+            default:
+                return "unknown"
+            }
+        }
         if let cat = normalizedToken(pane.displayCategory) {
             if cat == "unknown", agentPresence(for: pane) == "managed" {
                 switch activityState(for: pane) {
@@ -1602,6 +1619,20 @@ final class AppViewModel: ObservableObject {
     }
 
     func activityState(for pane: PaneItem) -> String {
+        if pane.stateEngineVersion == "v2-shadow",
+           let stateV2 = normalizedToken(pane.activityStateV2) {
+            if stateV2 == "completed" {
+                return "idle"
+            }
+            return stateV2
+        }
+        if let stateV2 = normalizedToken(pane.activityStateV2) {
+            if stateV2 == "completed" {
+                return "idle"
+            }
+            return stateV2
+        }
+
         if let inferred = inferAttentionStateFromReason(pane.reasonCode) {
             return inferred
         }
@@ -1648,6 +1679,12 @@ final class AppViewModel: ObservableObject {
     }
 
     func stateReason(for pane: PaneItem) -> String {
+        if pane.stateEngineVersion == "v2-shadow",
+           let reasons = pane.activityReasonsV2,
+           let first = reasons.first,
+           !first.isEmpty {
+            return formatReason(first)
+        }
         switch activityState(for: pane) {
         case "waiting_input":
             return "waiting input"
@@ -1665,6 +1702,17 @@ final class AppViewModel: ObservableObject {
         default:
             return pane.reasonCode ?? "unknown"
         }
+    }
+
+    private func formatReason(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return "unknown"
+        }
+        if trimmed.hasPrefix("raw:") {
+            return String(trimmed.dropFirst(4)).replacingOccurrences(of: "_", with: " ")
+        }
+        return trimmed.replacingOccurrences(of: "_", with: " ")
     }
 
     func paneDisplayTitle(for pane: PaneItem, among candidates: [PaneItem]? = nil) -> String {

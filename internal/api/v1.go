@@ -61,6 +61,12 @@ type ListSummary struct {
 	ByStateV2            map[string]int `json:"by_state_v2,omitempty"`
 	ByProviderV2         map[string]int `json:"by_provider_v2,omitempty"`
 	BySourceV2           map[string]int `json:"by_source_v2,omitempty"`
+	V2EvalCount          int            `json:"v2_eval_count,omitempty"`
+	V2UnknownRate        float64        `json:"v2_unknown_rate,omitempty"`
+	V2StateFlipRate      float64        `json:"v2_state_flip_rate,omitempty"`
+	V2DecisionLatencyMS  float64        `json:"v2_decision_latency_ms,omitempty"`
+	ClaudeTitleMatchRate float64        `json:"claude_title_match_rate,omitempty"`
+	ByClaudeTitleSource  map[string]int `json:"by_claude_title_source,omitempty"`
 }
 
 type PaneIdentity struct {

@@ -86,6 +86,8 @@ type Server struct {
 	claudePreviewMu  sync.Mutex
 	claudePreview    map[string]claudePreviewCacheEntry
 	claudePreviewTTL time.Duration
+	stateV2Mu        sync.Mutex
+	stateV2ByPane    map[string]string
 	snapshotTTL      time.Duration
 	auditEventHook   func(action model.Action, eventType string) error
 	shutdown         sync.Once
@@ -143,6 +145,7 @@ func NewServerWithDeps(cfg config.Config, store *db.Store, executor *target.Exec
 		claudeHistoryTTL: defaultClaudeHistoryCacheTTL,
 		claudePreview:    map[string]claudePreviewCacheEntry{},
 		claudePreviewTTL: defaultClaudePreviewCacheTTL,
+		stateV2ByPane:    map[string]string{},
 		stateEngine:      stateengine.NewEngine(provideradapters.DefaultRegistry()),
 		snapshotTTL:      defaultActionSnapshotTTL,
 		httpSrv: &http.Server{
@@ -2856,9 +2859,16 @@ func (s *Server) buildPaneItems(ctx context.Context, targets []model.Target) ([]
 		ByStateV2:            map[string]int{},
 		ByProviderV2:         map[string]int{},
 		BySourceV2:           map[string]int{},
+		ByClaudeTitleSource:  map[string]int{},
 	}
 	items := make([]api.PaneItem, 0, len(panes))
 	presentationNow := time.Now().UTC()
+	v2EvalCount := 0
+	v2UnknownCount := 0
+	v2FlipCount := 0
+	v2DecisionLatencyTotal := time.Duration(0)
+	claudeTitleTotal := 0
+	claudeTitleMatchCount := 0
 	for _, p := range panes {
 		if _, ok := requestedIDs[p.TargetID]; !ok {
 			continue
@@ -2986,6 +2996,7 @@ func (s *Server) buildPaneItems(ctx context.Context, targets []model.Target) ([]
 		providerConfV2 := 0.0
 		evidenceTraceID := ""
 		if s.stateEngine != nil {
+			decisionStartedAt := time.Now()
 			eval := s.stateEngine.Evaluate(stateengine.PaneMeta{
 				TargetID:          p.TargetID,
 				PaneID:            p.PaneID,
@@ -3003,6 +3014,8 @@ func (s *Server) buildPaneItems(ctx context.Context, targets []model.Target) ([]
 				LastInteractionAt: lastInteractionAt,
 				UpdatedAt:         updatedAt.UTC(),
 			}, presentationNow)
+			v2EvalCount++
+			v2DecisionLatencyTotal += time.Since(decisionStartedAt)
 			stateV2 = eval.ActivityState
 			activityConfV2 = eval.ActivityConfidence
 			activitySrcV2 = eval.ActivitySource
@@ -3012,6 +3025,12 @@ func (s *Server) buildPaneItems(ctx context.Context, targets []model.Target) ([]
 			providerV2 = eval.Provider
 			providerConfV2 = eval.ProviderConfidence
 			evidenceTraceID = eval.EvidenceTraceID
+			if strings.EqualFold(strings.TrimSpace(stateV2), string(model.StateUnknown)) {
+				v2UnknownCount++
+			}
+			if s.recordV2StateFlip(key, stateV2) {
+				v2FlipCount++
+			}
 		}
 		item := api.PaneItem{
 			Identity: api.PaneIdentity{
@@ -3057,6 +3076,19 @@ func (s *Server) buildPaneItems(ctx context.Context, targets []model.Target) ([]
 		if sessionLabelSource != "" {
 			summary.BySessionLabelSource[sessionLabelSource]++
 		}
+		if strings.EqualFold(strings.TrimSpace(agentType), "claude") {
+			claudeTitleTotal++
+			labelSource := strings.TrimSpace(sessionLabelSource)
+			if labelSource == "" {
+				labelSource = "unknown"
+			}
+			summary.ByClaudeTitleSource[labelSource]++
+			if labelSource == "claude_session_jsonl" ||
+				labelSource == "claude_history_display" ||
+				labelSource == "claude_resume_id" {
+				claudeTitleMatchCount++
+			}
+		}
 		if stateV2 != "" {
 			summary.ByStateV2[stateV2]++
 		}
@@ -3066,6 +3098,15 @@ func (s *Server) buildPaneItems(ctx context.Context, targets []model.Target) ([]
 		if activitySrcV2 != "" {
 			summary.BySourceV2[activitySrcV2]++
 		}
+	}
+	if v2EvalCount > 0 {
+		summary.V2EvalCount = v2EvalCount
+		summary.V2UnknownRate = float64(v2UnknownCount) / float64(v2EvalCount)
+		summary.V2StateFlipRate = float64(v2FlipCount) / float64(v2EvalCount)
+		summary.V2DecisionLatencyMS = float64(v2DecisionLatencyTotal.Microseconds()) / 1000.0 / float64(v2EvalCount)
+	}
+	if claudeTitleTotal > 0 {
+		summary.ClaudeTitleMatchRate = float64(claudeTitleMatchCount) / float64(claudeTitleTotal)
 	}
 	return items, summary, nil
 }
@@ -3077,6 +3118,19 @@ func shouldUseCodexWorkspaceHint(pathKey string, codexPaneCountByPath map[string
 	}
 	count := codexPaneCountByPath[key]
 	return count <= 1
+}
+
+func (s *Server) recordV2StateFlip(paneKey, state string) bool {
+	key := strings.TrimSpace(paneKey)
+	next := strings.TrimSpace(state)
+	if key == "" || next == "" {
+		return false
+	}
+	s.stateV2Mu.Lock()
+	defer s.stateV2Mu.Unlock()
+	prev := strings.TrimSpace(s.stateV2ByPane[key])
+	s.stateV2ByPane[key] = next
+	return prev != "" && prev != next
 }
 
 func (s *Server) hydrateCodexCandidateThreadIDs(

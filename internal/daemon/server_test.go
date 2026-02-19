@@ -1287,6 +1287,18 @@ func TestListPanesIncludesStateEngineV2ShadowFields(t *testing.T) {
 	if resp.Summary.ByProviderV2["codex"] == 0 {
 		t.Fatalf("expected summary by_provider_v2 codex count, got %+v", resp.Summary.ByProviderV2)
 	}
+	if resp.Summary.V2EvalCount != 1 {
+		t.Fatalf("expected v2_eval_count=1, got %+v", resp.Summary)
+	}
+	if resp.Summary.V2UnknownRate < 0 || resp.Summary.V2UnknownRate > 1 {
+		t.Fatalf("unexpected v2_unknown_rate: %+v", resp.Summary)
+	}
+	if resp.Summary.V2StateFlipRate < 0 || resp.Summary.V2StateFlipRate > 1 {
+		t.Fatalf("unexpected v2_state_flip_rate: %+v", resp.Summary)
+	}
+	if resp.Summary.V2DecisionLatencyMS < 0 {
+		t.Fatalf("unexpected negative v2_decision_latency_ms: %+v", resp.Summary)
+	}
 }
 
 func TestAttachActionIdempotent(t *testing.T) {

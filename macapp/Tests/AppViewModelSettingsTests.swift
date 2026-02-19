@@ -393,6 +393,44 @@ final class AppViewModelSettingsTests: XCTestCase {
         XCTAssertEqual(model.activityState(for: runningPane), "running")
     }
 
+    func testActivityStatePrefersV2ShadowStateOverLegacyInference() throws {
+        let model = try makeModel()
+        let pane = PaneItem(
+            identity: PaneIdentity(target: "local", sessionName: "s1", windowID: "@1", paneID: "%1"),
+            windowName: nil,
+            currentCmd: "claude",
+            paneTitle: nil,
+            state: "unknown",
+            reasonCode: "waiting_input",
+            confidence: nil,
+            runtimeID: "rt-1",
+            agentType: "claude",
+            agentPresence: "managed",
+            activityState: "unknown",
+            displayCategory: "unknown",
+            needsUserAction: nil,
+            stateSource: "poller",
+            lastEventType: "agent.user_input_required",
+            lastEventAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-2)),
+            awaitingResponseKind: nil,
+            sessionLabel: nil,
+            sessionLabelSource: nil,
+            lastInteractionAt: nil,
+            stateEngineVersion: "v2-shadow",
+            providerV2: "claude",
+            providerConfidenceV2: 0.99,
+            activityStateV2: "idle",
+            activityConfidenceV2: 0.85,
+            activitySourceV2: "poller",
+            activityReasonsV2: ["raw:managed_no_strong_signal"],
+            evidenceTraceID: "trace-1",
+            updatedAt: "2026-02-15T00:00:00Z"
+        )
+        XCTAssertEqual(model.activityState(for: pane), "idle")
+        XCTAssertEqual(model.displayCategory(for: pane), "idle")
+        XCTAssertEqual(model.stateReason(for: pane), "managed no strong signal")
+    }
+
     func testActivityStatePromotesManagedUnknownToRunningWhenRecentClaudeRunningSignal() throws {
         let model = try makeModel()
         let pane = PaneItem(

@@ -71,6 +71,14 @@ struct PaneItem: Decodable, Identifiable, Hashable {
     let sessionLabel: String?
     let sessionLabelSource: String?
     let lastInteractionAt: String?
+    let stateEngineVersion: String?
+    let providerV2: String?
+    let providerConfidenceV2: Double?
+    let activityStateV2: String?
+    let activityConfidenceV2: Double?
+    let activitySourceV2: String?
+    let activityReasonsV2: [String]?
+    let evidenceTraceID: String?
     let updatedAt: String
 
     var id: String {
@@ -98,7 +106,77 @@ struct PaneItem: Decodable, Identifiable, Hashable {
         case sessionLabel = "session_label"
         case sessionLabelSource = "session_label_source"
         case lastInteractionAt = "last_interaction_at"
+        case stateEngineVersion = "state_engine_version"
+        case providerV2 = "provider_v2"
+        case providerConfidenceV2 = "provider_confidence_v2"
+        case activityStateV2 = "activity_state_v2"
+        case activityConfidenceV2 = "activity_confidence_v2"
+        case activitySourceV2 = "activity_source_v2"
+        case activityReasonsV2 = "activity_reasons_v2"
+        case evidenceTraceID = "evidence_trace_id"
         case updatedAt = "updated_at"
+    }
+
+    init(
+        identity: PaneIdentity,
+        windowName: String?,
+        currentCmd: String?,
+        paneTitle: String?,
+        state: String,
+        reasonCode: String?,
+        confidence: String?,
+        runtimeID: String?,
+        agentType: String?,
+        agentPresence: String?,
+        activityState: String?,
+        displayCategory: String?,
+        needsUserAction: Bool?,
+        stateSource: String?,
+        lastEventType: String?,
+        lastEventAt: String?,
+        awaitingResponseKind: String?,
+        sessionLabel: String?,
+        sessionLabelSource: String?,
+        lastInteractionAt: String?,
+        stateEngineVersion: String? = nil,
+        providerV2: String? = nil,
+        providerConfidenceV2: Double? = nil,
+        activityStateV2: String? = nil,
+        activityConfidenceV2: Double? = nil,
+        activitySourceV2: String? = nil,
+        activityReasonsV2: [String]? = nil,
+        evidenceTraceID: String? = nil,
+        updatedAt: String
+    ) {
+        self.identity = identity
+        self.windowName = windowName
+        self.currentCmd = currentCmd
+        self.paneTitle = paneTitle
+        self.state = state
+        self.reasonCode = reasonCode
+        self.confidence = confidence
+        self.runtimeID = runtimeID
+        self.agentType = agentType
+        self.agentPresence = agentPresence
+        self.activityState = activityState
+        self.displayCategory = displayCategory
+        self.needsUserAction = needsUserAction
+        self.stateSource = stateSource
+        self.lastEventType = lastEventType
+        self.lastEventAt = lastEventAt
+        self.awaitingResponseKind = awaitingResponseKind
+        self.sessionLabel = sessionLabel
+        self.sessionLabelSource = sessionLabelSource
+        self.lastInteractionAt = lastInteractionAt
+        self.stateEngineVersion = stateEngineVersion
+        self.providerV2 = providerV2
+        self.providerConfidenceV2 = providerConfidenceV2
+        self.activityStateV2 = activityStateV2
+        self.activityConfidenceV2 = activityConfidenceV2
+        self.activitySourceV2 = activitySourceV2
+        self.activityReasonsV2 = activityReasonsV2
+        self.evidenceTraceID = evidenceTraceID
+        self.updatedAt = updatedAt
     }
 }
 
