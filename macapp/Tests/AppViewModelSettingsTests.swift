@@ -53,6 +53,39 @@ final class AppViewModelSettingsTests: XCTestCase {
         XCTAssertEqual(interval, 10, accuracy: 0.001)
     }
 
+    func testTerminalPerformanceCollectsInputStreamAndFPSMetrics() throws {
+        let model = try makeModel()
+        let base = Date(timeIntervalSince1970: 100)
+
+        model.noteTerminalInputDispatched(for: "pane-1", at: base)
+        model.noteTerminalFrameApplied(for: "pane-1", at: base.addingTimeInterval(0.080))
+        model.noteTerminalStreamRoundTrip(startedAt: base, completedAt: base.addingTimeInterval(0.120))
+        model.noteTerminalFrameRendered(at: base)
+        model.noteTerminalFrameRendered(at: base.addingTimeInterval(0.016))
+        model.noteTerminalFrameRendered(at: base.addingTimeInterval(0.033))
+        model.noteTerminalFrameRendered(at: base.addingTimeInterval(0.050))
+
+        XCTAssertEqual(model.terminalPerformance.inputSampleCount, 1)
+        XCTAssertEqual(model.terminalPerformance.streamSampleCount, 1)
+        XCTAssertEqual(model.terminalPerformance.inputLatencyP50Ms ?? 0, 80, accuracy: 0.5)
+        XCTAssertEqual(model.terminalPerformance.streamRTTP50Ms ?? 0, 120, accuracy: 0.5)
+        XCTAssertGreaterThan(model.terminalPerformance.renderFPS, 45)
+        XCTAssertTrue(model.terminalPerformanceSummary.contains("fps"))
+    }
+
+    func testTerminalPerformanceBudgetFailsWhenLatencyAndFPSArePoor() throws {
+        let model = try makeModel()
+        let base = Date(timeIntervalSince1970: 200)
+
+        model.noteTerminalInputDispatched(for: "pane-1", at: base)
+        model.noteTerminalFrameApplied(for: "pane-1", at: base.addingTimeInterval(0.400))
+        model.noteTerminalStreamRoundTrip(startedAt: base, completedAt: base.addingTimeInterval(0.500))
+        model.noteTerminalFrameRendered(at: base)
+        model.noteTerminalFrameRendered(at: base.addingTimeInterval(0.200))
+
+        XCTAssertFalse(model.terminalPerformanceWithinBudget)
+    }
+
     func testHideUnmanagedCategoryRemovesUnmanagedGroup() throws {
         let model = try makeModel()
         model.panes = [

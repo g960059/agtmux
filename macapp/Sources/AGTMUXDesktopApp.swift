@@ -367,6 +367,9 @@ private struct CockpitView: View {
                             },
                             onResize: { cols, rows in
                                 model.performTerminalResize(cols: cols, rows: rows)
+                            },
+                            onFrameRendered: {
+                                model.noteTerminalFrameRendered()
                             }
                         )
                         .id("native-terminal-\(pane.id)")
@@ -498,37 +501,45 @@ private struct CockpitView: View {
     }
 
     private var sidebarFooter: some View {
-        HStack(spacing: 8) {
+        VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
-                Image(systemName: "switch.2")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(palette.textPrimary)
-                    .frame(width: 22, height: 22)
-                    .background(
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .fill(palette.rowFill)
-                    )
-                Text("AGTMUX")
-                    .font(.system(size: 11, weight: .semibold, design: .rounded))
-                    .foregroundStyle(palette.textMuted)
+                HStack(spacing: 8) {
+                    Image(systemName: "switch.2")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(palette.textPrimary)
+                        .frame(width: 22, height: 22)
+                        .background(
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .fill(palette.rowFill)
+                        )
+                    Text("AGTMUX")
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .foregroundStyle(palette.textMuted)
+                }
+                Spacer(minLength: 0)
+                Button {
+                    showSettingsPopover.toggle()
+                } label: {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(palette.textSecondary)
+                        .frame(width: 26, height: 24)
+                        .background(
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .fill(palette.rowFill)
+                        )
+                }
+                .buttonStyle(.plain)
+                .help("View settings")
+                .popover(isPresented: $showSettingsPopover, arrowEdge: .bottom) {
+                    settingsPopoverContent
+                }
             }
-            Spacer(minLength: 0)
-            Button {
-                showSettingsPopover.toggle()
-            } label: {
-                Image(systemName: "gearshape")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(palette.textSecondary)
-                    .frame(width: 26, height: 24)
-                    .background(
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .fill(palette.rowFill)
-                    )
-            }
-            .buttonStyle(.plain)
-            .help("View settings")
-            .popover(isPresented: $showSettingsPopover, arrowEdge: .bottom) {
-                settingsPopoverContent
+            if model.showTechnicalDetails {
+                Text(model.terminalPerformanceSummary)
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(model.terminalPerformanceWithinBudget ? palette.textMuted : palette.attention)
+                    .lineLimit(1)
             }
         }
         .padding(.horizontal, 2)

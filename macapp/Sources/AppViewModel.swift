@@ -148,6 +148,22 @@ final class AppViewModel: ObservableObject {
         let nextBackoffSeconds: TimeInterval
     }
 
+    struct TerminalPerformanceSnapshot: Equatable {
+        let renderFPS: Double
+        let inputLatencyP50Ms: Double?
+        let streamRTTP50Ms: Double?
+        let inputSampleCount: Int
+        let streamSampleCount: Int
+
+        static let empty = TerminalPerformanceSnapshot(
+            renderFPS: 0,
+            inputLatencyP50Ms: nil,
+            streamRTTP50Ms: nil,
+            inputSampleCount: 0,
+            streamSampleCount: 0
+        )
+    }
+
     private enum PreferenceKey {
         static let uiPrefsVersion = "ui.prefs_version"
         static let viewMode = "ui.view_mode"
@@ -255,6 +271,7 @@ final class AppViewModel: ObservableObject {
     @Published var terminalCursorY: Int?
     @Published var terminalPaneCols: Int?
     @Published var terminalPaneRows: Int?
+    @Published private(set) var terminalPerformance: TerminalPerformanceSnapshot = .empty
     @Published var refreshInFlight: Bool = false
     @Published var viewMode: ViewMode = .bySession {
         didSet {
@@ -333,6 +350,10 @@ final class AppViewModel: ObservableObject {
     private var targetReconnectStateByName: [String: TargetReconnectState] = [:]
     private var targetReconnectInFlightNames: Set<String> = []
     private var targetReconnectSweepInFlight = false
+    private var frameRenderTimestamps: [Date] = []
+    private var inputLatencySamplesMs: [Double] = []
+    private var streamLatencySamplesMs: [Double] = []
+    private var pendingInputLatencyStartByPaneID: [String: Date] = [:]
     private var terminalCapabilities: CapabilityFlags?
     private var terminalCapabilitiesFetchedAt: Date?
     private let terminalSessionController: TerminalSessionController
@@ -369,6 +390,11 @@ final class AppViewModel: ObservableObject {
     private let terminalOutputMaxChars = 60_000
     private let targetReconnectInitialBackoffSeconds: TimeInterval = 4
     private let targetReconnectMaxBackoffSeconds: TimeInterval = 90
+    private let telemetryFPSWindowSeconds: TimeInterval = 3
+    private let telemetryMaxSamples = 240
+    private let telemetryBudgetInputP50Ms = 120.0
+    private let telemetryBudgetStreamP50Ms = 220.0
+    private let telemetryBudgetMinFPS = 24.0
 
     init(
         daemon: DaemonManager,
@@ -520,6 +546,59 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    func noteTerminalFrameRendered(at: Date = Date()) {
+        frameRenderTimestamps.append(at)
+        trimFrameRenderWindow(now: at)
+        recomputeTerminalPerformanceSnapshot(now: at)
+    }
+
+    func noteTerminalInputDispatched(for paneID: String, at: Date = Date()) {
+        let paneToken = paneID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !paneToken.isEmpty else {
+            return
+        }
+        pendingInputLatencyStartByPaneID[paneToken] = at
+    }
+
+    func noteTerminalFrameApplied(for paneID: String, at: Date = Date()) {
+        let paneToken = paneID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !paneToken.isEmpty else {
+            return
+        }
+        guard let startedAt = pendingInputLatencyStartByPaneID.removeValue(forKey: paneToken) else {
+            return
+        }
+        let latencyMs = max(0, at.timeIntervalSince(startedAt) * 1000)
+        appendLatencySample(latencyMs, into: &inputLatencySamplesMs)
+        recomputeTerminalPerformanceSnapshot(now: at)
+    }
+
+    func noteTerminalStreamRoundTrip(startedAt: Date, completedAt: Date = Date()) {
+        let latencyMs = max(0, completedAt.timeIntervalSince(startedAt) * 1000)
+        appendLatencySample(latencyMs, into: &streamLatencySamplesMs)
+        recomputeTerminalPerformanceSnapshot(now: completedAt)
+    }
+
+    var terminalPerformanceSummary: String {
+        let fps = String(format: "%.1f", terminalPerformance.renderFPS)
+        let input = terminalPerformance.inputLatencyP50Ms.map { String(format: "%.0fms", $0) } ?? "-"
+        let stream = terminalPerformance.streamRTTP50Ms.map { String(format: "%.0fms", $0) } ?? "-"
+        return "fps \(fps) | input \(input) | stream \(stream)"
+    }
+
+    var terminalPerformanceWithinBudget: Bool {
+        if terminalPerformance.renderFPS > 0, terminalPerformance.renderFPS < telemetryBudgetMinFPS {
+            return false
+        }
+        if let input = terminalPerformance.inputLatencyP50Ms, input > telemetryBudgetInputP50Ms {
+            return false
+        }
+        if let stream = terminalPerformance.streamRTTP50Ms, stream > telemetryBudgetStreamP50Ms {
+            return false
+        }
+        return true
+    }
+
     func performAddTarget(
         name: String,
         kind: String,
@@ -617,6 +696,7 @@ final class AppViewModel: ObservableObject {
                         guard selectedPane?.id == pane.id else {
                             return
                         }
+                        markInteractiveInput(for: pane.id)
                         let resp = try await client.terminalWrite(
                             sessionID: sessionID,
                             text: sendText,
@@ -633,19 +713,23 @@ final class AppViewModel: ObservableObject {
                         if shouldPerformImmediateWriteRefresh(for: pane.id, generation: streamGeneration) {
                             let currentCursor = await terminalSessionController.cursor(for: pane.id)
                             let lines = currentTerminalStreamLineBudget(for: pane.id)
+                            let firstStreamStartedAt = Date()
                             let streamResp = try await client.terminalStream(
                                 sessionID: sessionID,
                                 cursor: currentCursor,
                                 lines: lines
                             )
+                            noteTerminalStreamRoundTrip(startedAt: firstStreamStartedAt)
                             await terminalSessionController.setCursor(streamResp.frame.cursor, for: pane.id)
                             applyTerminalStreamFrame(streamResp.frame, paneID: pane.id)
                             if streamResp.frame.frameType == "attached" {
+                                let followStreamStartedAt = Date()
                                 let followResp = try await client.terminalStream(
                                     sessionID: sessionID,
                                     cursor: streamResp.frame.cursor,
                                     lines: lines
                                 )
+                                noteTerminalStreamRoundTrip(startedAt: followStreamStartedAt)
                                 await terminalSessionController.setCursor(followResp.frame.cursor, for: pane.id)
                                 applyTerminalStreamFrame(followResp.frame, paneID: pane.id)
                             }
@@ -656,6 +740,7 @@ final class AppViewModel: ObservableObject {
                         if error is CancellationError {
                             throw error
                         }
+                        pendingInputLatencyStartByPaneID.removeValue(forKey: pane.id)
                         let outcome = await terminalSessionController.recordFailure(for: pane.id)
                         if shouldResetTerminalProxySession(error: error),
                            let staleSessionID = await terminalSessionController.clearProxySession(for: pane.id) {
@@ -788,6 +873,7 @@ final class AppViewModel: ObservableObject {
                 guard selectedPane?.id == pane.id else {
                     return
                 }
+                markInteractiveInput(for: pane.id)
                 let resp = try await client.terminalWrite(
                     sessionID: sessionID,
                     text: hasText ? inputText : nil,
@@ -800,23 +886,26 @@ final class AppViewModel: ObservableObject {
                     let reason = resp.errorCode ?? "unknown"
                     throw InteractiveInputError(message: "terminal-write failed: \(reason)")
                 }
-                markInteractiveInput(for: pane.id)
                 if performImmediateRefresh && shouldPerformImmediateWriteRefresh(for: pane.id, generation: streamGeneration) {
                     let currentCursor = await terminalSessionController.cursor(for: pane.id)
                     let lines = currentTerminalStreamLineBudget(for: pane.id)
+                    let firstStreamStartedAt = Date()
                     let streamResp = try await client.terminalStream(
                         sessionID: sessionID,
                         cursor: currentCursor,
                         lines: lines
                     )
+                    noteTerminalStreamRoundTrip(startedAt: firstStreamStartedAt)
                     await terminalSessionController.setCursor(streamResp.frame.cursor, for: pane.id)
                     applyTerminalStreamFrame(streamResp.frame, paneID: pane.id)
                     if streamResp.frame.frameType == "attached" {
+                        let followStreamStartedAt = Date()
                         let followResp = try await client.terminalStream(
                             sessionID: sessionID,
                             cursor: streamResp.frame.cursor,
                             lines: lines
                         )
+                        noteTerminalStreamRoundTrip(startedAt: followStreamStartedAt)
                         await terminalSessionController.setCursor(followResp.frame.cursor, for: pane.id)
                         applyTerminalStreamFrame(followResp.frame, paneID: pane.id)
                     }
@@ -827,6 +916,7 @@ final class AppViewModel: ObservableObject {
                 if error is CancellationError {
                     throw error
                 }
+                pendingInputLatencyStartByPaneID.removeValue(forKey: pane.id)
                 let outcome = await terminalSessionController.recordFailure(for: pane.id)
                 if shouldResetTerminalProxySession(error: error),
                    let staleSessionID = await terminalSessionController.clearProxySession(for: pane.id) {
@@ -930,16 +1020,20 @@ final class AppViewModel: ObservableObject {
                         guard selectedPane?.id == pane.id else {
                             return
                         }
+                        let firstStreamStartedAt = Date()
                         let resp = try await client.terminalStream(sessionID: sessionID, cursor: cursor, lines: lines)
+                        noteTerminalStreamRoundTrip(startedAt: firstStreamStartedAt)
                         var lastFrame = resp.frame
                         await terminalSessionController.setCursor(resp.frame.cursor, for: pane.id)
                         applyTerminalStreamFrame(resp.frame, paneID: pane.id)
                         if resp.frame.frameType == "attached" {
+                            let followStreamStartedAt = Date()
                             let followResp = try await client.terminalStream(
                                 sessionID: sessionID,
                                 cursor: resp.frame.cursor,
                                 lines: lines
                             )
+                            noteTerminalStreamRoundTrip(startedAt: followStreamStartedAt)
                             lastFrame = followResp.frame
                             await terminalSessionController.setCursor(followResp.frame.cursor, for: pane.id)
                             applyTerminalStreamFrame(followResp.frame, paneID: pane.id)
@@ -966,12 +1060,14 @@ final class AppViewModel: ObservableObject {
                         await terminalSessionController.clearCursor(for: pane.id)
                     }
                     let cursor = forceSnapshot ? nil : await terminalSessionController.cursor(for: pane.id)
+                    let readStartedAt = Date()
                     let resp = try await client.terminalRead(
                         target: pane.identity.target,
                         paneID: pane.identity.paneID,
                         cursor: cursor,
                         lines: lines
                     )
+                    noteTerminalStreamRoundTrip(startedAt: readStartedAt)
                     await terminalSessionController.setCursor(resp.frame.cursor, for: pane.id)
                     if resp.frame.frameType == "delta", let content = resp.frame.content {
                         outputPreview = outputPreview + content
@@ -1591,6 +1687,7 @@ final class AppViewModel: ObservableObject {
         bufferedInteractiveFlushTaskByPaneID[paneID]?.cancel()
         bufferedInteractiveFlushTaskByPaneID.removeValue(forKey: paneID)
         bufferedInteractiveBytesByPaneID.removeValue(forKey: paneID)
+        pendingInputLatencyStartByPaneID.removeValue(forKey: paneID)
     }
 
     private func refresh() async {
@@ -1653,6 +1750,7 @@ final class AppViewModel: ObservableObject {
         }
         terminalRenderCacheByPaneID = terminalRenderCacheByPaneID.filter { paneIDs.contains($0.key) }
         lastInteractiveInputAtByPaneID = lastInteractiveInputAtByPaneID.filter { paneIDs.contains($0.key) }
+        pendingInputLatencyStartByPaneID = pendingInputLatencyStartByPaneID.filter { paneIDs.contains($0.key) }
         Task { [weak self] in
             guard let self else {
                 return
@@ -1979,6 +2077,60 @@ final class AppViewModel: ObservableObject {
         return defaults.bool(forKey: key)
     }
 
+    private func appendLatencySample(_ value: Double, into samples: inout [Double]) {
+        guard value.isFinite else {
+            return
+        }
+        samples.append(value)
+        if samples.count > telemetryMaxSamples {
+            samples.removeFirst(samples.count - telemetryMaxSamples)
+        }
+    }
+
+    private func trimFrameRenderWindow(now: Date) {
+        let threshold = now.addingTimeInterval(-telemetryFPSWindowSeconds)
+        frameRenderTimestamps = frameRenderTimestamps.filter { $0 >= threshold }
+        let maxFrames = max(4, Int(telemetryFPSWindowSeconds * 120))
+        if frameRenderTimestamps.count > maxFrames {
+            frameRenderTimestamps.removeFirst(frameRenderTimestamps.count - maxFrames)
+        }
+    }
+
+    private func percentile(_ p: Double, from samples: [Double]) -> Double? {
+        guard !samples.isEmpty else {
+            return nil
+        }
+        let sorted = samples.sorted()
+        let rank = min(max(p, 0), 1) * Double(sorted.count - 1)
+        let low = Int(floor(rank))
+        let high = Int(ceil(rank))
+        if low == high {
+            return sorted[low]
+        }
+        let weight = rank - Double(low)
+        return sorted[low] * (1 - weight) + sorted[high] * weight
+    }
+
+    private func recomputeTerminalPerformanceSnapshot(now: Date) {
+        trimFrameRenderWindow(now: now)
+        let fps: Double
+        if frameRenderTimestamps.count >= 2,
+           let first = frameRenderTimestamps.first,
+           let last = frameRenderTimestamps.last {
+            let duration = max(last.timeIntervalSince(first), 0.001)
+            fps = Double(frameRenderTimestamps.count - 1) / duration
+        } else {
+            fps = 0
+        }
+        terminalPerformance = TerminalPerformanceSnapshot(
+            renderFPS: fps,
+            inputLatencyP50Ms: percentile(0.5, from: inputLatencySamplesMs),
+            streamRTTP50Ms: percentile(0.5, from: streamLatencySamplesMs),
+            inputSampleCount: inputLatencySamplesMs.count,
+            streamSampleCount: streamLatencySamplesMs.count
+        )
+    }
+
     private func shouldPerformImmediateWriteRefresh(for paneID: String, generation: Int) -> Bool {
         guard generation == terminalStreamGeneration else {
             return false
@@ -2000,6 +2152,7 @@ final class AppViewModel: ObservableObject {
 
     private func markInteractiveInput(for paneID: String, now: Date = Date()) {
         lastInteractiveInputAtByPaneID[paneID] = now
+        noteTerminalInputDispatched(for: paneID, at: now)
     }
 
     private func currentTerminalStreamPollIntervalMillis(for paneID: String, now: Date = Date()) -> Int {
@@ -2045,18 +2198,22 @@ final class AppViewModel: ObservableObject {
                     let sessionID = try await ensureTerminalProxySession(for: pane, generation: generation)
                     let cursor = await terminalSessionController.cursor(for: paneID)
                     let lines = currentTerminalStreamLineBudget(for: paneID)
+                    let firstStreamStartedAt = Date()
                     let firstResp = try await client.terminalStream(
                         sessionID: sessionID,
                         cursor: cursor,
                         lines: lines
                     )
+                    noteTerminalStreamRoundTrip(startedAt: firstStreamStartedAt)
                     var frame = firstResp.frame
                     if frame.frameType == "attached" {
+                        let followStreamStartedAt = Date()
                         let followResp = try await client.terminalStream(
                             sessionID: sessionID,
                             cursor: frame.cursor,
                             lines: lines
                         )
+                        noteTerminalStreamRoundTrip(startedAt: followStreamStartedAt)
                         frame = followResp.frame
                     }
                     guard generation == terminalStreamGeneration, selectedPane?.id == paneID else {
@@ -2067,12 +2224,14 @@ final class AppViewModel: ObservableObject {
                     await terminalSessionController.recordSuccess(for: paneID)
                 } else {
                     let cursor = await terminalSessionController.cursor(for: paneID)
+                    let readStartedAt = Date()
                     let resp = try await client.terminalRead(
                         target: pane.identity.target,
                         paneID: pane.identity.paneID,
                         cursor: cursor,
                         lines: currentTerminalStreamLineBudget(for: paneID)
                     )
+                    noteTerminalStreamRoundTrip(startedAt: readStartedAt)
                     guard generation == terminalStreamGeneration, selectedPane?.id == paneID else {
                         return
                     }
@@ -2108,6 +2267,7 @@ final class AppViewModel: ObservableObject {
         guard selectedPane?.id == paneID else {
             return
         }
+        noteTerminalFrameApplied(for: paneID)
         updateTerminalRenderMetadata(
             cursorX: frame.cursorX,
             cursorY: frame.cursorY,
@@ -2131,6 +2291,7 @@ final class AppViewModel: ObservableObject {
         guard selectedPane?.id == paneID else {
             return
         }
+        noteTerminalFrameApplied(for: paneID)
         updateTerminalRenderMetadata(
             cursorX: frame.cursorX,
             cursorY: frame.cursorY,

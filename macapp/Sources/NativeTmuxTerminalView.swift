@@ -304,11 +304,13 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
     let interactiveInputEnabled: Bool
     let onInputBytes: ([UInt8]) -> Void
     let onResize: (_ cols: Int, _ rows: Int) -> Void
+    let onFrameRendered: () -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
             onInputBytes: onInputBytes,
-            onResize: onResize
+            onResize: onResize,
+            onFrameRendered: onFrameRendered
         )
     }
 
@@ -439,6 +441,7 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
 
         private let onInputBytes: ([UInt8]) -> Void
         private let onResize: (_ cols: Int, _ rows: Int) -> Void
+        private let onFrameRendered: () -> Void
 
         private weak var terminalView: TerminalView?
         private var currentPaneID = ""
@@ -462,10 +465,12 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
 
         init(
             onInputBytes: @escaping ([UInt8]) -> Void,
-            onResize: @escaping (_ cols: Int, _ rows: Int) -> Void
+            onResize: @escaping (_ cols: Int, _ rows: Int) -> Void,
+            onFrameRendered: @escaping () -> Void
         ) {
             self.onInputBytes = onInputBytes
             self.onResize = onResize
+            self.onFrameRendered = onFrameRendered
         }
 
         func detach() {
@@ -584,6 +589,7 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
                 )
             }
             terminal.feed(text: repaint.frame)
+            onFrameRendered()
             if let imeTerminal = terminal as? IMEAwareTerminalView {
                 imeTerminal.updateCompositionMetrics(
                     cursorX: repaint.cursorX,
