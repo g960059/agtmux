@@ -51,6 +51,7 @@ const resizePolicySingleClientApply = "single_client_apply"
 const terminalCursorMarkerPrefix = "__AGTMUX_CURSOR_POSITION__"
 
 var codexSessionFileIDPattern = regexp.MustCompile(`([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$`)
+var claudeSessionIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 type Server struct {
 	cfg              config.Config
@@ -3835,6 +3836,27 @@ type claudeRuntimeProbe struct {
 	targetID    string
 	currentPath string
 	pid         int64
+	startedAt   time.Time
+	targetKind  model.TargetKind
+	resumeID    string
+}
+
+type claudeHistoryRecord struct {
+	sessionID   string
+	projectPath string
+	display     string
+	at          time.Time
+}
+
+type claudeWorkspaceSessionHint struct {
+	sessionID string
+	hint      claudeSessionHint
+}
+
+type claudeProjectSessionFile struct {
+	sessionID string
+	path      string
+	at        time.Time
 }
 
 func (s *Server) collectClaudeSessionHints(
@@ -3890,6 +3912,8 @@ func (s *Server) collectClaudeSessionHints(
 			targetID:    rt.TargetID,
 			currentPath: pane.CurrentPath,
 			pid:         *rt.PID,
+			startedAt:   rt.StartedAt,
+			targetKind:  targetByID[rt.TargetID].Kind,
 		}
 
 		seenForTarget, ok := pidSeen[rt.TargetID]
@@ -3920,24 +3944,90 @@ func (s *Server) collectClaudeSessionHints(
 	}
 
 	homeDir, _ := os.UserHomeDir()
-	for runtimeID, probe := range probeByRuntimeID {
-		commands := commandByTarget[probe.targetID]
-		if len(commands) == 0 {
+	localGroups := map[string][]claudeRuntimeProbe{}
+	runtimeIDs := make([]string, 0, len(probeByRuntimeID))
+	for runtimeID := range probeByRuntimeID {
+		runtimeIDs = append(runtimeIDs, runtimeID)
+	}
+	sort.Strings(runtimeIDs)
+	for _, runtimeID := range runtimeIDs {
+		probe := probeByRuntimeID[runtimeID]
+		if commands := commandByTarget[probe.targetID]; len(commands) > 0 {
+			probe.resumeID = extractClaudeResumeID(strings.TrimSpace(commands[probe.pid]))
+		}
+		if probe.targetKind != model.TargetKindLocal {
+			if probe.resumeID != "" {
+				if hint := resolveClaudeSessionHint(homeDir, probe.currentPath, probe.resumeID, probe.targetKind); hint.label != "" {
+					hints[runtimeID] = hint
+				}
+			}
 			continue
 		}
-		cmdline := strings.TrimSpace(commands[probe.pid])
-		if cmdline == "" {
+		workspaceKey := normalizeClaudeWorkspacePath(probe.currentPath)
+		if workspaceKey == "" {
+			if probe.resumeID != "" {
+				if hint := resolveClaudeSessionHint(homeDir, probe.currentPath, probe.resumeID, probe.targetKind); hint.label != "" {
+					hints[runtimeID] = hint
+				}
+			}
 			continue
 		}
-		resumeID := extractClaudeResumeID(cmdline)
-		if resumeID == "" {
-			continue
+		probe.currentPath = workspaceKey
+		localGroups[workspaceKey] = append(localGroups[workspaceKey], probe)
+	}
+	if len(localGroups) == 0 {
+		return hints
+	}
+
+	historyRecords := readClaudeHistoryRecords(homeDir)
+	workspaces := make([]string, 0, len(localGroups))
+	for workspace := range localGroups {
+		workspaces = append(workspaces, workspace)
+	}
+	sort.Strings(workspaces)
+	for _, workspace := range workspaces {
+		group := append([]claudeRuntimeProbe(nil), localGroups[workspace]...)
+		sort.Slice(group, func(i, j int) bool {
+			return claudeProbeComesBefore(group[i], group[j])
+		})
+		sessionHints := buildClaudeWorkspaceSessionHints(homeDir, workspace, historyRecords)
+		sessionHintByID := map[string]claudeSessionHint{}
+		for _, candidate := range sessionHints {
+			sessionID := normalizeSessionID(candidate.sessionID)
+			if sessionID == "" || candidate.hint.label == "" {
+				continue
+			}
+			if _, exists := sessionHintByID[sessionID]; !exists {
+				sessionHintByID[sessionID] = candidate.hint
+			}
 		}
-		hint := resolveClaudeSessionHint(homeDir, probe.currentPath, resumeID, targetByID[probe.targetID].Kind)
-		if hint.label == "" {
-			continue
+		usedSessionIDs := map[string]struct{}{}
+		unresolved := make([]claudeRuntimeProbe, 0, len(group))
+		for _, probe := range group {
+			runtimeID := strings.TrimSpace(probe.runtimeID)
+			if runtimeID == "" {
+				continue
+			}
+			resumeID := normalizeSessionID(probe.resumeID)
+			if resumeID == "" {
+				unresolved = append(unresolved, probe)
+				continue
+			}
+			hint, ok := sessionHintByID[resumeID]
+			if !ok || hint.label == "" {
+				hint = resolveClaudeSessionHint(homeDir, workspace, resumeID, model.TargetKindLocal)
+			}
+			if hint.label == "" {
+				unresolved = append(unresolved, probe)
+				continue
+			}
+			hints[runtimeID] = hint
+			usedSessionIDs[resumeID] = struct{}{}
 		}
-		hints[runtimeID] = hint
+		assigned := assignClaudeWorkspaceHintsToProbes(unresolved, sessionHints, usedSessionIDs)
+		for runtimeID, hint := range assigned {
+			hints[runtimeID] = hint
+		}
 	}
 	return hints
 }
@@ -3995,6 +4085,448 @@ func parsePSPIDCommandOutput(output string) map[int64]string {
 		out[pid] = cmdline
 	}
 	return out
+}
+
+func claudeProbeComesBefore(lhs, rhs claudeRuntimeProbe) bool {
+	if !lhs.startedAt.Equal(rhs.startedAt) {
+		if lhs.startedAt.IsZero() {
+			return false
+		}
+		if rhs.startedAt.IsZero() {
+			return true
+		}
+		return lhs.startedAt.After(rhs.startedAt)
+	}
+	if lhs.runtimeID != rhs.runtimeID {
+		return lhs.runtimeID < rhs.runtimeID
+	}
+	if lhs.targetID != rhs.targetID {
+		return lhs.targetID < rhs.targetID
+	}
+	return lhs.pid < rhs.pid
+}
+
+func normalizeClaudeWorkspacePath(path string) string {
+	normalized := normalizeCodexWorkspacePath(path)
+	if normalized == "" {
+		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(normalized); err == nil {
+		if clean := normalizeCodexWorkspacePath(resolved); clean != "" {
+			return clean
+		}
+	}
+	return normalized
+}
+
+func readClaudeHistoryRecords(homeDir string) []claudeHistoryRecord {
+	base := strings.TrimSpace(homeDir)
+	if base == "" {
+		return nil
+	}
+	path := filepath.Join(base, ".claude", "history.jsonl")
+	file, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer file.Close()
+
+	records := make([]claudeHistoryRecord, 0, 32)
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || !strings.HasPrefix(line, "{") {
+			continue
+		}
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(line), &payload); err != nil {
+			continue
+		}
+		sessionID := normalizeSessionID(anyString(payload["sessionId"]))
+		if sessionID == "" {
+			continue
+		}
+		projectPath := normalizeClaudeWorkspacePath(anyString(payload["project"]))
+		if projectPath == "" {
+			continue
+		}
+		records = append(records, claudeHistoryRecord{
+			sessionID:   sessionID,
+			projectPath: projectPath,
+			display:     compactPreview(anyString(payload["display"]), 72),
+			at:          parseClaudeHistoryTimestamp(payload["timestamp"]),
+		})
+	}
+	return records
+}
+
+func parseClaudeHistoryTimestamp(raw any) time.Time {
+	switch value := raw.(type) {
+	case float64:
+		return normalizeUnixTimestamp(int64(value))
+	case float32:
+		return normalizeUnixTimestamp(int64(value))
+	case int64:
+		return normalizeUnixTimestamp(value)
+	case int:
+		return normalizeUnixTimestamp(int64(value))
+	case json.Number:
+		if asInt, err := value.Int64(); err == nil {
+			return normalizeUnixTimestamp(asInt)
+		}
+		if asFloat, err := value.Float64(); err == nil {
+			return normalizeUnixTimestamp(int64(asFloat))
+		}
+	case string:
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			return time.Time{}
+		}
+		if asInt, err := strconv.ParseInt(trimmed, 10, 64); err == nil {
+			return normalizeUnixTimestamp(asInt)
+		}
+		if parsed, err := time.Parse(time.RFC3339Nano, trimmed); err == nil {
+			return parsed.UTC()
+		}
+		if parsed, err := time.Parse(time.RFC3339, trimmed); err == nil {
+			return parsed.UTC()
+		}
+	}
+	return time.Time{}
+}
+
+func normalizeUnixTimestamp(value int64) time.Time {
+	if value <= 0 {
+		return time.Time{}
+	}
+	abs := value
+	if abs < 0 {
+		abs = -abs
+	}
+	switch {
+	case abs >= 1_000_000_000_000_000_000:
+		return time.Unix(0, value).UTC()
+	case abs >= 1_000_000_000_000_000:
+		return time.Unix(0, value*int64(time.Microsecond)).UTC()
+	case abs >= 1_000_000_000_000:
+		return time.Unix(0, value*int64(time.Millisecond)).UTC()
+	default:
+		return time.Unix(value, 0).UTC()
+	}
+}
+
+func claudeWorkspaceMatchScore(workspacePath, projectPath string) int {
+	workspace := normalizeClaudeWorkspacePath(workspacePath)
+	project := normalizeClaudeWorkspacePath(projectPath)
+	if workspace == "" || project == "" {
+		return 0
+	}
+	if workspace == project {
+		return 3
+	}
+	sep := string(filepath.Separator)
+	if strings.HasPrefix(workspace+sep, project+sep) {
+		return 2
+	}
+	if strings.HasPrefix(project+sep, workspace+sep) {
+		return 1
+	}
+	return 0
+}
+
+func buildClaudeWorkspaceSessionHints(homeDir, workspacePath string, historyRecords []claudeHistoryRecord) []claudeWorkspaceSessionHint {
+	workspace := normalizeClaudeWorkspacePath(workspacePath)
+	if workspace == "" {
+		return nil
+	}
+	type historyCandidate struct {
+		record claudeHistoryRecord
+		score  int
+	}
+	bySession := map[string]historyCandidate{}
+	for _, record := range historyRecords {
+		score := claudeWorkspaceMatchScore(workspace, record.projectPath)
+		if score <= 0 {
+			continue
+		}
+		existing, ok := bySession[record.sessionID]
+		if !ok || score > existing.score || (score == existing.score && record.at.After(existing.record.at)) {
+			bySession[record.sessionID] = historyCandidate{record: record, score: score}
+		}
+	}
+	historyCandidates := make([]historyCandidate, 0, len(bySession))
+	for _, candidate := range bySession {
+		historyCandidates = append(historyCandidates, candidate)
+	}
+	sort.Slice(historyCandidates, func(i, j int) bool {
+		lhs := historyCandidates[i]
+		rhs := historyCandidates[j]
+		if lhs.score != rhs.score {
+			return lhs.score > rhs.score
+		}
+		if !lhs.record.at.Equal(rhs.record.at) {
+			if lhs.record.at.IsZero() {
+				return false
+			}
+			if rhs.record.at.IsZero() {
+				return true
+			}
+			return lhs.record.at.After(rhs.record.at)
+		}
+		return lhs.record.sessionID < rhs.record.sessionID
+	})
+	if len(historyCandidates) > 12 {
+		historyCandidates = historyCandidates[:12]
+	}
+
+	out := make([]claudeWorkspaceSessionHint, 0, len(historyCandidates))
+	for _, candidate := range historyCandidates {
+		hint := resolveClaudeSessionHint(homeDir, candidate.record.projectPath, candidate.record.sessionID, model.TargetKindLocal)
+		if candidate.record.display != "" && (hint.label == "" || hint.source == "claude_resume_id") {
+			hint = claudeSessionHint{
+				label:  candidate.record.display,
+				source: "claude_history_display",
+				at:     candidate.record.at,
+			}
+		}
+		if hint.label == "" {
+			continue
+		}
+		if hint.at.IsZero() && !candidate.record.at.IsZero() {
+			hint.at = candidate.record.at
+		}
+		out = append(out, claudeWorkspaceSessionHint{
+			sessionID: candidate.record.sessionID,
+			hint:      hint,
+		})
+	}
+	if len(out) > 0 {
+		return out
+	}
+	return scanRecentClaudeProjectSessionHints(homeDir, workspace, 8)
+}
+
+func scanRecentClaudeProjectSessionHints(homeDir, workspacePath string, limit int) []claudeWorkspaceSessionHint {
+	if limit <= 0 {
+		return nil
+	}
+	files := make([]claudeProjectSessionFile, 0, limit)
+	for _, projectDir := range collectClaudeProjectDirsForWorkspace(homeDir, workspacePath) {
+		for _, candidate := range listClaudeProjectSessionFiles(projectDir) {
+			files = append(files, candidate)
+		}
+	}
+	if len(files) == 0 {
+		return nil
+	}
+	sort.Slice(files, func(i, j int) bool {
+		lhs := files[i]
+		rhs := files[j]
+		if !lhs.at.Equal(rhs.at) {
+			return lhs.at.After(rhs.at)
+		}
+		if lhs.sessionID != rhs.sessionID {
+			return lhs.sessionID < rhs.sessionID
+		}
+		return lhs.path < rhs.path
+	})
+	seen := map[string]struct{}{}
+	out := make([]claudeWorkspaceSessionHint, 0, limit)
+	for _, file := range files {
+		if len(out) >= limit {
+			break
+		}
+		if _, exists := seen[file.sessionID]; exists {
+			continue
+		}
+		preview := readFirstClaudeUserPrompt(file.path)
+		if preview == "" {
+			continue
+		}
+		seen[file.sessionID] = struct{}{}
+		out = append(out, claudeWorkspaceSessionHint{
+			sessionID: file.sessionID,
+			hint: claudeSessionHint{
+				label:  preview,
+				source: "claude_project_recent_jsonl",
+				at:     file.at.UTC(),
+			},
+		})
+	}
+	return out
+}
+
+func collectClaudeProjectDirsForWorkspace(homeDir, workspacePath string) []string {
+	baseDir := filepath.Join(strings.TrimSpace(homeDir), ".claude", "projects")
+	if strings.TrimSpace(homeDir) == "" {
+		return nil
+	}
+	workspace := normalizeClaudeWorkspacePath(workspacePath)
+	if workspace == "" {
+		return nil
+	}
+	out := make([]string, 0, 6)
+	seen := map[string]struct{}{}
+	add := func(path string) {
+		normalized := strings.TrimSpace(path)
+		if normalized == "" {
+			return
+		}
+		if _, ok := seen[normalized]; ok {
+			return
+		}
+		if info, err := os.Stat(normalized); err != nil || !info.IsDir() {
+			return
+		}
+		seen[normalized] = struct{}{}
+		out = append(out, normalized)
+	}
+
+	current := workspace
+	for depth := 0; depth < 10; depth++ {
+		if current == "" {
+			break
+		}
+		add(filepath.Join(baseDir, claudeProjectKey(current)))
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+	return out
+}
+
+func listClaudeProjectSessionFiles(projectDir string) []claudeProjectSessionFile {
+	entries, err := os.ReadDir(projectDir)
+	if err != nil {
+		return nil
+	}
+	out := make([]claudeProjectSessionFile, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		sessionID := extractClaudeSessionIDFromFilename(entry.Name())
+		if sessionID == "" {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		out = append(out, claudeProjectSessionFile{
+			sessionID: sessionID,
+			path:      filepath.Join(projectDir, entry.Name()),
+			at:        info.ModTime().UTC(),
+		})
+	}
+	return out
+}
+
+func extractClaudeSessionIDFromFilename(name string) string {
+	trimmed := strings.TrimSpace(name)
+	if !strings.HasSuffix(strings.ToLower(trimmed), ".jsonl") {
+		return ""
+	}
+	sessionID := strings.TrimSuffix(trimmed, filepath.Ext(trimmed))
+	sessionID = normalizeSessionID(sessionID)
+	if sessionID == "" {
+		return ""
+	}
+	if !claudeSessionIDPattern.MatchString(sessionID) {
+		return ""
+	}
+	return strings.ToLower(sessionID)
+}
+
+func assignClaudeWorkspaceHintsToProbes(
+	probes []claudeRuntimeProbe,
+	sessionHints []claudeWorkspaceSessionHint,
+	usedSessionIDs map[string]struct{},
+) map[string]claudeSessionHint {
+	out := map[string]claudeSessionHint{}
+	if len(probes) == 0 || len(sessionHints) == 0 {
+		return out
+	}
+	used := map[string]struct{}{}
+	for sessionID := range usedSessionIDs {
+		id := normalizeSessionID(sessionID)
+		if id != "" {
+			used[id] = struct{}{}
+		}
+	}
+	candidates := append([]claudeWorkspaceSessionHint(nil), sessionHints...)
+	probeOrder := append([]claudeRuntimeProbe(nil), probes...)
+	sort.Slice(probeOrder, func(i, j int) bool {
+		return claudeProbeComesBefore(probeOrder[i], probeOrder[j])
+	})
+	for _, probe := range probeOrder {
+		runtimeID := strings.TrimSpace(probe.runtimeID)
+		if runtimeID == "" {
+			continue
+		}
+		bestIdx := -1
+		bestHasDelta := false
+		bestDelta := time.Duration(0)
+		bestAt := time.Time{}
+		for idx, candidate := range candidates {
+			sessionID := normalizeSessionID(candidate.sessionID)
+			if sessionID == "" || candidate.hint.label == "" {
+				continue
+			}
+			if _, taken := used[sessionID]; taken {
+				continue
+			}
+			hasDelta := !probe.startedAt.IsZero() && !candidate.hint.at.IsZero()
+			delta := time.Duration(0)
+			if hasDelta {
+				delta = absDuration(candidate.hint.at.Sub(probe.startedAt))
+			}
+			if bestIdx < 0 || claudeSessionCandidateBetter(hasDelta, delta, candidate.hint.at, bestHasDelta, bestDelta, bestAt) {
+				bestIdx = idx
+				bestHasDelta = hasDelta
+				bestDelta = delta
+				bestAt = candidate.hint.at
+			}
+		}
+		if bestIdx < 0 {
+			continue
+		}
+		chosen := candidates[bestIdx]
+		out[runtimeID] = chosen.hint
+		if sessionID := normalizeSessionID(chosen.sessionID); sessionID != "" {
+			used[sessionID] = struct{}{}
+		}
+	}
+	return out
+}
+
+func claudeSessionCandidateBetter(
+	candidateHasDelta bool,
+	candidateDelta time.Duration,
+	candidateAt time.Time,
+	bestHasDelta bool,
+	bestDelta time.Duration,
+	bestAt time.Time,
+) bool {
+	if candidateHasDelta != bestHasDelta {
+		return candidateHasDelta
+	}
+	if candidateHasDelta && candidateDelta != bestDelta {
+		return candidateDelta < bestDelta
+	}
+	if !candidateAt.Equal(bestAt) {
+		if candidateAt.IsZero() {
+			return false
+		}
+		if bestAt.IsZero() {
+			return true
+		}
+		return candidateAt.After(bestAt)
+	}
+	return false
 }
 
 func extractClaudeResumeID(cmdline string) string {

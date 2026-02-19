@@ -8,6 +8,7 @@
 - 判定ロジックが複数箇所に散在し、変更時の副作用範囲が読みにくい。
 - `claude/codex/gemini/copilot` など provider 追加時に if/regex 追加が増え、保守コストが指数的に上がる。
 - 判定理由 (`why running?`) を UI/運用で説明しづらい。
+- Claude では `--resume` 非依存起動時に pane title が `session_name` へフォールバックしやすく、`claude /resume` 一覧のタイトルと一致しない。
 
 このため、**推定中心の分岐ロジック**から、**証拠 (evidence) を合成して状態を決定するエンジン**へ置き換える。
 
@@ -20,6 +21,7 @@
 - `running / waiting_input / waiting_approval / idle / error / unmanaged / unknown` を一貫して判定できる。
 - 判定に `source`, `confidence`, `reasons[]`, `evidence_trace` を持たせ、説明可能にする。
 - 誤判定の再現データを replay テスト化し、回帰を防ぐ。
+- Claude pane title は `/resume` 由来のセッション表示（first prompt / display）に高確率で一致させる。
 
 ### 非ゴール
 
@@ -44,6 +46,7 @@
 [hook events] ---------------> [Evidence Normalizer] -> [State Engine] -> [State Store] -> [API]
 [wrapper lifecycle] ---------/           |                    |               |
 [manual overrides] ---------/            -> [Provider Adapter]-+               -> [Metrics/Trace]
+                                         -> [Session Identity Resolver]
 ```
 
 ### 4.1 コンポーネント
@@ -64,6 +67,8 @@
   - `sources/` (hook, tmux_control, capture, wrapper)
 - `internal/replay/`
   - fixture ロード・再生検証。
+- `internal/sessionidentity/` (Phase 19-B で導入)
+  - `claude_resolver.go`: `history.jsonl + projects/*.jsonl + runtime started_at` による runtime->session 推定。
 
 ## 5. ドメインモデル
 
@@ -132,6 +137,7 @@ type ProviderAdapter interface {
 - provider 特有 UI 文字列・イベント語彙を Evidence に変換。
 - provider 特有の優先順位（例: waiting > running）を signal 正規化に反映。
 - 誤検知しやすい語彙（false-positive）を deny-list で吸収。
+- provider 固有の session タイトル解決（例: Claude `/resume` 相当）を resolver へ委譲。
 
 ### 6.2 共通ルール（adapter 外）
 
@@ -212,7 +218,12 @@ SQLite に新テーブル追加。
 ### Phase 19-B: Claude adapter
 
 - hook/control/capture の 3入力を Claude 用に統合。
-- 既知誤判定 fixture を replay 化。
+- **Claude Session Identity V2**
+  - `--resume` がある場合: session id を最優先採用。
+  - `--resume` がない場合: `~/.claude/history.jsonl`（project/display/timestamp）と
+    `~/.claude/projects/<project>/*.jsonl` を統合し、`runtime.started_at` 近傍で割当。
+  - 複数 Claude runtime が同一 workspace にいる場合も、同一 title 重複を最小化。
+- 既知誤判定 fixture を replay 化（`claude idle but running`, `claude title mismatch`）。
 
 ### Phase 19-C: Codex adapter
 
@@ -232,6 +243,7 @@ SQLite に新テーブル追加。
 ### Phase 19-F: observability
 
 - 指標追加: `misclass_feedback`, `unknown_rate`, `state_flip_rate`, `decision_latency_ms`。
+- 指標追加: `claude_title_match_rate`, `claude_title_source_distribution`.
 
 ### Phase 19-G: 旧ロジック削除
 
@@ -269,6 +281,8 @@ SQLite に新テーブル追加。
 3. provider 増設時に既存 adapter 変更なしで追加可能。
 4. すべての pane state に `source` と `reasons[]` が付与される。
 5. replay test で主要 fixture 全 pass。
+6. Claude pane title の 80% 以上が `session_name` fallback ではなく
+   `claude_session_jsonl | claude_history_display` 由来になる。
 
 ## 14. リスクと対策
 
@@ -278,6 +292,8 @@ SQLite に新テーブル追加。
   - 対策: TTL + ring buffer + batch insert。
 - リスク: hook 未導入環境で精度不足。
   - 対策: wrapper event と control-mode を第二優先に。
+- リスク: `history.jsonl` が巨大化し、毎 tick で読み込むと遅延。
+  - 対策: mtime ベース cache と workspace 上位 N 候補のみ解決。
 
 ## 15. 実装着手時の優先タスク (実行順)
 
@@ -286,10 +302,26 @@ SQLite に新テーブル追加。
 3. daemon の snapshot 経路に `stateengine.Evaluate()` を差し込む（shadow mode）。
 4. replay harness を追加し、既知不具合 fixture を登録。
 5. `AppViewModel` の判定 fallback を feature flag 経由で段階的に無効化。
+6. Claude Session Identity V2 を daemon に組み込み、`session_label_src` を
+   `claude_session_jsonl | claude_history_display | claude_resume_id` で可観測化。
+
+## 17. 外部実装サーベイ（Claude タイトル/状態）
+
+- `tmux-claude-status`:
+  - hook ファーストで status を確定（`UserPromptSubmit/PreToolUse/Stop/Notification`）。
+  - タイトル推定は扱わない。状態精度を hooks で担保する思想。
+- `agent-viewer`:
+  - pane テキストのヒューリスティック判定中心（running/idle/completed）。
+  - タイトルは LLM ラベリングで補完。`/resume` 一致は設計対象外。
+- `agent-session-manager`:
+  - `~/.claude/history.jsonl` と `~/.claude/projects/*.jsonl` を主情報源として
+    session list/title を構築。Claude `/resume` 互換性を重視。
+
+本プロジェクトは Phase 19-B で `agent-session-manager` 系のデータソース設計を取り込み、
+status は hook/event、title は history/session 統合推定で分離して精度を上げる。
 
 ## 16. 完了判定
 
 - shadow mode と current mode の差分レポートが取得できる。
 - 既知不具合（Claude idle 誤 running、Codex/Claude 誤判定）で regression なし。
 - UI 側に判定ロジックが残っていない。
-

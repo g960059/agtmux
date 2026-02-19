@@ -1,9 +1,12 @@
 package daemon
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/g960059/agtmux/internal/model"
 )
@@ -115,5 +118,123 @@ func TestResolveClaudeSessionHintFallbackToResumeID(t *testing.T) {
 	}
 	if !hint.at.IsZero() {
 		t.Fatalf("fallback hint should not carry timestamp")
+	}
+}
+
+func TestBuildClaudeWorkspaceSessionHintsFallsBackToHistoryDisplay(t *testing.T) {
+	home := t.TempDir()
+	workspace := filepath.Join(home, "repo")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+	claudeDir := filepath.Join(home, ".claude")
+	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+		t.Fatalf("mkdir claude dir: %v", err)
+	}
+
+	sessionID := "764d927d-d3a9-4772-9dc7-63bebabd77a2"
+	timestamp := time.Now().UTC().Add(-2 * time.Minute).UnixMilli()
+	historyLine := fmt.Sprintf(
+		`{"sessionId":"%s","project":"%s","display":"Investigate pane lifecycle regressions","timestamp":%d}`+"\n",
+		sessionID,
+		workspace,
+		timestamp,
+	)
+	if err := os.WriteFile(filepath.Join(claudeDir, "history.jsonl"), []byte(historyLine), 0o644); err != nil {
+		t.Fatalf("write history: %v", err)
+	}
+
+	records := readClaudeHistoryRecords(home)
+	hints := buildClaudeWorkspaceSessionHints(home, workspace, records)
+	if len(hints) == 0 {
+		t.Fatalf("expected at least one hint")
+	}
+	if hints[0].sessionID != sessionID {
+		t.Fatalf("unexpected session id: %+v", hints[0])
+	}
+	if hints[0].hint.source != "claude_history_display" {
+		t.Fatalf("unexpected hint source: %+v", hints[0])
+	}
+	if !strings.Contains(strings.ToLower(hints[0].hint.label), "investigate pane") {
+		t.Fatalf("unexpected hint label: %+v", hints[0])
+	}
+}
+
+func TestBuildClaudeWorkspaceSessionHintsPrefersJSONLOverHistoryDisplay(t *testing.T) {
+	home := t.TempDir()
+	workspace := filepath.Join(home, "repo")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+	projectDir := filepath.Join(home, ".claude", "projects", claudeProjectKey(workspace))
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project dir: %v", err)
+	}
+
+	sessionID := "764d927d-d3a9-4772-9dc7-63bebabd77a2"
+	sessionPath := filepath.Join(projectDir, sessionID+".jsonl")
+	sessionContent := `{"type":"user","message":{"content":[{"type":"text","text":"Implement robust claude label inference for tmux panes"}]}}` + "\n"
+	if err := os.WriteFile(sessionPath, []byte(sessionContent), 0o644); err != nil {
+		t.Fatalf("write session: %v", err)
+	}
+	modAt := time.Now().UTC().Add(-30 * time.Second)
+	if err := os.Chtimes(sessionPath, modAt, modAt); err != nil {
+		t.Fatalf("chtimes session: %v", err)
+	}
+
+	historyLine := fmt.Sprintf(
+		`{"sessionId":"%s","project":"%s","display":"fallback display","timestamp":%d}`+"\n",
+		sessionID,
+		workspace,
+		time.Now().UTC().Add(-1*time.Minute).UnixMilli(),
+	)
+	if err := os.WriteFile(filepath.Join(home, ".claude", "history.jsonl"), []byte(historyLine), 0o644); err != nil {
+		t.Fatalf("write history: %v", err)
+	}
+
+	records := readClaudeHistoryRecords(home)
+	hints := buildClaudeWorkspaceSessionHints(home, workspace, records)
+	if len(hints) == 0 {
+		t.Fatalf("expected at least one hint")
+	}
+	if hints[0].hint.source != "claude_session_jsonl" {
+		t.Fatalf("expected claude_session_jsonl source, got %+v", hints[0])
+	}
+	if hints[0].hint.label != "Implement robust claude label inference for tmux panes" {
+		t.Fatalf("unexpected label: %+v", hints[0])
+	}
+}
+
+func TestAssignClaudeWorkspaceHintsToProbesUsesTemporalAffinity(t *testing.T) {
+	now := time.Now().UTC()
+	probes := []claudeRuntimeProbe{
+		{runtimeID: "rt-new", startedAt: now.Add(-2 * time.Minute)},
+		{runtimeID: "rt-old", startedAt: now.Add(-2 * time.Hour)},
+	}
+	sessionHints := []claudeWorkspaceSessionHint{
+		{
+			sessionID: "sid-old",
+			hint: claudeSessionHint{
+				label:  "Older thread",
+				source: "claude_history_display",
+				at:     now.Add(-3 * time.Hour),
+			},
+		},
+		{
+			sessionID: "sid-new",
+			hint: claudeSessionHint{
+				label:  "Latest thread",
+				source: "claude_history_display",
+				at:     now.Add(-90 * time.Second),
+			},
+		},
+	}
+
+	assigned := assignClaudeWorkspaceHintsToProbes(probes, sessionHints, nil)
+	if got := assigned["rt-new"].label; got != "Latest thread" {
+		t.Fatalf("rt-new hint=%q", got)
+	}
+	if got := assigned["rt-old"].label; got != "Older thread" {
+		t.Fatalf("rt-old hint=%q", got)
 	}
 }
