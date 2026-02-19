@@ -385,6 +385,80 @@ final class AppViewModelSettingsTests: XCTestCase {
         XCTAssertEqual(visible, ["z-session"])
     }
 
+    func testSessionSortPrefersDefaultTargetThenHealth() throws {
+        let model = try makeModel()
+        model.sessionSortMode = .name
+        model.targets = [
+            TargetItem(targetID: "local", targetName: "local", kind: "local", connectionRef: nil, isDefault: true, health: "ok"),
+            TargetItem(targetID: "vm-down", targetName: "vm-down", kind: "ssh", connectionRef: "ssh://vm-down", isDefault: false, health: "down"),
+            TargetItem(targetID: "vm-ok", targetName: "vm-ok", kind: "ssh", connectionRef: "ssh://vm-ok", isDefault: false, health: "ok"),
+        ]
+        model.panes = [
+            makePane(paneID: "%1", displayCategory: "idle", target: "vm-down", sessionName: "a-vm-down"),
+            makePane(paneID: "%2", displayCategory: "idle", target: "vm-ok", sessionName: "z-vm-ok"),
+            makePane(paneID: "%3", displayCategory: "idle", target: "local", sessionName: "z-local-default"),
+        ]
+
+        let ordered = model.sessionSections.map { "\($0.target)/\($0.sessionName)" }
+        XCTAssertEqual(ordered, ["local/z-local-default", "vm-ok/z-vm-ok", "vm-down/a-vm-down"])
+    }
+
+    func testAutoReconnectAttemptsDownSSHTargetAndMarksHealthOnSuccess() async throws {
+        let capture = CLIRunCapture()
+        let client = AGTMUXCLIClient(
+            socketPath: "/tmp/agtmux-test.sock",
+            appBinaryPath: "/usr/bin/true",
+            commandRunner: { executable, args in
+                capture.record(executable: executable, args: args)
+                if args.count >= 5, args[2] == "target", args[3] == "connect", args[4] == "vm1" {
+                    return "{\"targets\":[{\"target_id\":\"vm1\",\"target_name\":\"vm1\",\"kind\":\"ssh\",\"connection_ref\":\"ssh://vm1\",\"is_default\":false,\"health\":\"ok\"}]}"
+                }
+                return "{\"targets\":[]}"
+            }
+        )
+        let model = try makeModel(client: client)
+        model.targets = [
+            TargetItem(targetID: "vm1", targetName: "vm1", kind: "ssh", connectionRef: "ssh://vm1", isDefault: false, health: "down")
+        ]
+
+        await model.autoReconnectTargetsIfNeeded(now: Date(timeIntervalSince1970: 100))
+
+        let connectCalls = capture.records().filter { record in
+            record.args.count >= 5 && record.args[2] == "target" && record.args[3] == "connect" && record.args[4] == "vm1"
+        }
+        XCTAssertEqual(connectCalls.count, 1)
+        XCTAssertEqual(model.targetHealth(for: "vm1"), "ok")
+    }
+
+    func testAutoReconnectBackoffSkipsRapidRetriesAfterFailure() async throws {
+        let capture = CLIRunCapture()
+        let client = AGTMUXCLIClient(
+            socketPath: "/tmp/agtmux-test.sock",
+            appBinaryPath: "/usr/bin/true",
+            commandRunner: { executable, args in
+                capture.record(executable: executable, args: args)
+                if args.count >= 5, args[2] == "target", args[3] == "connect" {
+                    throw RuntimeError.commandFailed("agtmux-app target connect", 1, "connect failed")
+                }
+                return "{\"targets\":[]}"
+            }
+        )
+        let model = try makeModel(client: client)
+        model.targets = [
+            TargetItem(targetID: "vm1", targetName: "vm1", kind: "ssh", connectionRef: "ssh://vm1", isDefault: false, health: "down")
+        ]
+
+        let t0 = Date(timeIntervalSince1970: 100)
+        await model.autoReconnectTargetsIfNeeded(now: t0)
+        await model.autoReconnectTargetsIfNeeded(now: t0.addingTimeInterval(1))
+        await model.autoReconnectTargetsIfNeeded(now: t0.addingTimeInterval(5))
+
+        let connectCalls = capture.records().filter { record in
+            record.args.count >= 5 && record.args[2] == "target" && record.args[3] == "connect" && record.args[4] == "vm1"
+        }
+        XCTAssertEqual(connectCalls.count, 2)
+    }
+
     func testPaneOrderWithinSessionIgnoresCategoryTransitions() throws {
         let model = try makeModel()
         let pane1 = PaneItem(
@@ -935,6 +1009,7 @@ final class AppViewModelSettingsTests: XCTestCase {
 
     private func makeModel(
         defaults providedDefaults: UserDefaults? = nil,
+        client providedClient: AGTMUXCLIClient? = nil,
         externalTerminalCommandRunner: @escaping AppViewModel.ExternalTerminalCommandRunner = { _, _ in "" }
     ) throws -> AppViewModel {
         let daemon = try DaemonManager(
@@ -943,7 +1018,7 @@ final class AppViewModelSettingsTests: XCTestCase {
             logPath: "/tmp/agtmux-test.log",
             daemonBinaryPath: "/usr/bin/true"
         )
-        let client = AGTMUXCLIClient(
+        let client = providedClient ?? AGTMUXCLIClient(
             socketPath: "/tmp/agtmux-test.sock",
             appBinaryPath: "/usr/bin/true"
         )
@@ -1021,6 +1096,28 @@ private final class ExternalTerminalRunCapture: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return (executable, args)
+    }
+}
+
+private final class CLIRunCapture: @unchecked Sendable {
+    struct Record {
+        let executable: String
+        let args: [String]
+    }
+
+    private let lock = NSLock()
+    private var captured: [Record] = []
+
+    func record(executable: String, args: [String]) {
+        lock.lock()
+        captured.append(Record(executable: executable, args: args))
+        lock.unlock()
+    }
+
+    func records() -> [Record] {
+        lock.lock()
+        defer { lock.unlock() }
+        return captured
     }
 }
 

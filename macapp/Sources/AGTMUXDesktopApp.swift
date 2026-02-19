@@ -670,6 +670,7 @@ private struct CockpitView: View {
 
     private func sessionSection(_ section: AppViewModel.SessionSection) -> some View {
         let pinned = model.isSessionPinned(target: section.target, sessionName: section.sessionName)
+        let targetHealth = model.targetHealth(for: section.target)
         return VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 8) {
                 HStack(spacing: 7) {
@@ -691,16 +692,21 @@ private struct CockpitView: View {
                 Text(model.sessionLastActiveShortLabel(for: section))
                     .font(.system(size: 10, weight: .regular, design: .monospaced))
                     .foregroundStyle(palette.textMuted)
-                Text(section.target)
-                    .font(.system(size: 10, weight: .regular, design: .monospaced))
-                    .foregroundStyle(palette.textSecondary)
-                    .lineLimit(1)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(
-                        Capsule(style: .continuous)
-                            .fill(palette.rowFill)
-                    )
+                HStack(spacing: 5) {
+                    Circle()
+                        .fill(colorForTargetHealth(targetHealth))
+                        .frame(width: 6, height: 6)
+                    Text(section.target)
+                        .font(.system(size: 10, weight: .regular, design: .monospaced))
+                        .foregroundStyle(palette.textSecondary)
+                        .lineLimit(1)
+                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(
+                    Capsule(style: .continuous)
+                        .fill(palette.rowFill)
+                )
             }
             .contentShape(Rectangle())
             .contextMenu {
@@ -710,6 +716,11 @@ private struct CockpitView: View {
                         sessionName: section.sessionName,
                         pinned: !pinned
                     )
+                }
+                if model.canReconnectTarget(named: section.target) {
+                    Button("Reconnect Target") {
+                        model.reconnectTarget(named: section.target)
+                    }
                 }
                 Divider()
                 Button("Kill Session", role: .destructive) {
@@ -991,6 +1002,19 @@ private struct CockpitView: View {
             return palette.unmanaged
         default:
             return palette.unknown
+        }
+    }
+
+    private func colorForTargetHealth(_ health: String) -> Color {
+        switch health {
+        case "ok":
+            return palette.running
+        case "degraded":
+            return palette.attention
+        case "down":
+            return palette.errorText
+        default:
+            return palette.textMuted
         }
     }
 

@@ -143,6 +143,11 @@ final class AppViewModel: ObservableObject {
         var errorDescription: String? { message }
     }
 
+    private struct TargetReconnectState {
+        let nextAttemptAt: Date
+        let nextBackoffSeconds: TimeInterval
+    }
+
     private enum PreferenceKey {
         static let uiPrefsVersion = "ui.prefs_version"
         static let viewMode = "ui.view_mode"
@@ -325,6 +330,9 @@ final class AppViewModel: ObservableObject {
     private var sessionStableOrder: [String: Int] = [:]
     private var nextSessionStableOrder = 0
     private var pinnedSessionKeys: Set<String> = []
+    private var targetReconnectStateByName: [String: TargetReconnectState] = [:]
+    private var targetReconnectInFlightNames: Set<String> = []
+    private var targetReconnectSweepInFlight = false
     private var terminalCapabilities: CapabilityFlags?
     private var terminalCapabilitiesFetchedAt: Date?
     private let terminalSessionController: TerminalSessionController
@@ -359,6 +367,8 @@ final class AppViewModel: ObservableObject {
     private let interactiveInputBatchWindowMillis = 12
     private let interactiveInputBatchChunkBytes = 320
     private let terminalOutputMaxChars = 60_000
+    private let targetReconnectInitialBackoffSeconds: TimeInterval = 4
+    private let targetReconnectMaxBackoffSeconds: TimeInterval = 90
 
     init(
         daemon: DaemonManager,
@@ -482,6 +492,32 @@ final class AppViewModel: ObservableObject {
             pinnedSessionKeys.insert(key)
         }
         persistPinnedSessions()
+    }
+
+    func targetHealth(for targetName: String) -> String {
+        guard let target = targetRecord(for: targetName) else {
+            return "unknown"
+        }
+        return normalizedTargetHealth(target.health)
+    }
+
+    func canReconnectTarget(named targetName: String) -> Bool {
+        guard let target = targetRecord(for: targetName) else {
+            return false
+        }
+        guard normalizedTargetKind(target.kind) == "ssh" else {
+            return false
+        }
+        return trimmedNonEmpty(target.connectionRef) != nil
+    }
+
+    func reconnectTarget(named targetName: String) {
+        Task { [weak self] in
+            guard let self else {
+                return
+            }
+            _ = await self.connectTargetNow(name: targetName, userInitiated: true)
+        }
     }
 
     func performAddTarget(
@@ -1018,6 +1054,12 @@ final class AppViewModel: ObservableObject {
         updateSessionStableOrder(with: filteredPanes)
         let grouped = Dictionary(grouping: filteredPanes, by: { paneSessionKey(target: $0.identity.target, sessionName: $0.identity.sessionName) })
         let sessionMeta = Dictionary(uniqueKeysWithValues: sessions.map { (paneSessionKey(target: $0.identity.target, sessionName: $0.identity.sessionName), $0) })
+        let targetMeta = Dictionary(uniqueKeysWithValues: targets.map {
+            (
+                normalizedTargetLookupKey($0.targetName),
+                (isDefault: $0.isDefault, healthRank: targetHealthRank($0.health))
+            )
+        })
         var out: [SessionSection] = []
         for (key, paneList) in grouped {
             guard let first = paneList.first else {
@@ -1047,6 +1089,14 @@ final class AppViewModel: ObservableObject {
             let rhsPinned = pinnedSessionKeys.contains(rhs.id)
             if lhsPinned != rhsPinned {
                 return lhsPinned && !rhsPinned
+            }
+            let lhsMeta = targetMeta[normalizedTargetLookupKey(lhs.target)] ?? (isDefault: false, healthRank: targetHealthRank("unknown"))
+            let rhsMeta = targetMeta[normalizedTargetLookupKey(rhs.target)] ?? (isDefault: false, healthRank: targetHealthRank("unknown"))
+            if lhsMeta.isDefault != rhsMeta.isDefault {
+                return lhsMeta.isDefault && !rhsMeta.isDefault
+            }
+            if lhsMeta.healthRank != rhsMeta.healthRank {
+                return lhsMeta.healthRank < rhsMeta.healthRank
             }
             switch sessionSortMode {
             case .stable:
@@ -1591,6 +1641,9 @@ final class AppViewModel: ObservableObject {
         if panes != snapshot.panes {
             panes = snapshot.panes
         }
+        let liveTargetKeys = Set(targets.map { normalizedTargetLookupKey($0.targetName) })
+        targetReconnectStateByName = targetReconnectStateByName.filter { liveTargetKeys.contains($0.key) }
+        targetReconnectInFlightNames.formIntersection(liveTargetKeys)
         let paneIDs = Set(panes.map(\.id))
         let liveSessionKeys = Set(panes.map { paneSessionKey(target: $0.identity.target, sessionName: $0.identity.sessionName) })
         let removedPinned = pinnedSessionKeys.subtracting(liveSessionKeys)
@@ -1618,6 +1671,9 @@ final class AppViewModel: ObservableObject {
                 selectedPane = nil
                 infoMessage = "選択中 pane が消えました。再選択してください。"
             }
+        }
+        Task { [weak self] in
+            await self?.autoReconnectTargetsIfNeeded()
         }
     }
 
@@ -2526,13 +2582,185 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    func autoReconnectTargetsIfNeeded(now: Date = Date()) async {
+        guard !targetReconnectSweepInFlight else {
+            return
+        }
+        targetReconnectSweepInFlight = true
+        defer { targetReconnectSweepInFlight = false }
+
+        let reconnectTargets = targets.filter { shouldAttemptAutoReconnect($0, now: now) }
+        guard !reconnectTargets.isEmpty else {
+            return
+        }
+        for target in reconnectTargets {
+            _ = await connectTargetNow(name: target.targetName, userInitiated: false, now: now)
+        }
+    }
+
+    @discardableResult
+    private func connectTargetNow(
+        name: String,
+        userInitiated: Bool,
+        now: Date = Date()
+    ) async -> Bool {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else {
+            if userInitiated {
+                infoMessage = ""
+                errorMessage = "target name is required"
+            }
+            return false
+        }
+        let targetKey = normalizedTargetLookupKey(trimmedName)
+        if targetReconnectInFlightNames.contains(targetKey) {
+            if userInitiated {
+                infoMessage = "target connect already in progress: \(trimmedName)"
+                errorMessage = ""
+            }
+            return false
+        }
+        targetReconnectInFlightNames.insert(targetKey)
+        defer {
+            targetReconnectInFlightNames.remove(targetKey)
+        }
+
+        do {
+            let connectedTargets = try await client.connectTarget(name: trimmedName)
+            mergeConnectedTargets(connectedTargets)
+            clearTargetReconnectState(for: targetKey)
+            setTargetHealth("ok", forTargetKey: targetKey)
+            if userInitiated {
+                infoMessage = "target connected: \(trimmedName)"
+                errorMessage = ""
+            }
+            return true
+        } catch {
+            recordTargetReconnectFailure(for: targetKey, now: now)
+            if userInitiated {
+                infoMessage = ""
+                errorMessage = error.localizedDescription
+            }
+            return false
+        }
+    }
+
+    private func shouldAttemptAutoReconnect(_ target: TargetItem, now: Date) -> Bool {
+        guard normalizedTargetKind(target.kind) == "ssh" else {
+            return false
+        }
+        guard trimmedNonEmpty(target.connectionRef) != nil else {
+            return false
+        }
+        let health = normalizedTargetHealth(target.health)
+        if health == "ok" {
+            clearTargetReconnectState(for: normalizedTargetLookupKey(target.targetName))
+            return false
+        }
+        let targetKey = normalizedTargetLookupKey(target.targetName)
+        if targetReconnectInFlightNames.contains(targetKey) {
+            return false
+        }
+        if let state = targetReconnectStateByName[targetKey], now < state.nextAttemptAt {
+            return false
+        }
+        return true
+    }
+
+    private func clearTargetReconnectState(for targetKey: String) {
+        targetReconnectStateByName.removeValue(forKey: targetKey)
+    }
+
+    private func recordTargetReconnectFailure(for targetKey: String, now: Date) {
+        let delay = targetReconnectStateByName[targetKey]?.nextBackoffSeconds ?? targetReconnectInitialBackoffSeconds
+        let nextBackoff = min(delay * 2, targetReconnectMaxBackoffSeconds)
+        targetReconnectStateByName[targetKey] = TargetReconnectState(
+            nextAttemptAt: now.addingTimeInterval(delay),
+            nextBackoffSeconds: nextBackoff
+        )
+    }
+
+    private func mergeConnectedTargets(_ connectedTargets: [TargetItem]) {
+        guard !connectedTargets.isEmpty else {
+            return
+        }
+        var merged = targets
+        for connected in connectedTargets {
+            if let index = merged.firstIndex(where: { normalizedTargetLookupKey($0.targetName) == normalizedTargetLookupKey(connected.targetName) || normalizedTargetLookupKey($0.targetID) == normalizedTargetLookupKey(connected.targetID) }) {
+                merged[index] = connected
+            } else {
+                merged.append(connected)
+            }
+        }
+        targets = merged
+    }
+
+    private func setTargetHealth(_ health: String, forTargetKey targetKey: String) {
+        let normalizedHealth = normalizedTargetHealth(health)
+        targets = targets.map { target in
+            guard normalizedTargetLookupKey(target.targetName) == targetKey else {
+                return target
+            }
+            if normalizedTargetHealth(target.health) == normalizedHealth {
+                return target
+            }
+            return TargetItem(
+                targetID: target.targetID,
+                targetName: target.targetName,
+                kind: target.kind,
+                connectionRef: target.connectionRef,
+                isDefault: target.isDefault,
+                health: normalizedHealth
+            )
+        }
+    }
+
+    private func normalizedTargetLookupKey(_ raw: String) -> String {
+        if let token = normalizedToken(raw) {
+            return token
+        }
+        return raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    private func normalizedTargetKind(_ raw: String) -> String {
+        normalizedToken(raw) ?? "unknown"
+    }
+
+    private func normalizedTargetHealth(_ raw: String) -> String {
+        switch normalizedToken(raw) {
+        case "ok":
+            return "ok"
+        case "degraded":
+            return "degraded"
+        case "down":
+            return "down"
+        default:
+            return "unknown"
+        }
+    }
+
+    private func targetHealthRank(_ health: String) -> Int {
+        switch normalizedTargetHealth(health) {
+        case "ok":
+            return 0
+        case "degraded":
+            return 1
+        case "down":
+            return 2
+        default:
+            return 3
+        }
+    }
+
     private func targetRecord(for targetToken: String) -> TargetItem? {
         let normalized = targetToken.trimmingCharacters(in: .whitespacesAndNewlines)
         if normalized.isEmpty {
             return nil
         }
+        let lookupKey = normalizedTargetLookupKey(normalized)
         return targets.first {
-            $0.targetName == normalized || $0.targetID == normalized
+            normalizedTargetLookupKey($0.targetName) == lookupKey ||
+                normalizedTargetLookupKey($0.targetID) == lookupKey
         }
     }
 
