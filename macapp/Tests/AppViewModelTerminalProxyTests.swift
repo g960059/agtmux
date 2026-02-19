@@ -263,6 +263,36 @@ final class AppViewModelTerminalProxyTests: XCTestCase {
         XCTAssertFalse(finalLog.contains("terminal stream"))
     }
 
+    func testPaneReselectRestoresCachedTerminalPreviewWithoutStreaming() async throws {
+        let fixture = try makeModelFixture(
+            streamMode: "output_only",
+            streamContent: "cached-pane-output",
+            autoStreamOnSelection: false
+        )
+        let model = fixture.model
+        let paneA = makePane(sessionName: "s1", paneID: "%1")
+        let paneB = makePane(sessionName: "s1", paneID: "%2")
+        model.panes = [paneA, paneB]
+
+        model.selectedPane = paneA
+        model.performViewOutput(lines: 80)
+
+        await waitUntil("seed paneA output cache", timeout: 2.0) {
+            model.outputPreview == "cached-pane-output"
+        }
+        let streamCountBeforeSwitch = occurrenceCount(in: readLog(at: fixture.logURL), token: "terminal stream")
+
+        model.selectedPane = paneB
+        XCTAssertEqual(model.outputPreview, "")
+
+        model.selectedPane = paneA
+        XCTAssertEqual(model.outputPreview, "cached-pane-output")
+
+        let streamCountAfterReselect = occurrenceCount(in: readLog(at: fixture.logURL), token: "terminal stream")
+        XCTAssertEqual(streamCountAfterReselect, streamCountBeforeSwitch)
+        XCTAssertEqual(model.errorMessage, "")
+    }
+
     func testPerformViewOutputDegradesToTerminalReadAfterProxyFailures() async throws {
         let fixture = try makeModelFixture(
             streamMode: "stream_always_fail",

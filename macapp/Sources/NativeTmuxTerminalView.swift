@@ -380,11 +380,15 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
         SwiftTerm.Color(red: red * 257, green: green * 257, blue: blue * 257)
     }
 
-    private static func preferredANSIPalette(darkMode: Bool) -> [SwiftTerm.Color] {
+    private static func preferredANSIPalette(darkMode: Bool, claudePromptContrast: Bool) -> [SwiftTerm.Color] {
         if darkMode {
-            // Lift color0 from pure black to reduce heavy black blocks in CLI prompt UIs.
+            // Claude's prompt first glyph often uses ANSI color0 foreground.
+            // Raise only in Claude panes to keep the leading glyph readable.
+            let color0 = claudePromptContrast
+                ? ansi8(168, 178, 194)
+                : ansi8(12, 20, 31)
             return [
-                ansi8(12, 20, 31),   // black
+                color0,              // black
                 ansi8(214, 92, 92),  // red
                 ansi8(111, 214, 154), // green
                 ansi8(224, 196, 120), // yellow
@@ -402,8 +406,11 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
                 ansi8(238, 243, 251), // bright white
             ]
         }
+        let color0 = claudePromptContrast
+            ? ansi8(84, 92, 108)
+            : ansi8(20, 25, 33)
         return [
-            ansi8(20, 25, 33),
+            color0,
             ansi8(196, 58, 58),
             ansi8(39, 143, 84),
             ansi8(165, 120, 35),
@@ -423,6 +430,13 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
     }
 
     final class Coordinator: NSObject, TerminalViewDelegate {
+        private enum PaletteVariant: Equatable {
+            case standardDark
+            case standardLight
+            case claudeDark
+            case claudeLight
+        }
+
         private let onInputBytes: ([UInt8]) -> Void
         private let onResize: (_ cols: Int, _ rows: Int) -> Void
 
@@ -443,6 +457,7 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
         private var interactiveInputEnabled = true
         private var didConfigureAppearance = false
         private var appearanceModeIsDark = true
+        private var paletteVariant: PaletteVariant?
         private let maxCachedLines = 2400
 
         init(
@@ -468,6 +483,7 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
             pendingPaneCols = nil
             pendingPaneRows = nil
             holdRepaintWhileScrolled = false
+            paletteVariant = nil
         }
 
         func update(
@@ -482,7 +498,16 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
         ) {
             terminalView = terminal
             self.interactiveInputEnabled = interactiveInputEnabled
-            let normalizedContent = normalizedTerminalText(content)
+            let claudePromptContrast = isLikelyClaudePane(pane)
+            applyPalette(
+                darkMode: appearanceModeIsDark,
+                claudePromptContrast: claudePromptContrast,
+                terminal: terminal
+            )
+            var normalizedContent = normalizedTerminalText(content)
+            if claudePromptContrast {
+                normalizedContent = applyClaudePromptTryLeadingGlyphHighlight(normalizedContent)
+            }
             pendingContent = normalizedContent
             pendingCursorX = cursorX
             pendingCursorY = cursorY
@@ -579,6 +604,105 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
             var normalized = raw.replacingOccurrences(of: "\r\n", with: "\n")
             normalized = normalized.replacingOccurrences(of: "\r", with: "\n")
             return normalized
+        }
+
+        private func isLikelyClaudePane(_ pane: PaneItem) -> Bool {
+            let agent = pane.agentType?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+            if agent == "claude" {
+                return true
+            }
+            let cmd = pane.currentCmd?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+            if cmd == "claude" {
+                return true
+            }
+            let title = pane.paneTitle?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+            if title.contains("claude") {
+                return true
+            }
+            let label = pane.sessionLabel?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+            return label.contains("claude")
+        }
+
+        private func applyPalette(
+            darkMode: Bool,
+            claudePromptContrast: Bool,
+            terminal: TerminalView
+        ) {
+            let variant: PaletteVariant
+            if darkMode {
+                variant = claudePromptContrast ? .claudeDark : .standardDark
+            } else {
+                variant = claudePromptContrast ? .claudeLight : .standardLight
+            }
+            guard variant != paletteVariant else {
+                return
+            }
+            paletteVariant = variant
+            terminal.installColors(
+                NativeTmuxTerminalView.preferredANSIPalette(
+                    darkMode: darkMode,
+                    claudePromptContrast: claudePromptContrast
+                )
+            )
+            terminal.useBrightColors = true
+            if darkMode {
+                terminal.caretColor = claudePromptContrast
+                    ? NSColor(calibratedRed: 0.90, green: 0.93, blue: 0.98, alpha: 0.98)
+                    : NSColor(calibratedRed: 0.44, green: 0.74, blue: 1.0, alpha: 0.95)
+            } else {
+                terminal.caretColor = claudePromptContrast
+                    ? NSColor(calibratedRed: 0.16, green: 0.20, blue: 0.28, alpha: 0.95)
+                    : NSColor(calibratedRed: 0.12, green: 0.44, blue: 0.90, alpha: 0.90)
+            }
+        }
+
+        private func applyClaudePromptTryLeadingGlyphHighlight(_ raw: String) -> String {
+            guard raw.contains("Try ") else {
+                return raw
+            }
+            let open = "\u{001B}[38;2;18;24;32;48;2;236;240;246m"
+            let close = "\u{001B}[39;49m"
+            let marker = "48;2;236;240;246m"
+            var lines = raw.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+            guard !lines.isEmpty else {
+                return raw
+            }
+            for idx in lines.indices {
+                var line = lines[idx]
+                guard !line.contains(marker) else {
+                    continue
+                }
+                let plain = stripANSI(line).trimmingCharacters(in: .whitespacesAndNewlines)
+                guard plain.hasPrefix("› Try ") || plain.hasPrefix("❯ Try ") || plain.hasPrefix("> Try ") else {
+                    continue
+                }
+                guard let tryRange = line.range(of: "Try ") else {
+                    continue
+                }
+                let tEnd = line.index(after: tryRange.lowerBound)
+                line.replaceSubrange(tryRange.lowerBound ..< tEnd, with: "\(open)T\(close)")
+                lines[idx] = line
+            }
+            return lines.joined(separator: "\n")
+        }
+
+        private func stripANSI(_ raw: String) -> String {
+            guard raw.contains("\u{001B}[") else {
+                return raw
+            }
+            var out = ""
+            out.reserveCapacity(raw.count)
+            var idx = raw.startIndex
+            while idx < raw.endIndex {
+                let scalar = raw[idx].unicodeScalars.first?.value
+                if scalar == 0x1B {
+                    idx = consumeEscapeSequence(in: raw, from: idx)
+                    continue
+                }
+                out.append(raw[idx])
+                idx = raw.index(after: idx)
+            }
+            return out
         }
 
         private func updatedCachedLines(
@@ -928,8 +1052,7 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
             }
             didConfigureAppearance = true
             appearanceModeIsDark = darkMode
-            terminal.installColors(NativeTmuxTerminalView.preferredANSIPalette(darkMode: darkMode))
-            terminal.useBrightColors = true
+            paletteVariant = nil
             if darkMode {
                 terminal.nativeBackgroundColor = .clear
                 terminal.nativeForegroundColor = NSColor(

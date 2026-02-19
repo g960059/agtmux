@@ -129,6 +129,14 @@ final class AppViewModel: ObservableObject {
         let awaitingKind: String
     }
 
+    private struct TerminalRenderCache {
+        let output: String
+        let cursorX: Int?
+        let cursorY: Int?
+        let paneCols: Int?
+        let paneRows: Int?
+    }
+
     private struct InteractiveInputError: LocalizedError {
         let message: String
 
@@ -176,12 +184,22 @@ final class AppViewModel: ObservableObject {
                         }
                     }
                 }
-                outputPreview = ""
-                terminalCursorX = nil
-                terminalCursorY = nil
-                terminalPaneCols = nil
-                terminalPaneRows = nil
                 let nextPaneID = selectedPane?.id
+                if let nextPaneID {
+                    if !applyCachedTerminalRender(for: nextPaneID) {
+                        outputPreview = ""
+                        terminalCursorX = nil
+                        terminalCursorY = nil
+                        terminalPaneCols = nil
+                        terminalPaneRows = nil
+                    }
+                } else {
+                    outputPreview = ""
+                    terminalCursorX = nil
+                    terminalCursorY = nil
+                    terminalPaneCols = nil
+                    terminalPaneRows = nil
+                }
                 if autoStreamOnSelection {
                     Task { [weak self] in
                         guard let self else {
@@ -311,6 +329,7 @@ final class AppViewModel: ObservableObject {
     private var bufferedInteractiveBytesByPaneID: [String: [UInt8]] = [:]
     private var bufferedInteractiveFlushTaskByPaneID: [String: Task<Void, Never>] = [:]
     private var lastInteractiveInputAtByPaneID: [String: Date] = [:]
+    private var terminalRenderCacheByPaneID: [String: TerminalRenderCache] = [:]
     private var unchangedSnapshotStreak: Int = 0
     private let queueDedupeWindowSeconds: TimeInterval = 30
     private let recoveryCooldownSeconds: TimeInterval = 6
@@ -1533,6 +1552,7 @@ final class AppViewModel: ObservableObject {
             panes = snapshot.panes
         }
         let paneIDs = Set(panes.map(\.id))
+        terminalRenderCacheByPaneID = terminalRenderCacheByPaneID.filter { paneIDs.contains($0.key) }
         lastInteractiveInputAtByPaneID = lastInteractiveInputAtByPaneID.filter { paneIDs.contains($0.key) }
         Task { [weak self] in
             guard let self else {
@@ -1982,6 +2002,7 @@ final class AppViewModel: ObservableObject {
             setOutputPreviewIfChanged(content)
         }
         trimOutputPreviewIfNeeded()
+        updateTerminalRenderCache(for: paneID)
     }
 
     private func applyTerminalStreamFrame(_ frame: TerminalStreamFrame, paneID: String) {
@@ -2023,6 +2044,29 @@ final class AppViewModel: ObservableObject {
             return
         }
         trimOutputPreviewIfNeeded()
+        updateTerminalRenderCache(for: paneID)
+    }
+
+    private func updateTerminalRenderCache(for paneID: String) {
+        terminalRenderCacheByPaneID[paneID] = TerminalRenderCache(
+            output: outputPreview,
+            cursorX: terminalCursorX,
+            cursorY: terminalCursorY,
+            paneCols: terminalPaneCols,
+            paneRows: terminalPaneRows
+        )
+    }
+
+    private func applyCachedTerminalRender(for paneID: String) -> Bool {
+        guard let cached = terminalRenderCacheByPaneID[paneID] else {
+            return false
+        }
+        setOutputPreviewIfChanged(cached.output)
+        setTerminalCursorXIfChanged(cached.cursorX)
+        setTerminalCursorYIfChanged(cached.cursorY)
+        setTerminalPaneColsIfChanged(cached.paneCols)
+        setTerminalPaneRowsIfChanged(cached.paneRows)
+        return true
     }
 
     private func trimOutputPreviewIfNeeded() {

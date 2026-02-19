@@ -4543,14 +4543,15 @@ func TestTerminalReadRejectsInvalidCursor(t *testing.T) {
 	}
 }
 
-func TestRefinePanePresentationWithSignalsPromotesRecentManagedIdle(t *testing.T) {
+func TestRefinePanePresentationWithSignalsPromotesRecentManagedIdleWithRunningSignal(t *testing.T) {
 	now := time.Now().UTC()
 	recent := now.Add(-5 * time.Second)
 	agentPresence, activityState, category, needsAction := refinePanePresentationWithSignals(
 		"managed",
 		string(model.StateIdle),
+		"running",
 		"",
-		"",
+		string(model.SourcePoller),
 		&recent,
 		now,
 	)
@@ -4576,6 +4577,7 @@ func TestRefinePanePresentationWithSignalsDoesNotPromoteOnlyByActiveReason(t *te
 		string(model.StateIdle),
 		"active",
 		"",
+		string(model.SourcePoller),
 		&old,
 		now,
 	)
@@ -4595,6 +4597,7 @@ func TestRefinePanePresentationWithSignalsKeepsIdleWhenReasonExplicitlyIdle(t *t
 		string(model.StateIdle),
 		"idle",
 		"",
+		string(model.SourcePoller),
 		&recent,
 		now,
 	)
@@ -4614,11 +4617,72 @@ func TestRefinePanePresentationWithSignalsKeepsIdleAfterCompletionLikeEvent(t *t
 		string(model.StateIdle),
 		"idle",
 		"task_completed",
+		string(model.SourcePoller),
 		&recent,
 		now,
 	)
 	if activityState != string(model.StateIdle) {
 		t.Fatalf("expected idle state, got %q", activityState)
+	}
+	if category != "idle" {
+		t.Fatalf("expected idle category, got %q", category)
+	}
+}
+
+func TestRefinePanePresentationWithSignalsDoesNotPromotePollerIdleWithoutRunningSignal(t *testing.T) {
+	now := time.Now().UTC()
+	recent := now.Add(-2 * time.Second)
+	_, activityState, category, _ := refinePanePresentationWithSignals(
+		"managed",
+		string(model.StateIdle),
+		"",
+		"",
+		string(model.SourcePoller),
+		&recent,
+		now,
+	)
+	if activityState != string(model.StateIdle) {
+		t.Fatalf("expected idle state, got %q", activityState)
+	}
+	if category != "idle" {
+		t.Fatalf("expected idle category, got %q", category)
+	}
+}
+
+func TestRefinePanePresentationWithSignalsPromotesPollerIdleWithRunningSignal(t *testing.T) {
+	now := time.Now().UTC()
+	recent := now.Add(-3 * time.Second)
+	_, activityState, category, _ := refinePanePresentationWithSignals(
+		"managed",
+		string(model.StateIdle),
+		"running",
+		"",
+		string(model.SourcePoller),
+		&recent,
+		now,
+	)
+	if activityState != string(model.StateRunning) {
+		t.Fatalf("expected running state, got %q", activityState)
+	}
+	if category != "running" {
+		t.Fatalf("expected running category, got %q", category)
+	}
+}
+
+func TestRefinePanePresentationWithSignalsDemotesStalePollerRunningWithoutSignal(t *testing.T) {
+	now := time.Now().UTC()
+	stale := now.Add(-2 * time.Minute)
+	_, activityState, category, _ := refinePanePresentationWithSignals(
+		"managed",
+		string(model.StateRunning),
+		"",
+		"",
+		string(model.SourcePoller),
+		&stale,
+		now,
+	)
+	if activityState != string(model.StateIdle) {
+		t.Fatalf("expected stale poller running to demote to idle, got %q", activityState)
 	}
 	if category != "idle" {
 		t.Fatalf("expected idle category, got %q", category)

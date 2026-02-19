@@ -3009,6 +3009,7 @@ func (s *Server) buildPaneItems(ctx context.Context, targets []model.Target) ([]
 			activityState,
 			reason,
 			lastEventType,
+			stateSource,
 			lastInteractionAt,
 			presentationNow,
 		)
@@ -4284,7 +4285,9 @@ func derivePaneLastInteractionAt(
 		v := lastEventAt.UTC()
 		return &v
 	}
-	if strings.ToLower(strings.TrimSpace(stateSource)) == string(model.SourcePoller) && lastActivityAt != nil {
+	if strings.ToLower(strings.TrimSpace(stateSource)) == string(model.SourcePoller) &&
+		agentPresence == "none" &&
+		lastActivityAt != nil {
 		v := lastActivityAt.UTC()
 		return &v
 	}
@@ -4511,11 +4514,16 @@ func refinePanePresentationWithSignals(
 	activityState string,
 	reasonCode string,
 	lastEventType string,
+	stateSource string,
 	lastInteractionAt *time.Time,
 	now time.Time,
 ) (string, string, string, bool) {
 	state := strings.ToLower(strings.TrimSpace(activityState))
 	reason := strings.ToLower(strings.TrimSpace(reasonCode))
+	eventType := strings.ToLower(strings.TrimSpace(lastEventType))
+	source := strings.ToLower(strings.TrimSpace(stateSource))
+	hasRunningSignal := hasRunningHint(reason, eventType)
+	hasIdleOrCompletionSignal := hasIdleOrCompletionHint(reason, eventType)
 
 	if state == "" || state == string(model.StateUnknown) || state == string(model.StateIdle) {
 		switch {
@@ -4532,12 +4540,25 @@ func refinePanePresentationWithSignals(
 		(state == string(model.StateIdle) || state == string(model.StateUnknown)) &&
 		lastInteractionAt != nil &&
 		!lastInteractionAt.IsZero() &&
-		!strings.Contains(reason, "idle") &&
-		!strings.Contains(reason, "complete") &&
-		!isCompletionLikeEventType(lastEventType) {
+		source == string(model.SourcePoller) &&
+		hasRunningSignal &&
+		!hasIdleOrCompletionSignal {
 		at := lastInteractionAt.UTC()
 		if now.Sub(at) <= 8*time.Second {
 			state = string(model.StateRunning)
+		}
+	}
+
+	if agentPresence == "managed" &&
+		state == string(model.StateRunning) &&
+		source == string(model.SourcePoller) &&
+		!hasRunningSignal {
+		staleByInteraction := true
+		if lastInteractionAt != nil && !lastInteractionAt.IsZero() {
+			staleByInteraction = now.Sub(lastInteractionAt.UTC()) > 45*time.Second
+		}
+		if staleByInteraction {
+			state = string(model.StateIdle)
 		}
 	}
 
@@ -4561,6 +4582,100 @@ func refinePanePresentationWithSignals(
 		state == string(model.StateWaitingApproval) ||
 		state == string(model.StateError)
 	return agentPresence, state, category, needsUserAction
+}
+
+func hasRunningHint(reasonCode, lastEventType string) bool {
+	reason := normalizeSignalToken(reasonCode)
+	eventType := normalizeSignalToken(lastEventType)
+	if reason == "" && eventType == "" {
+		return false
+	}
+	if hasAttentionHint(reason) || hasAttentionHint(eventType) {
+		return false
+	}
+	if hasIdleLikeHint(reason) || hasIdleLikeHint(eventType) {
+		return false
+	}
+	for _, token := range []string{
+		"running",
+		"active",
+		"working",
+		"in_progress",
+		"progress",
+		"streaming",
+		"task_started",
+		"session_started",
+		"agent_turn_started",
+		"hook_start",
+		"wrapper_start",
+	} {
+		if strings.Contains(reason, token) || strings.Contains(eventType, token) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasIdleOrCompletionHint(reasonCode, lastEventType string) bool {
+	reason := normalizeSignalToken(reasonCode)
+	eventType := normalizeSignalToken(lastEventType)
+	return hasIdleLikeHint(reason) || hasIdleLikeHint(eventType)
+}
+
+func hasIdleLikeHint(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, token := range []string{
+		"idle",
+		"complete",
+		"completed",
+		"finished",
+		"exit",
+		"stopped",
+		"done",
+	} {
+		if strings.Contains(value, token) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasAttentionHint(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, token := range []string{
+		"waiting_input",
+		"needs_input",
+		"input_requested",
+		"waiting_approval",
+		"approval_required",
+		"approval_requested",
+		"error",
+		"failed",
+		"panic",
+	} {
+		if strings.Contains(value, token) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeSignalToken(value string) string {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	if normalized == "" {
+		return ""
+	}
+	replacer := strings.NewReplacer(
+		".", "_",
+		"-", "_",
+		":", "_",
+		" ", "_",
+	)
+	return replacer.Replace(normalized)
 }
 
 func isCompletionLikeEventType(eventType string) bool {

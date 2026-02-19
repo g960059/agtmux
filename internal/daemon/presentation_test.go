@@ -155,7 +155,7 @@ n/Users/virtualmachine/.codex/sessions/2026/02/13/rollout-2026-02-13T08-06-04-01
 	}
 }
 
-func TestDerivePaneLastInteractionAtManagedPollerFallbackUsesTmuxActivity(t *testing.T) {
+func TestDerivePaneLastInteractionAtManagedPollerDoesNotUseTmuxActivityFallback(t *testing.T) {
 	now := time.Now().UTC()
 	lastActivity := now.Add(-10 * time.Second)
 	updatedAt := now.Add(-2 * time.Second)
@@ -175,11 +175,8 @@ func TestDerivePaneLastInteractionAtManagedPollerFallbackUsesTmuxActivity(t *tes
 		&lastActivity,
 		updatedAt,
 	)
-	if got == nil {
-		t.Fatalf("expected managed poller fallback timestamp")
-	}
-	if !got.Equal(lastActivity) {
-		t.Fatalf("expected %s, got %s", lastActivity.Format(time.RFC3339Nano), got.Format(time.RFC3339Nano))
+	if got != nil {
+		t.Fatalf("expected nil for managed poller fallback, got %s", got.Format(time.RFC3339Nano))
 	}
 }
 
