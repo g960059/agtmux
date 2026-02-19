@@ -334,6 +334,57 @@ final class AppViewModelSettingsTests: XCTestCase {
         XCTAssertEqual(secondOrder, ["a-session", "z-session"])
     }
 
+    func testPinnedSessionSortsBeforeUnpinnedRegardlessOfSortMode() throws {
+        let model = try makeModel()
+        model.sessionSortMode = .name
+        model.panes = [
+            makePane(paneID: "%1", displayCategory: "idle", sessionName: "a-session"),
+            makePane(paneID: "%2", displayCategory: "idle", sessionName: "z-session"),
+        ]
+        model.setSessionPinned(target: "local", sessionName: "z-session", pinned: true)
+
+        let order = model.sessionSections.map(\.sessionName)
+        XCTAssertEqual(order, ["z-session", "a-session"])
+    }
+
+    func testPinnedSessionsPersistAcrossModelInstances() throws {
+        let suiteName = "AGTMUXDesktopTests-PinnedSessions-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Failed to create test defaults")
+            throw NSError(domain: "test", code: 1)
+        }
+        defaults.removePersistentDomain(forName: suiteName)
+
+        let firstModel = try makeModel(defaults: defaults)
+        firstModel.panes = [
+            makePane(paneID: "%1", displayCategory: "idle", sessionName: "a-session"),
+            makePane(paneID: "%2", displayCategory: "idle", sessionName: "z-session"),
+        ]
+        firstModel.setSessionPinned(target: "local", sessionName: "z-session", pinned: true)
+
+        let secondModel = try makeModel(defaults: defaults)
+        secondModel.panes = [
+            makePane(paneID: "%3", displayCategory: "idle", sessionName: "a-session"),
+            makePane(paneID: "%4", displayCategory: "idle", sessionName: "z-session"),
+        ]
+        XCTAssertTrue(secondModel.isSessionPinned(target: "local", sessionName: "z-session"))
+        let secondOrder = secondModel.sessionSections.map(\.sessionName)
+        XCTAssertEqual(secondOrder.first, "z-session")
+    }
+
+    func testShowPinnedOnlyFiltersSessionSections() throws {
+        let model = try makeModel()
+        model.panes = [
+            makePane(paneID: "%1", displayCategory: "idle", sessionName: "a-session"),
+            makePane(paneID: "%2", displayCategory: "idle", sessionName: "z-session"),
+        ]
+        model.setSessionPinned(target: "local", sessionName: "z-session", pinned: true)
+        model.showPinnedOnly = true
+
+        let visible = model.sessionSections.map(\.sessionName)
+        XCTAssertEqual(visible, ["z-session"])
+    }
+
     func testPaneOrderWithinSessionIgnoresCategoryTransitions() throws {
         let model = try makeModel()
         let pane1 = PaneItem(

@@ -149,6 +149,8 @@ final class AppViewModel: ObservableObject {
         static let sessionSortMode = "ui.session_sort_mode"
         static let sessionStableOrder = "ui.session_stable_order"
         static let sessionStableOrderNext = "ui.session_stable_order_next"
+        static let pinnedSessions = "ui.pinned_sessions"
+        static let showPinnedOnly = "ui.show_pinned_only"
         static let windowGrouping = "ui.window_grouping"
         static let interactiveTerminalInputEnabled = "ui.interactive_terminal_input_enabled"
         static let showWindowMetadata = "ui.show_window_metadata"
@@ -259,6 +261,11 @@ final class AppViewModel: ObservableObject {
             defaults.set(sessionSortMode.rawValue, forKey: PreferenceKey.sessionSortMode)
         }
     }
+    @Published var showPinnedOnly: Bool = false {
+        didSet {
+            defaults.set(showPinnedOnly, forKey: PreferenceKey.showPinnedOnly)
+        }
+    }
     @Published var windowGrouping: WindowGrouping = .auto {
         didSet {
             defaults.set(windowGrouping.rawValue, forKey: PreferenceKey.windowGrouping)
@@ -317,6 +324,7 @@ final class AppViewModel: ObservableObject {
     private var queueLastEmitByKey: [String: Date] = [:]
     private var sessionStableOrder: [String: Int] = [:]
     private var nextSessionStableOrder = 0
+    private var pinnedSessionKeys: Set<String> = []
     private var terminalCapabilities: CapabilityFlags?
     private var terminalCapabilitiesFetchedAt: Date?
     private let terminalSessionController: TerminalSessionController
@@ -334,7 +342,7 @@ final class AppViewModel: ObservableObject {
     private let queueDedupeWindowSeconds: TimeInterval = 30
     private let recoveryCooldownSeconds: TimeInterval = 6
     private let queueLimit = 250
-    private let currentUIPrefsVersion = 6
+    private let currentUIPrefsVersion = 7
     private let terminalCapabilitiesCacheTTLSeconds: TimeInterval = 60
     private let snapshotPollIntervalSeconds: TimeInterval = 2
     private let snapshotPollIntervalStreamingSeconds: TimeInterval = 4
@@ -450,6 +458,30 @@ final class AppViewModel: ObservableObject {
                 errorMessage = error.localizedDescription
             }
         }
+    }
+
+    func isSessionPinned(target: String, sessionName: String) -> Bool {
+        pinnedSessionKeys.contains(paneSessionKey(target: target, sessionName: sessionName))
+    }
+
+    func setSessionPinned(target: String, sessionName: String, pinned: Bool) {
+        let key = paneSessionKey(target: target, sessionName: sessionName)
+        if pinned {
+            pinnedSessionKeys.insert(key)
+        } else {
+            pinnedSessionKeys.remove(key)
+        }
+        persistPinnedSessions()
+    }
+
+    func toggleSessionPinned(target: String, sessionName: String) {
+        let key = paneSessionKey(target: target, sessionName: sessionName)
+        if pinnedSessionKeys.contains(key) {
+            pinnedSessionKeys.remove(key)
+        } else {
+            pinnedSessionKeys.insert(key)
+        }
+        persistPinnedSessions()
     }
 
     func performAddTarget(
@@ -1007,7 +1039,15 @@ final class AppViewModel: ObservableObject {
                 lastActiveAt: lastActiveAt
             ))
         }
+        if showPinnedOnly {
+            out = out.filter { pinnedSessionKeys.contains($0.id) }
+        }
         out.sort { lhs, rhs in
+            let lhsPinned = pinnedSessionKeys.contains(lhs.id)
+            let rhsPinned = pinnedSessionKeys.contains(rhs.id)
+            if lhsPinned != rhsPinned {
+                return lhsPinned && !rhsPinned
+            }
             switch sessionSortMode {
             case .stable:
                 let li = stableSessionOrder(for: lhs.id)
@@ -1552,6 +1592,12 @@ final class AppViewModel: ObservableObject {
             panes = snapshot.panes
         }
         let paneIDs = Set(panes.map(\.id))
+        let liveSessionKeys = Set(panes.map { paneSessionKey(target: $0.identity.target, sessionName: $0.identity.sessionName) })
+        let removedPinned = pinnedSessionKeys.subtracting(liveSessionKeys)
+        if !removedPinned.isEmpty {
+            pinnedSessionKeys.subtract(removedPinned)
+            persistPinnedSessions()
+        }
         terminalRenderCacheByPaneID = terminalRenderCacheByPaneID.filter { paneIDs.contains($0.key) }
         lastInteractiveInputAtByPaneID = lastInteractiveInputAtByPaneID.filter { paneIDs.contains($0.key) }
         Task { [weak self] in
@@ -1779,6 +1825,7 @@ final class AppViewModel: ObservableObject {
         interactiveTerminalInputEnabled = readBoolPreference(PreferenceKey.interactiveTerminalInputEnabled, fallback: true)
         showWindowMetadata = readBoolPreference(PreferenceKey.showWindowMetadata, fallback: false)
         showWindowGroupBackground = readBoolPreference(PreferenceKey.showWindowGroupBackground, fallback: true)
+        showPinnedOnly = readBoolPreference(PreferenceKey.showPinnedOnly, fallback: false)
         showSessionMetadataInStatusView = readBoolPreference(PreferenceKey.showSessionMetadataInStatusView, fallback: false)
         showEmptyStatusColumns = readBoolPreference(PreferenceKey.showEmptyStatusColumns, fallback: false)
         showTechnicalDetails = readBoolPreference(PreferenceKey.showTechnicalDetails, fallback: false)
@@ -1786,16 +1833,18 @@ final class AppViewModel: ObservableObject {
         showUnknownCategory = readBoolPreference(PreferenceKey.showUnknownCategory, fallback: false)
         reviewUnreadOnly = readBoolPreference(PreferenceKey.reviewUnreadOnly, fallback: true)
         restoreSessionStableOrder()
+        restorePinnedSessions()
 
         let storedVersion = defaults.integer(forKey: PreferenceKey.uiPrefsVersion)
         if storedVersion < currentUIPrefsVersion {
-            // v6: keep sidebar click targets stable by default.
+            // v7: keep sidebar click targets stable and disable pin-only filter by default.
             viewMode = .bySession
             defaults.set(ViewMode.bySession.rawValue, forKey: PreferenceKey.viewMode)
             showWindowMetadata = false
             showSessionMetadataInStatusView = false
             showWindowGroupBackground = true
             sessionSortMode = .stable
+            showPinnedOnly = false
             defaults.set(currentUIPrefsVersion, forKey: PreferenceKey.uiPrefsVersion)
         }
     }
@@ -1843,11 +1892,28 @@ final class AppViewModel: ObservableObject {
         nextSessionStableOrder = (sessionStableOrder.values.max() ?? -1) + 1
     }
 
+    private func restorePinnedSessions() {
+        if let values = defaults.array(forKey: PreferenceKey.pinnedSessions) as? [String] {
+            pinnedSessionKeys = Set(
+                values
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+            )
+        } else {
+            pinnedSessionKeys = []
+        }
+    }
+
     private func persistSessionStableOrder() {
         if let data = try? JSONEncoder().encode(sessionStableOrder) {
             defaults.set(data, forKey: PreferenceKey.sessionStableOrder)
         }
         defaults.set(nextSessionStableOrder, forKey: PreferenceKey.sessionStableOrderNext)
+    }
+
+    private func persistPinnedSessions() {
+        let values = Array(pinnedSessionKeys).sorted()
+        defaults.set(values, forKey: PreferenceKey.pinnedSessions)
     }
 
     private func readBoolPreference(_ key: String, fallback: Bool) -> Bool {
@@ -2451,6 +2517,9 @@ final class AppViewModel: ObservableObject {
         let sessionKey = paneSessionKey(target: targetToken, sessionName: sessionToken)
         if sessionStableOrder.removeValue(forKey: sessionKey) != nil {
             persistSessionStableOrder()
+        }
+        if pinnedSessionKeys.remove(sessionKey) != nil {
+            persistPinnedSessions()
         }
         paneObservations = paneObservations.filter { key, _ in
             !key.hasPrefix("\(targetToken)|\(sessionToken)|")

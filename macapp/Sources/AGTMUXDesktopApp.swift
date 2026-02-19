@@ -552,6 +552,8 @@ private struct CockpitView: View {
                 Text("Name").tag(AppViewModel.SessionSortMode.name)
             }
             .pickerStyle(.menu)
+            Toggle("Pinned Only", isOn: $model.showPinnedOnly)
+                .toggleStyle(.switch)
             Toggle("Group By tmux Window", isOn: $model.showWindowGroupBackground)
                 .toggleStyle(.switch)
         }
@@ -667,7 +669,8 @@ private struct CockpitView: View {
     }
 
     private func sessionSection(_ section: AppViewModel.SessionSection) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
+        let pinned = model.isSessionPinned(target: section.target, sessionName: section.sessionName)
+        return VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 8) {
                 HStack(spacing: 7) {
                     Image(systemName: "folder.fill")
@@ -677,6 +680,11 @@ private struct CockpitView: View {
                         .font(.system(size: 14, weight: .semibold, design: .rounded))
                         .foregroundStyle(palette.textPrimary)
                         .lineLimit(1)
+                    if pinned {
+                        Image(systemName: "pin.fill")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(palette.idle)
+                    }
                 }
                 .padding(.leading, 4)
                 Spacer(minLength: 0)
@@ -696,6 +704,14 @@ private struct CockpitView: View {
             }
             .contentShape(Rectangle())
             .contextMenu {
+                Button(pinned ? "Unpin Session" : "Pin Session") {
+                    model.setSessionPinned(
+                        target: section.target,
+                        sessionName: section.sessionName,
+                        pinned: !pinned
+                    )
+                }
+                Divider()
                 Button("Kill Session", role: .destructive) {
                     requestSessionKill(section)
                 }
