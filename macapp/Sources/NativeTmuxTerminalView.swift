@@ -460,12 +460,16 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
         private var holdRepaintWhileScrolled = false
         private var renderWorkItem: DispatchWorkItem?
         private var lastRenderAt: CFTimeInterval = 0
+        private var lastResizeSyncAt: CFTimeInterval = 0
+        private var lastResizeSyncCols: Int?
+        private var lastResizeSyncRows: Int?
         private var interactiveInputEnabled = true
         private var didConfigureAppearance = false
         private var appearanceModeIsDark = true
         private var paletteVariant: PaletteVariant?
         private let maxCachedLines = 2400
         private let minimumRenderInterval: CFTimeInterval = 1.0 / 60.0
+        private let minimumResizeSyncInterval: CFTimeInterval = 0.18
 
         init(
             onInputBytes: @escaping ([UInt8]) -> Void,
@@ -495,6 +499,9 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
             renderWorkItem?.cancel()
             renderWorkItem = nil
             lastRenderAt = 0
+            lastResizeSyncAt = 0
+            lastResizeSyncCols = nil
+            lastResizeSyncRows = nil
             paletteVariant = nil
         }
 
@@ -542,6 +549,7 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
                 holdRepaintWhileScrolled = false
                 resetTerminal(terminal)
                 updateFocusIfNeeded(terminal: terminal)
+                requestResizeSync(terminal: terminal, force: true)
             }
             scheduleRender(force: paneSwitched)
         }
@@ -606,6 +614,13 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
             let contentChanged = content != lastRenderedContent
             let cursorChanged = cursorX != lastCursorX || cursorY != lastCursorY
             let paneSizeChanged = paneCols != lastPaneCols || paneRows != lastPaneRows
+
+            if paneSizeChanged || force {
+                if hasPaneGeometryDrift(terminal: terminal, paneCols: paneCols, paneRows: paneRows) {
+                    requestResizeSync(terminal: terminal, force: false)
+                }
+            }
+
             guard force || contentChanged || cursorChanged || paneSizeChanged else {
                 return false
             }
@@ -914,8 +929,8 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
         ) -> RepaintFrame {
             let terminalRows = max(1, terminal.getTerminal().rows)
             let terminalCols = max(1, terminal.getTerminal().cols)
-            let sourceRows = max(1, paneRows ?? terminalRows)
-            let sourceCols = max(1, paneCols ?? terminalCols)
+            let sourceRows = max(terminalRows, max(1, paneRows ?? terminalRows))
+            let sourceCols = max(terminalCols, max(1, paneCols ?? terminalCols))
             var lines = sourceLines.isEmpty ? [""] : sourceLines
             let maxBufferedLines = max(sourceRows, min(max(sourceRows * 12, 500), 3000))
             if lines.count > maxBufferedLines {
@@ -993,8 +1008,8 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
         ) -> RepaintFrame {
             let terminalRows = max(1, terminal.getTerminal().rows)
             let terminalCols = max(1, terminal.getTerminal().cols)
-            let sourceRows = max(1, paneRows ?? terminalRows)
-            let sourceCols = max(1, paneCols ?? terminalCols)
+            let sourceRows = max(terminalRows, max(1, paneRows ?? terminalRows))
+            let sourceCols = max(terminalCols, max(1, paneCols ?? terminalCols))
             let lines = lastRenderedLines.isEmpty ? [""] : lastRenderedLines
             var viewportLines = Array(lines.suffix(sourceRows))
             if viewportLines.count < sourceRows {
@@ -1157,6 +1172,36 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
             DispatchQueue.main.async {
                 terminal.window?.makeFirstResponder(terminal)
             }
+        }
+
+        private func requestResizeSync(terminal: TerminalView, force: Bool) {
+            let cols = max(1, terminal.getTerminal().cols)
+            let rows = max(1, terminal.getTerminal().rows)
+            let now = CACurrentMediaTime()
+            if !force {
+                if cols == lastResizeSyncCols, rows == lastResizeSyncRows {
+                    return
+                }
+                if now - lastResizeSyncAt < minimumResizeSyncInterval {
+                    return
+                }
+            }
+            lastResizeSyncAt = now
+            lastResizeSyncCols = cols
+            lastResizeSyncRows = rows
+            onResize(cols, rows)
+        }
+
+        private func hasPaneGeometryDrift(terminal: TerminalView, paneCols: Int?, paneRows: Int?) -> Bool {
+            let terminalCols = max(1, terminal.getTerminal().cols)
+            let terminalRows = max(1, terminal.getTerminal().rows)
+            if let paneCols, paneCols > 0, abs(paneCols - terminalCols) >= 2 {
+                return true
+            }
+            if let paneRows, paneRows > 0, abs(paneRows - terminalRows) >= 1 {
+                return true
+            }
+            return false
         }
 
         private func resetTerminal(_ terminal: TerminalView) {

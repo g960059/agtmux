@@ -193,6 +193,7 @@ final class AppViewModel: ObservableObject {
     @Published var windows: [WindowItem] = []
     @Published var panes: [PaneItem] = []
     @Published private(set) var paneCreationInFlightSessionKeys: Set<String> = []
+    @Published private(set) var paneKillInFlightPaneIDs: Set<String> = []
     let nativeTmuxTerminalEnabled: Bool
     @Published var selectedPane: PaneItem? {
         didSet {
@@ -224,6 +225,9 @@ final class AppViewModel: ObservableObject {
                     terminalCursorY = nil
                     terminalPaneCols = nil
                     terminalPaneRows = nil
+                }
+                if nextPaneID != nil {
+                    syncSelectedPaneViewportIfKnown()
                 }
                 if autoStreamOnSelection {
                     Task { [weak self] in
@@ -370,6 +374,8 @@ final class AppViewModel: ObservableObject {
     private var bufferedInteractiveFlushTaskByPaneID: [String: Task<Void, Never>] = [:]
     private var lastInteractiveInputAtByPaneID: [String: Date] = [:]
     private var terminalRenderCacheByPaneID: [String: TerminalRenderCache] = [:]
+    private var lastKnownTerminalViewportCols: Int?
+    private var lastKnownTerminalViewportRows: Int?
     private var unchangedSnapshotStreak: Int = 0
     private let queueDedupeWindowSeconds: TimeInterval = 30
     private let recoveryCooldownSeconds: TimeInterval = 6
@@ -507,6 +513,10 @@ final class AppViewModel: ObservableObject {
         paneCreationInFlightSessionKeys.contains(paneSessionKey(target: target, sessionName: sessionName))
     }
 
+    func isPaneKillInFlight(_ paneID: String) -> Bool {
+        paneKillInFlightPaneIDs.contains(paneID.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
     func setSessionPinned(target: String, sessionName: String, pinned: Bool) {
         let key = paneSessionKey(target: target, sessionName: sessionName)
         if pinned {
@@ -583,11 +593,20 @@ final class AppViewModel: ObservableObject {
         let anchor = anchorPaneID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let command: String
         if !anchor.isEmpty {
-            command = "tmux split-window -P -F '#{pane_id}' -t \(shellQuote(anchor)) -c \(shellQuote("#{pane_current_path}"))"
+            command = "tmux split-window -P -F '__AGTMUX_NEW_PANE__#{pane_id}' -t \(shellQuote(anchor)) -c \(shellQuote("#{pane_current_path}"))"
         } else {
-            command = "tmux split-window -P -F '#{pane_id}' -t \(shellQuote(sessionToken))"
+            command = "tmux split-window -P -F '__AGTMUX_NEW_PANE__#{pane_id}' -t \(shellQuote(sessionToken))"
         }
+        let baselinePaneIDs = Set(
+            panes
+                .filter { pane in
+                    normalizedTargetLookupKey(pane.identity.target) == normalizedTargetLookupKey(targetToken) &&
+                        pane.identity.sessionName == sessionToken
+                }
+                .map(\.identity.paneID)
+        )
         paneCreationInFlightSessionKeys.insert(sessionKey)
+        let selectedPaneIDBeforeCreate = selectedPane?.id
         Task {
             defer {
                 paneCreationInFlightSessionKeys.remove(sessionKey)
@@ -595,15 +614,31 @@ final class AppViewModel: ObservableObject {
             do {
                 let invocation = try buildTmuxInvocation(target: targetToken, operation: "create pane", command: command)
                 let output = try externalTerminalCommandRunner(invocation.executable, invocation.args)
-                let createdPaneID = parseCreatedPaneID(output)
+                let preferredPaneID = parseCreatedPaneID(output)
                 infoMessage = "pane created: \(sessionToken)"
                 errorMessage = ""
-                await refresh()
-                selectCreatedPane(
+                let resolvedPaneID = await resolveCreatedPaneIDAfterCreate(
                     target: targetToken,
                     sessionName: sessionToken,
-                    paneID: createdPaneID
+                    preferredPaneID: preferredPaneID,
+                    baselinePaneIDs: baselinePaneIDs
                 )
+                if let resolvedPaneID {
+                    let selected = selectCreatedPane(
+                        target: targetToken,
+                        sessionName: sessionToken,
+                        paneID: resolvedPaneID
+                    )
+                    if !selected {
+                        restoreSelectionIfNeeded(paneID: selectedPaneIDBeforeCreate)
+                        infoMessage = ""
+                        errorMessage = "new pane created but selection failed"
+                    }
+                } else {
+                    restoreSelectionIfNeeded(paneID: selectedPaneIDBeforeCreate)
+                    infoMessage = ""
+                    errorMessage = "new pane created but not visible yet; selection unchanged"
+                }
             } catch {
                 infoMessage = ""
                 errorMessage = error.localizedDescription
@@ -623,18 +658,57 @@ final class AppViewModel: ObservableObject {
             errorMessage = "pane identity is incomplete"
             return
         }
+        let paneID = pane.id
+        guard !paneKillInFlightPaneIDs.contains(paneID) else {
+            return
+        }
+        paneKillInFlightPaneIDs.insert(paneID)
+        removePaneFromLocalState(paneID)
+        selectFallbackPaneAfterPaneRemoval(preferredBy: pane)
+        syncSelectedPaneViewportIfKnown()
+        restartTerminalStreamForSelectedPane()
         Task {
             do {
                 let command = "tmux kill-pane -t \(shellQuote(paneToken))"
                 let invocation = try buildTmuxInvocation(target: pane.identity.target, operation: "kill pane", command: command)
                 _ = try externalTerminalCommandRunner(invocation.executable, invocation.args)
-                removePaneFromLocalState(pane.id)
-                infoMessage = "pane killed: \(paneToken)"
-                errorMessage = ""
-                await refresh()
+                let removed = await waitForPaneAbsenceInSnapshot(paneID)
+                if removed {
+                    infoMessage = "pane killed: \(paneToken)"
+                    errorMessage = ""
+                    syncSelectedPaneViewportIfKnown()
+                    restartTerminalStreamForSelectedPane()
+                } else {
+                    paneKillInFlightPaneIDs.remove(paneID)
+                    infoMessage = ""
+                    errorMessage = "pane kill timed out; pane is still present"
+                    syncSelectedPaneViewportIfKnown()
+                    restartTerminalStreamForSelectedPane()
+                }
             } catch {
-                infoMessage = ""
-                errorMessage = error.localizedDescription
+                if isAlreadyMissingPaneError(error) {
+                    infoMessage = "pane already closed: \(paneToken)"
+                    errorMessage = ""
+                    _ = await waitForPaneAbsenceInSnapshot(paneID)
+                    syncSelectedPaneViewportIfKnown()
+                    restartTerminalStreamForSelectedPane()
+                    return
+                }
+                let removed = await waitForPaneAbsenceInSnapshot(paneID)
+                if removed {
+                    infoMessage = "pane already closed: \(paneToken)"
+                    errorMessage = ""
+                    syncSelectedPaneViewportIfKnown()
+                    restartTerminalStreamForSelectedPane()
+                } else {
+                    paneKillInFlightPaneIDs.remove(paneID)
+                    infoMessage = ""
+                    errorMessage = error.localizedDescription
+                    await refresh()
+                    selectFallbackPaneAfterPaneRemoval(preferredBy: pane)
+                    syncSelectedPaneViewportIfKnown()
+                    restartTerminalStreamForSelectedPane()
+                }
             }
         }
     }
@@ -1136,7 +1210,12 @@ final class AppViewModel: ObservableObject {
     }
 
     func performTerminalResize(cols: Int, rows: Int) {
-        guard cols > 0, rows > 0, let pane = selectedPane else {
+        guard cols > 0, rows > 0 else {
+            return
+        }
+        lastKnownTerminalViewportCols = cols
+        lastKnownTerminalViewportRows = rows
+        guard let pane = selectedPane else {
             return
         }
         terminalResizeTask?.cancel()
@@ -1910,6 +1989,21 @@ final class AppViewModel: ObservableObject {
     }
 
     private func applySnapshot(_ snapshot: DashboardSnapshot) {
+        let selectedBefore = selectedPane
+        let previousWindowPaneIDs: Set<String> = {
+            guard let selectedBefore else {
+                return []
+            }
+            return Set(
+                panes
+                    .filter {
+                        $0.identity.target == selectedBefore.identity.target &&
+                            $0.identity.sessionName == selectedBefore.identity.sessionName &&
+                            $0.identity.windowID == selectedBefore.identity.windowID
+                    }
+                    .map(\.id)
+            )
+        }()
         let snapshotChanged = targets != snapshot.targets ||
             sessions != snapshot.sessions ||
             windows != snapshot.windows ||
@@ -1933,6 +2027,7 @@ final class AppViewModel: ObservableObject {
         if panes != snapshot.panes {
             panes = snapshot.panes
         }
+        paneKillInFlightPaneIDs = paneKillInFlightPaneIDs.intersection(Set(panes.map(\.id)))
         let liveTargetKeys = Set(targets.map { normalizedTargetLookupKey($0.targetName) })
         targetReconnectStateByName = targetReconnectStateByName.filter { liveTargetKeys.contains($0.key) }
         targetReconnectInFlightNames.formIntersection(liveTargetKeys)
@@ -1972,6 +2067,32 @@ final class AppViewModel: ObservableObject {
             } else {
                 selectedPane = nil
                 infoMessage = "選択中 pane が消えました。再選択してください。"
+            }
+        }
+        if let selectedAfter = selectedPane,
+           selectedBefore?.id == selectedAfter.id {
+            let currentWindowPaneIDs = Set(
+                panes
+                    .filter {
+                        $0.identity.target == selectedAfter.identity.target &&
+                            $0.identity.sessionName == selectedAfter.identity.sessionName &&
+                            $0.identity.windowID == selectedAfter.identity.windowID
+                    }
+                    .map(\.id)
+            )
+            if currentWindowPaneIDs != previousWindowPaneIDs {
+                Task { [weak self] in
+                    guard let self else {
+                        return
+                    }
+                    let paneID = selectedAfter.id
+                    await self.terminalSessionController.clearCursor(for: paneID)
+                    guard self.selectedPane?.id == paneID else {
+                        return
+                    }
+                    self.syncSelectedPaneViewportIfKnown()
+                    self.restartTerminalStreamForSelectedPane()
+                }
             }
         }
         Task { [weak self] in
@@ -3396,12 +3517,58 @@ final class AppViewModel: ObservableObject {
         return stdout
     }
 
+    private func syncSelectedPaneViewportIfKnown() {
+        guard let cols = lastKnownTerminalViewportCols,
+              let rows = lastKnownTerminalViewportRows,
+              cols > 0,
+              rows > 0,
+              selectedPane != nil else {
+            return
+        }
+        performTerminalResize(cols: cols, rows: rows)
+    }
+
+    private func selectFallbackPaneAfterPaneRemoval(preferredBy removedPane: PaneItem) {
+        guard selectedPane == nil else {
+            return
+        }
+        let candidates = panes.filter { !paneKillInFlightPaneIDs.contains($0.id) }
+        if let sameWindow = candidates.first(where: {
+            $0.identity.target == removedPane.identity.target &&
+                $0.identity.sessionName == removedPane.identity.sessionName &&
+                $0.identity.windowID == removedPane.identity.windowID
+        }) {
+            selectedPane = sameWindow
+            return
+        }
+        if let sameSession = candidates.first(where: {
+            $0.identity.target == removedPane.identity.target &&
+                $0.identity.sessionName == removedPane.identity.sessionName
+        }) {
+            selectedPane = sameSession
+            return
+        }
+        if let sameTarget = candidates.first(where: { $0.identity.target == removedPane.identity.target }) {
+            selectedPane = sameTarget
+            return
+        }
+        selectedPane = candidates.first
+    }
+
+    private func isAlreadyMissingPaneError(_ error: Error) -> Bool {
+        let lowered = error.localizedDescription.lowercased()
+        return lowered.contains("can't find pane") ||
+            lowered.contains("no such pane") ||
+            lowered.contains("pane not found")
+    }
+
     private var filteredPanes: [PaneItem] {
+        let visiblePanes = panes.filter { !paneKillInFlightPaneIDs.contains($0.id) }
         let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !q.isEmpty else {
-            return panes
+            return visiblePanes
         }
-        return panes.filter { pane in
+        return visiblePanes.filter { pane in
             matchesSearch(q, in: pane)
         }
     }
@@ -3658,25 +3825,27 @@ final class AppViewModel: ObservableObject {
         guard !trimmed.isEmpty else {
             return nil
         }
-        if let direct = trimmed
+        if let markerRegex = try? NSRegularExpression(pattern: "__AGTMUX_NEW_PANE__(%\\d+)", options: []) {
+            let range = NSRange(location: 0, length: (trimmed as NSString).length)
+            if let match = markerRegex.firstMatch(in: trimmed, options: [], range: range),
+               match.numberOfRanges >= 2 {
+                let ns = trimmed as NSString
+                return ns.substring(with: match.range(at: 1))
+            }
+        }
+        // Fallback: accept the last pane token from command output.
+        if let fallback = trimmed
             .split(whereSeparator: \.isWhitespace)
-            .last(where: { $0.hasPrefix("%") }),
-           !direct.isEmpty {
-            return String(direct)
+            .last(where: { $0.hasPrefix("%") }) {
+            return String(fallback)
         }
-        guard let regex = try? NSRegularExpression(pattern: "%\\d+", options: []) else {
-            return nil
-        }
-        let range = NSRange(location: 0, length: (trimmed as NSString).length)
-        let matches = regex.matches(in: trimmed, options: [], range: range)
-        guard let last = matches.last else {
-            return nil
-        }
-        let ns = trimmed as NSString
-        return ns.substring(with: last.range)
+        return nil
     }
 
-    private func selectCreatedPane(target: String, sessionName: String, paneID: String?) {
+    private func selectCreatedPane(target: String, sessionName: String, paneID: String?) -> Bool {
+        guard let paneID, !paneID.isEmpty else {
+            return false
+        }
         let targetToken = normalizedTargetLookupKey(target)
         let sessionToken = sessionName.trimmingCharacters(in: .whitespacesAndNewlines)
         let panesInSession = panes.filter { pane in
@@ -3684,24 +3853,90 @@ final class AppViewModel: ObservableObject {
                 pane.identity.sessionName == sessionToken
         }
         guard !panesInSession.isEmpty else {
-            return
+            return false
         }
-        if let paneID,
-           let exact = panesInSession.first(where: { $0.identity.paneID == paneID }) {
+        if let exact = panesInSession.first(where: { $0.identity.paneID == paneID }) {
             selectedPane = exact
+            return true
+        }
+        return false
+    }
+
+    private func resolveCreatedPaneIDAfterCreate(
+        target: String,
+        sessionName: String,
+        preferredPaneID: String?,
+        baselinePaneIDs: Set<String>
+    ) async -> String? {
+        let targetToken = normalizedTargetLookupKey(target)
+        let sessionToken = sessionName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let preferred = preferredPaneID?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let attempts = 40
+        for attempt in 0..<attempts {
+            await refresh()
+            let currentPaneIDs = Set(
+                panes
+                    .filter { pane in
+                        normalizedTargetLookupKey(pane.identity.target) == targetToken &&
+                            pane.identity.sessionName == sessionToken
+                    }
+                    .map(\.identity.paneID)
+            )
+            if let preferred, !preferred.isEmpty, currentPaneIDs.contains(preferred) {
+                return preferred
+            }
+            let added = currentPaneIDs.subtracting(baselinePaneIDs)
+            if added.count == 1, let only = added.first {
+                return only
+            }
+            if added.count > 1 {
+                return added.sorted(by: { lhs, rhs in
+                    paneNumericID(lhs) > paneNumericID(rhs)
+                }).first
+            }
+            if attempt + 1 < attempts {
+                try? await Task.sleep(for: .milliseconds(150))
+            }
+        }
+        return nil
+    }
+
+    private func waitForPaneAbsenceInSnapshot(_ paneID: String, attempts: Int = 10, intervalMs: Int = 120) async -> Bool {
+        let token = paneID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty else {
+            return true
+        }
+        for attempt in 0..<attempts {
+            await refresh()
+            if !panes.contains(where: { $0.id == token }) {
+                return true
+            }
+            if attempt + 1 < attempts {
+                try? await Task.sleep(for: .milliseconds(intervalMs))
+            }
+        }
+        return false
+    }
+
+    private func restoreSelectionIfNeeded(paneID: String?) {
+        guard let paneID = paneID?.trimmingCharacters(in: .whitespacesAndNewlines), !paneID.isEmpty else {
             return
         }
-        let sorted = panesInSession.sorted { lhs, rhs in
-            let lDate = paneRecencyDate(for: lhs) ?? Date.distantPast
-            let rDate = paneRecencyDate(for: rhs) ?? Date.distantPast
-            if lDate != rDate {
-                return lDate > rDate
-            }
-            let lNum = Int(lhs.identity.paneID.dropFirst()) ?? 0
-            let rNum = Int(rhs.identity.paneID.dropFirst()) ?? 0
-            return lNum > rNum
+        guard selectedPane?.id != paneID else {
+            return
         }
-        selectedPane = sorted.first
+        if let pane = panes.first(where: { $0.id == paneID }) {
+            selectedPane = pane
+        }
+    }
+
+    private func paneNumericID(_ paneID: String) -> Int {
+        let token = paneID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard token.hasPrefix("%") else {
+            return Int.min
+        }
+        let numeric = token.dropFirst()
+        return Int(numeric) ?? Int.min
     }
 
     private func isAdministrativeEventType(_ eventType: String?) -> Bool {

@@ -1162,11 +1162,60 @@ final class AppViewModelSettingsTests: XCTestCase {
         XCTAssertTrue(model.panes.contains(where: { $0.identity.sessionName == "keep-me" }))
     }
 
+    func testPerformKillPaneOptimisticallyRemovesPaneAndMarksInFlight() async throws {
+        let capture = ExternalTerminalRunCapture()
+        let model = try makeModel(externalTerminalCommandRunner: { executable, args in
+            capture.set(executable: executable, args: args)
+            Thread.sleep(forTimeInterval: 0.15)
+            return ""
+        })
+        let removed = makePane(paneID: "%1", displayCategory: "idle", target: "local", sessionName: "proj")
+        let remaining = makePane(paneID: "%2", displayCategory: "idle", target: "local", sessionName: "proj")
+        model.panes = [removed, remaining]
+        model.selectedPane = removed
+
+        model.performKillPane(removed)
+
+        XCTAssertTrue(model.isPaneKillInFlight(removed.id))
+        XCTAssertFalse(model.panes.contains(where: { $0.id == removed.id }))
+        XCTAssertEqual(model.selectedPane?.id, remaining.id)
+        let invoked = await waitUntil {
+            capture.snapshot().executable == "/bin/zsh"
+        }
+        XCTAssertTrue(invoked)
+
+        let captured = capture.snapshot()
+        XCTAssertEqual(captured.executable, "/bin/zsh")
+        XCTAssertEqual(captured.args.count, 2)
+        XCTAssertEqual(captured.args[0], "-lc")
+        XCTAssertTrue(captured.args[1].contains("tmux kill-pane -t '%1'"))
+    }
+
+    func testPerformKillPaneTreatsMissingPaneAsSuccess() async throws {
+        let model = try makeModel(externalTerminalCommandRunner: { _, _ in
+            throw RuntimeError.commandFailed("kill pane", 1, "can't find pane %1")
+        })
+        let removed = makePane(paneID: "%1", displayCategory: "idle", target: "local", sessionName: "proj")
+        let remaining = makePane(paneID: "%2", displayCategory: "idle", target: "local", sessionName: "proj")
+        model.panes = [removed, remaining]
+        model.selectedPane = removed
+
+        model.performKillPane(removed)
+
+        let invoked = await waitUntil {
+            !model.errorMessage.isEmpty || !model.infoMessage.isEmpty
+        }
+        XCTAssertTrue(invoked)
+        XCTAssertEqual(model.errorMessage, "")
+        XCTAssertTrue(model.isPaneKillInFlight(removed.id))
+        XCTAssertFalse(model.panes.contains(where: { $0.id == removed.id }))
+    }
+
     func testPerformCreatePaneUsesAnchorCurrentPathAndSelectsCreatedPane() async throws {
         let capture = ExternalTerminalRunCapture()
         let model = try makeModel(externalTerminalCommandRunner: { executable, args in
             capture.set(executable: executable, args: args)
-            return "%2\n"
+            return "__AGTMUX_NEW_PANE__%2\n"
         })
         let basePane = makePane(paneID: "%1", displayCategory: "idle", target: "local", sessionName: "proj")
         let newPane = makePane(paneID: "%2", displayCategory: "idle", target: "local", sessionName: "proj")
@@ -1183,8 +1232,37 @@ final class AppViewModelSettingsTests: XCTestCase {
         XCTAssertEqual(captured.executable, "/bin/zsh")
         XCTAssertEqual(captured.args.count, 2)
         XCTAssertEqual(captured.args[0], "-lc")
-        XCTAssertTrue(captured.args[1].contains("tmux split-window -P -F '#{pane_id}' -t '%1'"))
+        XCTAssertTrue(captured.args[1].contains("tmux split-window -P -F '__AGTMUX_NEW_PANE__#{pane_id}' -t '%1'"))
         XCTAssertTrue(captured.args[1].contains("-c '#{pane_current_path}'"))
+    }
+
+    func testPerformCreatePaneDoesNotSwitchToExistingPaneWhenPaneIDIsMissing() async throws {
+        let capture = ExternalTerminalRunCapture()
+        let model = try makeModel(externalTerminalCommandRunner: { executable, args in
+            capture.set(executable: executable, args: args)
+            return "__AGTMUX_NEW_PANE__\n"
+        })
+        let basePane = makePane(paneID: "%1", displayCategory: "idle", target: "local", sessionName: "s1")
+        let otherPane = makePane(paneID: "%2", displayCategory: "idle", target: "local", sessionName: "s2")
+        model.panes = [basePane, otherPane]
+        model.selectedPane = otherPane
+
+        model.performCreatePane(target: "local", sessionName: "s1", anchorPaneID: "%1")
+        let completed = await waitUntil(timeout: 8.0) {
+            !model.isPaneCreationInFlight(target: "local", sessionName: "s1")
+        }
+        XCTAssertTrue(completed)
+        let reported = await waitUntil {
+            model.errorMessage.contains("selection unchanged")
+        }
+        XCTAssertTrue(reported)
+        XCTAssertEqual(model.selectedPane?.id, otherPane.id)
+
+        let captured = capture.snapshot()
+        XCTAssertEqual(captured.executable, "/bin/zsh")
+        XCTAssertEqual(captured.args.count, 2)
+        XCTAssertEqual(captured.args[0], "-lc")
+        XCTAssertTrue(captured.args[1].contains("__AGTMUX_NEW_PANE__#{pane_id}"))
     }
 
     func testInteractiveTerminalInputPreferenceDefaultsToTrueAndPersists() throws {

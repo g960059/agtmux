@@ -4023,7 +4023,6 @@ func TestTerminalReadAndResizeHandlers(t *testing.T) {
 		outputs: [][]byte{
 			[]byte("line1\nline2\n"), // terminal/read capture-pane
 			[]byte("line1\nline2\n"), // terminal/read capture-pane (cursor mismatch path)
-			[]byte("/dev/pts/1\n"),   // terminal/resize list-clients
 			[]byte("ok\n"),           // terminal/resize resize-pane
 		},
 	}
@@ -4124,15 +4123,8 @@ func TestTerminalReadAndResizeHandlers(t *testing.T) {
 	if resizeResp.Policy != resizePolicySingleClientApply {
 		t.Fatalf("expected single client policy, got %+v", resizeResp)
 	}
-	if resizeResp.ClientCount != 1 {
-		t.Fatalf("expected client_count=1, got %+v", resizeResp)
-	}
-	if len(runner.calls) < 2 {
-		t.Fatalf("expected list-clients and resize-pane calls, got %d", len(runner.calls))
-	}
-	clientCountCall := runner.calls[len(runner.calls)-2]
-	if strings.Join(clientCountCall.args, " ") != "list-clients -t s1 -F #{client_tty}" {
-		t.Fatalf("unexpected list-clients args: %+v", clientCountCall.args)
+	if len(runner.calls) < 1 {
+		t.Fatalf("expected resize-pane call, got %d", len(runner.calls))
 	}
 	lastResizeCall := runner.calls[len(runner.calls)-1]
 	if strings.Join(lastResizeCall.args, " ") != "resize-pane -t %1 -x 120 -y 40" {
@@ -4140,10 +4132,10 @@ func TestTerminalReadAndResizeHandlers(t *testing.T) {
 	}
 }
 
-func TestTerminalResizeSkipsWhenMultipleClientsAttached(t *testing.T) {
+func TestTerminalResizeAppliesWhenMultipleClientsAttached(t *testing.T) {
 	runner := &scriptedRunner{
 		outputs: [][]byte{
-			[]byte("/dev/pts/1\n/dev/pts/2\n"), // terminal/resize list-clients
+			[]byte("ok\n"), // terminal/resize resize-pane
 		},
 	}
 	srv, store := newAPITestServer(t, runner)
@@ -4193,25 +4185,22 @@ func TestTerminalResizeSkipsWhenMultipleClientsAttached(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
 	}
 	resp := decodeJSON[api.TerminalResizeResponse](t, rec)
-	if resp.ResultCode != "skipped_conflict" {
-		t.Fatalf("expected skipped_conflict, got %+v", resp)
+	if resp.ResultCode != "completed" {
+		t.Fatalf("expected completed, got %+v", resp)
 	}
-	if resp.Policy != resizePolicyMultiClientSkip || resp.Reason != "multiple_clients_attached" {
+	if resp.Policy != resizePolicySingleClientApply {
 		t.Fatalf("unexpected resize policy response: %+v", resp)
 	}
-	if resp.ClientCount != 2 {
-		t.Fatalf("expected client_count=2, got %+v", resp)
-	}
 	if len(runner.calls) != 1 {
-		t.Fatalf("expected list-clients only, got calls=%d", len(runner.calls))
+		t.Fatalf("expected resize-pane only, got calls=%d", len(runner.calls))
 	}
-	if strings.Join(runner.calls[0].args, " ") != "list-clients -t s1 -F #{client_tty}" {
-		t.Fatalf("unexpected first call args: %+v", runner.calls[0].args)
+	if strings.Join(runner.calls[0].args, " ") != "resize-pane -t %1 -x 120 -y 40" {
+		t.Fatalf("unexpected resize args: %+v", runner.calls[0].args)
 	}
 }
 
-func TestTerminalResizeSkipsWhenClientInspectionFails(t *testing.T) {
-	runner := &stubRunner{err: errors.New("tmux list-clients failed")}
+func TestTerminalResizeReturnsBadGatewayWhenResizeFails(t *testing.T) {
+	runner := &stubRunner{err: errors.New("tmux resize-pane failed")}
 	srv, store := newAPITestServer(t, runner)
 	seedTarget(t, store, "t1", "t1")
 	now := time.Now().UTC()
@@ -4255,20 +4244,13 @@ func TestTerminalResizeSkipsWhenClientInspectionFails(t *testing.T) {
 		"cols":    120,
 		"rows":    40,
 	})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
-	}
-	resp := decodeJSON[api.TerminalResizeResponse](t, rec)
-	if resp.ResultCode != "skipped_conflict" {
-		t.Fatalf("expected skipped_conflict, got %+v", resp)
-	}
-	if resp.Policy != resizePolicyInspectionFallbackSkip || resp.Reason != "client_inspection_failed" {
-		t.Fatalf("unexpected resize inspection fallback response: %+v", resp)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d body=%s", rec.Code, rec.Body.String())
 	}
 	if len(runner.calls) != 1 {
-		t.Fatalf("expected list-clients only, got calls=%d", len(runner.calls))
+		t.Fatalf("expected resize-pane call, got calls=%d", len(runner.calls))
 	}
-	if strings.Join(runner.calls[0].args, " ") != "list-clients -t s1 -F #{client_tty}" {
+	if strings.Join(runner.calls[0].args, " ") != "resize-pane -t %1 -x 120 -y 40" {
 		t.Fatalf("unexpected call args: %+v", runner.calls[0].args)
 	}
 }
@@ -4276,7 +4258,6 @@ func TestTerminalResizeSkipsWhenClientInspectionFails(t *testing.T) {
 func TestTerminalResizeAppliesWhenNoTmuxClientAttached(t *testing.T) {
 	runner := &scriptedRunner{
 		outputs: [][]byte{
-			[]byte(""),     // terminal/resize list-clients (no attached clients)
 			[]byte("ok\n"), // terminal/resize resize-pane
 		},
 	}
@@ -4333,17 +4314,11 @@ func TestTerminalResizeAppliesWhenNoTmuxClientAttached(t *testing.T) {
 	if resp.Policy != resizePolicySingleClientApply {
 		t.Fatalf("expected single-client policy, got %+v", resp)
 	}
-	if resp.ClientCount != 0 {
-		t.Fatalf("expected client_count=0, got %+v", resp)
+	if len(runner.calls) != 1 {
+		t.Fatalf("expected resize-pane call, got %d", len(runner.calls))
 	}
-	if len(runner.calls) != 2 {
-		t.Fatalf("expected list-clients and resize-pane calls, got %d", len(runner.calls))
-	}
-	if strings.Join(runner.calls[0].args, " ") != "list-clients -t s1 -F #{client_tty}" {
-		t.Fatalf("unexpected list-clients args: %+v", runner.calls[0].args)
-	}
-	if strings.Join(runner.calls[1].args, " ") != "resize-pane -t %1 -x 132 -y 44" {
-		t.Fatalf("unexpected resize args: %+v", runner.calls[1].args)
+	if strings.Join(runner.calls[0].args, " ") != "resize-pane -t %1 -x 132 -y 44" {
+		t.Fatalf("unexpected resize args: %+v", runner.calls[0].args)
 	}
 }
 

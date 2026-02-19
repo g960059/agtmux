@@ -1063,14 +1063,14 @@ final class DaemonManager {
         }
 
         let fm = FileManager.default
-        let socketURL = URL(fileURLWithPath: socketPath)
         let dbURL = URL(fileURLWithPath: dbPath)
         let logURL = URL(fileURLWithPath: logPath)
 
         try fm.createDirectory(at: dbURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try fm.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         backupStateDBIfNeeded(fileManager: fm, dbURL: dbURL)
-        _ = try? fm.removeItem(at: socketURL)
+        // Do not unlink socket here: removing an active daemon socket can orphan
+        // the running daemon and make all future client connections fail.
         if fm.fileExists(atPath: logURL.path) == false {
             _ = fm.createFile(atPath: logURL.path, contents: Data())
         }

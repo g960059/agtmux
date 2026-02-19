@@ -11,6 +11,7 @@ import (
 	"github.com/g960059/agtmux/internal/db"
 	"github.com/g960059/agtmux/internal/model"
 	"github.com/g960059/agtmux/internal/target"
+	"github.com/g960059/agtmux/internal/tmuxfmt"
 )
 
 type TmuxObserver struct {
@@ -27,7 +28,18 @@ func (o *TmuxObserver) Collect(ctx context.Context, tg model.Target, at time.Tim
 		"list-panes",
 		"-a",
 		"-F",
-		"#{pane_id}\t#{session_name}\t#{window_id}\t#{window_name}\t#{pane_current_command}\t#{pane_pid}\t#{pane_tty}\t#{pane_current_path}\t#{history_bytes}\t#{pane_title}",
+		tmuxfmt.Join(
+			"#{pane_id}",
+			"#{session_name}",
+			"#{window_id}",
+			"#{window_name}",
+			"#{pane_current_command}",
+			"#{pane_pid}",
+			"#{pane_tty}",
+			"#{pane_current_path}",
+			"#{history_bytes}",
+			"#{pane_title}",
+		),
 	))
 	if err != nil {
 		return nil, err
@@ -51,8 +63,14 @@ func parseListPanesOutput(targetID, output string, updatedAt time.Time) ([]model
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "\t", 10)
+		parts := tmuxfmt.SplitLine(line, 10)
 		if len(parts) != 4 && len(parts) != 6 && len(parts) != 7 && len(parts) != 8 && len(parts) != 9 && len(parts) != 10 {
+			return nil, fmt.Errorf("invalid tmux list-panes line: %q", line)
+		}
+		if !strings.HasPrefix(strings.TrimSpace(parts[0]), "%") {
+			return nil, fmt.Errorf("invalid tmux list-panes line: %q", line)
+		}
+		if len(parts) >= 3 && !strings.HasPrefix(strings.TrimSpace(parts[2]), "@") {
 			return nil, fmt.Errorf("invalid tmux list-panes line: %q", line)
 		}
 		var pidPtr *int64

@@ -949,19 +949,30 @@ private struct CockpitView: View {
         let category = model.displayCategory(for: pane)
         let selected = model.selectedPane?.id == pane.id
         let hovered = hoveringPaneID == pane.id
+        let killInFlight = model.isPaneKillInFlight(pane.id)
         return Button {
+            guard !killInFlight else {
+                return
+            }
             withAnimation(.easeInOut(duration: 0.14)) {
                 model.selectedPane = pane
             }
         } label: {
             HStack(spacing: 10) {
-                Circle()
-                    .fill(selected ? colorForCategory(category) : colorForCategory(category).opacity(0.9))
-                    .frame(width: 8, height: 8)
+                if killInFlight {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .scaleEffect(0.75)
+                        .frame(width: 8, height: 8)
+                } else {
+                    Circle()
+                        .fill(selected ? colorForCategory(category) : colorForCategory(category).opacity(0.9))
+                        .frame(width: 8, height: 8)
+                }
 
                 Text(model.paneDisplayTitle(for: pane, among: titleCandidates))
                     .font(.system(size: 13, weight: selected ? .semibold : .regular, design: .rounded))
-                    .foregroundStyle(selected ? palette.textPrimary : palette.textSecondary)
+                    .foregroundStyle(killInFlight ? palette.textMuted : (selected ? palette.textPrimary : palette.textSecondary))
                     .lineLimit(1)
                     .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -971,9 +982,9 @@ private struct CockpitView: View {
                         .foregroundStyle(palette.attention)
                 }
 
-                Text(model.lastActiveShortLabel(for: pane))
+                Text(killInFlight ? "killing..." : model.lastActiveShortLabel(for: pane))
                     .font(.system(size: 11, weight: .regular, design: .rounded))
-                    .foregroundStyle(selected ? palette.textSecondary : palette.textMuted)
+                    .foregroundStyle(killInFlight ? palette.attention : (selected ? palette.textSecondary : palette.textMuted))
                     .monospacedDigit()
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -991,6 +1002,8 @@ private struct CockpitView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
+        .opacity(killInFlight ? 0.72 : 1.0)
+        .disabled(killInFlight)
         .onHover { inside in
             if inside {
                 hoveringPaneID = pane.id
@@ -1002,17 +1015,21 @@ private struct CockpitView: View {
             Button("Open") {
                 model.selectedPane = pane
             }
+            .disabled(killInFlight)
             Button("Open in External Terminal") {
                 model.selectedPane = pane
                 model.openSelectedPaneInExternalTerminal()
             }
+            .disabled(killInFlight)
             Divider()
             Button("Rename Pane") {
                 beginPaneRename(pane)
             }
+            .disabled(killInFlight)
             Button("Kill Pane", role: .destructive) {
                 model.performKillPane(pane)
             }
+            .disabled(killInFlight)
             Divider()
             Button("Pane Details") {
                 detailPane = pane

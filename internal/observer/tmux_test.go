@@ -142,6 +142,57 @@ func TestParseListPanesOutputParsesCurrentPathHistoryAndPaneTitle(t *testing.T) 
 	}
 }
 
+func TestParseListPanesOutputParsesUnitSeparatorFormat(t *testing.T) {
+	now := time.Now().UTC()
+	out := "%1\x1fs1\x1f@1\x1fw1\x1fcodex\x1f321\x1f/dev/ttys001\x1f/Users/virtualmachine/worktree\x1f6543\x1fImplement panel layout\n"
+	panes, err := parseListPanesOutput("t1", out, now)
+	if err != nil {
+		t.Fatalf("parse list panes (unit separator): %v", err)
+	}
+	if len(panes) != 1 {
+		t.Fatalf("expected one pane, got %d", len(panes))
+	}
+	if panes[0].PaneID != "%1" || panes[0].SessionName != "s1" || panes[0].WindowID != "@1" {
+		t.Fatalf("unexpected identity fields: %+v", panes[0])
+	}
+	if panes[0].CurrentCmd != "codex" || panes[0].CurrentPath != "/Users/virtualmachine/worktree" {
+		t.Fatalf("unexpected parsed fields: %+v", panes[0])
+	}
+	if panes[0].HistoryBytes != 6543 || panes[0].PaneTitle != "Implement panel layout" {
+		t.Fatalf("unexpected history/title: %+v", panes[0])
+	}
+}
+
+func TestParseListPanesOutputParsesEscapedTabFormat(t *testing.T) {
+	now := time.Now().UTC()
+	out := "%1\\ts1\\t@1\\tw1\\tcodex\\t321\\t/dev/ttys001\\t/Users/virtualmachine/worktree\\t6543\\tImplement panel layout\n"
+	panes, err := parseListPanesOutput("t1", out, now)
+	if err != nil {
+		t.Fatalf("parse list panes (escaped tab): %v", err)
+	}
+	if len(panes) != 1 {
+		t.Fatalf("expected one pane, got %d", len(panes))
+	}
+	if panes[0].PaneID != "%1" || panes[0].SessionName != "s1" || panes[0].WindowID != "@1" {
+		t.Fatalf("unexpected identity fields: %+v", panes[0])
+	}
+}
+
+func TestParseListPanesOutputParsesLegacyUnderscoreFormat(t *testing.T) {
+	now := time.Now().UTC()
+	out := "%1_s1_@1_w1_codex_321_/dev/ttys001_/Users/virtualmachine/worktree_6543_Implement panel layout\n"
+	panes, err := parseListPanesOutput("t1", out, now)
+	if err != nil {
+		t.Fatalf("parse list panes (legacy underscore): %v", err)
+	}
+	if len(panes) != 1 {
+		t.Fatalf("expected one pane, got %d", len(panes))
+	}
+	if panes[0].PaneTitle != "Implement panel layout" {
+		t.Fatalf("unexpected pane title: %q", panes[0].PaneTitle)
+	}
+}
+
 func TestParseListPanesOutputBackwardCompatibleFourColumns(t *testing.T) {
 	now := time.Now().UTC()
 	out := "%1\ts1\t@1\tw1\n"

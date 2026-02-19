@@ -32,6 +32,7 @@ import (
 	"github.com/g960059/agtmux/internal/ingest"
 	"github.com/g960059/agtmux/internal/model"
 	"github.com/g960059/agtmux/internal/target"
+	"github.com/g960059/agtmux/internal/tmuxfmt"
 )
 
 const defaultAgentType = "unknown"
@@ -47,8 +48,6 @@ const defaultTerminalStateTTL = 5 * time.Minute
 const defaultTerminalProxySessionTTL = 5 * time.Minute
 const minTerminalStreamCaptureInterval = 80 * time.Millisecond
 const resizePolicySingleClientApply = "single_client_apply"
-const resizePolicyMultiClientSkip = "multi_client_skip"
-const resizePolicyInspectionFallbackSkip = "inspection_fallback_skip"
 const terminalCursorMarkerPrefix = "__AGTMUX_CURSOR_POSITION__"
 
 var codexSessionFileIDPattern = regexp.MustCompile(`([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$`)
@@ -2222,11 +2221,6 @@ func (s *Server) terminalResizeHandler(w http.ResponseWriter, r *http.Request) {
 		s.writeActionResolveError(w, err)
 		return
 	}
-	pane, paneErr := s.resolvePaneByTargetIDPaneID(r.Context(), tg.TargetID, req.PaneID)
-	if paneErr != nil {
-		s.writeActionResolveError(w, paneErr)
-		return
-	}
 	resp := api.TerminalResizeResponse{
 		SchemaVersion: "v1",
 		GeneratedAt:   time.Now().UTC(),
@@ -2236,25 +2230,6 @@ func (s *Server) terminalResizeHandler(w http.ResponseWriter, r *http.Request) {
 		Rows:          req.Rows,
 		ResultCode:    "completed",
 		Policy:        resizePolicySingleClientApply,
-	}
-	if sessionName := strings.TrimSpace(pane.SessionName); sessionName != "" {
-		clientCount, countErr := s.tmuxClientCount(r.Context(), tg, sessionName)
-		if countErr == nil {
-			resp.ClientCount = clientCount
-			if clientCount > 1 {
-				resp.ResultCode = "skipped_conflict"
-				resp.Policy = resizePolicyMultiClientSkip
-				resp.Reason = "multiple_clients_attached"
-				s.writeJSON(w, http.StatusOK, resp)
-				return
-			}
-		} else {
-			resp.ResultCode = "skipped_conflict"
-			resp.Policy = resizePolicyInspectionFallbackSkip
-			resp.Reason = "client_inspection_failed"
-			s.writeJSON(w, http.StatusOK, resp)
-			return
-		}
 	}
 	if _, runErr := s.executor.Run(
 		r.Context(),
@@ -2465,41 +2440,6 @@ func (s *Server) resolveTargetAndPane(ctx context.Context, targetName, paneID st
 		}
 	}
 	return model.Target{}, db.ErrNotFound
-}
-
-func (s *Server) resolvePaneByTargetIDPaneID(ctx context.Context, targetID, paneID string) (model.Pane, error) {
-	panes, err := s.store.ListPanes(ctx)
-	if err != nil {
-		return model.Pane{}, err
-	}
-	for _, pane := range panes {
-		if pane.TargetID == targetID && pane.PaneID == paneID {
-			return pane, nil
-		}
-	}
-	return model.Pane{}, db.ErrNotFound
-}
-
-func (s *Server) tmuxClientCount(ctx context.Context, tg model.Target, sessionName string) (int, error) {
-	run, err := s.executor.Run(
-		ctx,
-		tg,
-		target.BuildTmuxCommand("list-clients", "-t", sessionName, "-F", "#{client_tty}"),
-	)
-	if err != nil {
-		return 0, err
-	}
-	count := 0
-	scanner := bufio.NewScanner(strings.NewReader(run.Output))
-	for scanner.Scan() {
-		if strings.TrimSpace(scanner.Text()) != "" {
-			count++
-		}
-	}
-	if scanErr := scanner.Err(); scanErr != nil {
-		return 0, scanErr
-	}
-	return count, nil
 }
 
 func (s *Server) writeActionResolveError(w http.ResponseWriter, err error) {
@@ -3218,12 +3158,17 @@ func (s *Server) readPanePIDByID(ctx context.Context, targetRecord model.Target,
 	if len(wanted) == 0 {
 		return out
 	}
-	res, err := s.executor.Run(ctx, targetRecord, target.BuildTmuxCommand("list-panes", "-a", "-F", "#{pane_id}\t#{pane_pid}"))
+	res, err := s.executor.Run(ctx, targetRecord, target.BuildTmuxCommand(
+		"list-panes",
+		"-a",
+		"-F",
+		tmuxfmt.Join("#{pane_id}", "#{pane_pid}"),
+	))
 	if err != nil {
 		return out
 	}
 	for _, line := range strings.Split(res.Output, "\n") {
-		parts := strings.Split(strings.TrimSpace(line), "\t")
+		parts := tmuxfmt.SplitLine(strings.TrimSpace(line), 2)
 		if len(parts) < 2 {
 			continue
 		}
