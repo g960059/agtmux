@@ -66,6 +66,16 @@
   - actionable attention で category が attention になること
   - status filter が attention pane に絞り込むこと
 
+### 5) CLI 集計整合
+
+- `cmd/agtmux-app/main.go`
+  - `summarizePanes()` を拡張し、daemon 追加項目に追従:
+    - `by_category`
+    - `by_attention_state`
+    - `actionable_attention_count`
+    - `informational_count`
+    - `session_time_known/match/unknown_rate`
+
 ## 実行結果
 
 - `go test ./internal/daemon ./internal/stateengine ./cmd/agtmux-app` PASS

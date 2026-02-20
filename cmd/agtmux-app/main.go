@@ -1690,20 +1690,74 @@ func addStringFilter(filters map[string]any, key, value string) map[string]any {
 
 func summarizePanes(items []api.PaneItem) api.ListSummary {
 	summary := api.ListSummary{
-		ByState:  map[string]int{},
-		ByAgent:  map[string]int{},
-		ByTarget: map[string]int{},
+		ByState:          map[string]int{},
+		ByAgent:          map[string]int{},
+		ByTarget:         map[string]int{},
+		ByCategory:       map[string]int{},
+		ByAttentionState: map[string]int{},
 	}
+	managedCount := 0
+	sessionTimeKnown := 0
+	sessionTimeMatch := 0
 	for _, item := range items {
 		agentType := strings.TrimSpace(item.AgentType)
 		if agentType == "" {
 			agentType = "unknown"
 		}
-		summary.ByState[item.State]++
+		state := strings.TrimSpace(item.State)
+		if state == "" {
+			state = "unknown"
+		}
+		category := strings.TrimSpace(item.DisplayCategory)
+		if category == "" {
+			category = "unknown"
+		}
+		attentionState := strings.TrimSpace(item.AttentionState)
+		if attentionState == "" {
+			attentionState = "none"
+		}
+		summary.ByState[state]++
 		summary.ByAgent[agentType]++
 		summary.ByTarget[item.Identity.Target]++
+		summary.ByCategory[category]++
+		summary.ByAttentionState[attentionState]++
+		switch attentionState {
+		case "action_required_input", "action_required_approval", "action_required_error":
+			summary.ActionableAttentionCount++
+		case "informational_completed":
+			summary.InformationalCount++
+		}
+		if strings.EqualFold(strings.TrimSpace(item.AgentPresence), "managed") {
+			managedCount++
+			if strings.TrimSpace(valueOrEmpty(item.SessionLastActiveAt)) != "" &&
+				item.SessionTimeConfidence >= 0.65 {
+				sessionTimeKnown++
+				switch strings.ToLower(strings.TrimSpace(item.SessionTimeSource)) {
+				case "codex_thread_list",
+					"claude_session_jsonl",
+					"claude_history_display",
+					"claude_project_recent_jsonl",
+					"claude_resume_id":
+					sessionTimeMatch++
+				}
+			}
+		}
+	}
+	if managedCount > 0 {
+		summary.SessionTimeKnownRate = float64(sessionTimeKnown) / float64(managedCount)
+		summary.SessionTimeUnknownRate = float64(managedCount-sessionTimeKnown) / float64(managedCount)
+	}
+	if sessionTimeKnown > 0 {
+		summary.SessionTimeMatchRate = float64(sessionTimeMatch) / float64(sessionTimeKnown)
 	}
 	return summary
+}
+
+func valueOrEmpty(v *string) string {
+	if v == nil {
+		return ""
+	}
+	return strings.TrimSpace(*v)
 }
 
 func summarizeWindows(items []api.WindowItem) api.ListSummary {
