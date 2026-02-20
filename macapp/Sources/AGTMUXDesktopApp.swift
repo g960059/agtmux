@@ -470,26 +470,48 @@ private struct CockpitView: View {
     private var contentBoard: some View {
         VStack(alignment: .leading, spacing: 8) {
             sidebarSectionHeader
+            statusFilterChips
 
             ScrollView {
                 LazyVStack(spacing: 8) {
-                    switch model.viewMode {
-                    case .bySession:
-                        ForEach(model.sessionSections) { section in
-                            sessionSection(section)
-                        }
-                    case .byStatus:
-                        ForEach(Array(model.statusGroups.enumerated()), id: \.offset) { _, entry in
-                            statusSection(category: entry.0, panes: entry.1)
-                        }
-                    case .byChronological:
-                        chronologicalSection
+                    ForEach(model.sessionSections) { section in
+                        sessionSection(section)
                     }
                 }
                 .padding(.vertical, 4)
             }
             .scrollIndicators(.hidden)
         }
+    }
+
+    private var statusFilterChips: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(AppViewModel.StatusFilter.allCases) { filter in
+                    let active = model.statusFilter == filter
+                    Button {
+                        model.statusFilter = filter
+                    } label: {
+                        Text(filter.title)
+                            .font(.system(size: 11, weight: .semibold, design: .rounded))
+                            .foregroundStyle(active ? palette.textPrimary : palette.textSecondary)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 5)
+                            .background(
+                                Capsule(style: .continuous)
+                                    .fill(active ? palette.rowSelectedFill : palette.rowFill)
+                            )
+                            .overlay(
+                                Capsule(style: .continuous)
+                                    .stroke(active ? palette.rowSelectedStroke : palette.rowHoverStroke.opacity(0.6), lineWidth: 1)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 2)
+        }
+        .padding(.bottom, 2)
     }
 
     private var sidebarSectionHeader: some View {
@@ -581,10 +603,10 @@ private struct CockpitView: View {
             Text("Organize")
                 .font(.system(size: 12, weight: .semibold, design: .rounded))
                 .foregroundStyle(palette.textPrimary)
-            Picker("View", selection: $model.viewMode) {
-                Text("By Session").tag(AppViewModel.ViewMode.bySession)
-                Text("By Status").tag(AppViewModel.ViewMode.byStatus)
-                Text("By Chronological").tag(AppViewModel.ViewMode.byChronological)
+            Picker("Status Filter", selection: $model.statusFilter) {
+                ForEach(AppViewModel.StatusFilter.allCases) { filter in
+                    Text(filter.title).tag(filter)
+                }
             }
             .pickerStyle(.menu)
             Picker("Session Order", selection: $model.sessionSortMode) {

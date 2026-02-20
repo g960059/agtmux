@@ -30,6 +30,34 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    enum StatusFilter: String, CaseIterable, Identifiable {
+        case all
+        case attention
+        case running
+        case idle
+        case unmanaged
+        case unknown
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .all:
+                return "All"
+            case .attention:
+                return "Attention"
+            case .running:
+                return "Running"
+            case .idle:
+                return "Idle"
+            case .unmanaged:
+                return "Unmanaged"
+            case .unknown:
+                return "Unknown"
+            }
+        }
+    }
+
     enum SessionSortMode: String, CaseIterable, Identifiable {
         case stable
         case recentActivity
@@ -167,6 +195,7 @@ final class AppViewModel: ObservableObject {
     private enum PreferenceKey {
         static let uiPrefsVersion = "ui.prefs_version"
         static let viewMode = "ui.view_mode"
+        static let statusFilter = "ui.status_filter"
         static let sessionSortMode = "ui.session_sort_mode"
         static let sessionStableOrder = "ui.session_stable_order"
         static let sessionStableOrderNext = "ui.session_stable_order_next"
@@ -284,6 +313,11 @@ final class AppViewModel: ObservableObject {
             defaults.set(viewMode.rawValue, forKey: PreferenceKey.viewMode)
         }
     }
+    @Published var statusFilter: StatusFilter = .all {
+        didSet {
+            defaults.set(statusFilter.rawValue, forKey: PreferenceKey.statusFilter)
+        }
+    }
     @Published var sessionSortMode: SessionSortMode = .stable {
         didSet {
             defaults.set(sessionSortMode.rawValue, forKey: PreferenceKey.sessionSortMode)
@@ -380,7 +414,7 @@ final class AppViewModel: ObservableObject {
     private let queueDedupeWindowSeconds: TimeInterval = 30
     private let recoveryCooldownSeconds: TimeInterval = 6
     private let queueLimit = 250
-    private let currentUIPrefsVersion = 7
+    private let currentUIPrefsVersion = 8
     private let terminalCapabilitiesCacheTTLSeconds: TimeInterval = 60
     private let snapshotPollIntervalSeconds: TimeInterval = 2
     private let snapshotPollIntervalStreamingSeconds: TimeInterval = 4
@@ -404,6 +438,7 @@ final class AppViewModel: ObservableObject {
     private let telemetryBudgetInputP50Ms = 120.0
     private let telemetryBudgetStreamP50Ms = 220.0
     private let telemetryBudgetMinFPS = 24.0
+    private let sessionTimeConfidenceThreshold = 0.65
 
     init(
         daemon: DaemonManager,
@@ -1486,15 +1521,18 @@ final class AppViewModel: ObservableObject {
     }
 
     func paneRecencyDate(for pane: PaneItem) -> Date? {
+        guard agentPresence(for: pane) == "managed" else {
+            return nil
+        }
+        if let confidence = pane.sessionTimeConfidence, confidence < sessionTimeConfidenceThreshold {
+            return nil
+        }
+        if let sessionLastActive = parseTimestamp(pane.sessionLastActiveAt ?? "") {
+            return sessionLastActive
+        }
+        // Transitional fallback while daemon/session-time rollout converges.
         if let lastInteraction = parseTimestamp(pane.lastInteractionAt ?? "") {
             return lastInteraction
-        }
-        if !isAdministrativeEventType(pane.lastEventType),
-           let lastEvent = parseTimestamp(pane.lastEventAt ?? "") {
-            return lastEvent
-        }
-        if agentPresence(for: pane) == "none" {
-            return parseTimestamp(pane.updatedAt)
         }
         return nil
     }
@@ -1557,6 +1595,9 @@ final class AppViewModel: ObservableObject {
     }
 
     func displayCategory(for pane: PaneItem) -> String {
+        if isActionableAttentionState(attentionState(for: pane)) {
+            return "attention"
+        }
         if pane.stateEngineVersion == "v2-shadow" || normalizedToken(pane.activityStateV2) != nil {
             let presence = agentPresence(for: pane)
             let activity = activityState(for: pane)
@@ -1607,6 +1648,9 @@ final class AppViewModel: ObservableObject {
     }
 
     func needsUserAction(for pane: PaneItem) -> Bool {
+        if isActionableAttentionState(attentionState(for: pane)) {
+            return true
+        }
         if let explicit = pane.needsUserAction {
             return explicit
         }
@@ -1616,6 +1660,26 @@ final class AppViewModel: ObservableObject {
         default:
             return false
         }
+    }
+
+    func attentionState(for pane: PaneItem) -> String {
+        if let explicit = normalizedToken(pane.attentionState) {
+            return explicit
+        }
+        switch activityState(for: pane) {
+        case "waiting_input":
+            return "action_required_input"
+        case "waiting_approval":
+            return "action_required_approval"
+        case "error":
+            return "action_required_error"
+        default:
+            break
+        }
+        if isCompletionEventType(pane.lastEventType) {
+            return "informational_completed"
+        }
+        return "none"
     }
 
     func activityState(for pane: PaneItem) -> String {
@@ -1759,14 +1823,17 @@ final class AppViewModel: ObservableObject {
     }
 
     func lastActiveLabel(for pane: PaneItem) -> String {
-        let anchor = parseTimestamp(pane.lastInteractionAt ?? "")
-        guard let updated = anchor else {
+        let anchor = paneRecencyDate(for: pane)
+        guard agentPresence(for: pane) == "managed", let updated = anchor else {
             return "last active: -"
         }
         return "last active: \(compactRelativeTimestamp(since: updated, now: Date()))"
     }
 
     func lastActiveShortLabel(for pane: PaneItem) -> String {
+        guard agentPresence(for: pane) == "managed" else {
+            return "-"
+        }
         let anchor = paneRecencyDate(for: pane)
         guard let updated = anchor else {
             return "-"
@@ -2340,6 +2407,12 @@ final class AppViewModel: ObservableObject {
             viewMode = .bySession
             defaults.set(ViewMode.bySession.rawValue, forKey: PreferenceKey.viewMode)
         }
+        if let raw = defaults.string(forKey: PreferenceKey.statusFilter), let restored = StatusFilter(rawValue: raw) {
+            statusFilter = restored
+        } else {
+            statusFilter = .all
+            defaults.set(StatusFilter.all.rawValue, forKey: PreferenceKey.statusFilter)
+        }
         if let raw = defaults.string(forKey: PreferenceKey.sessionSortMode), let restored = SessionSortMode(rawValue: raw) {
             sessionSortMode = restored
         } else {
@@ -2365,9 +2438,11 @@ final class AppViewModel: ObservableObject {
 
         let storedVersion = defaults.integer(forKey: PreferenceKey.uiPrefsVersion)
         if storedVersion < currentUIPrefsVersion {
-            // v7: keep sidebar click targets stable and disable pin-only filter by default.
+            // v8: keep tmux-first navigation defaults and reset status filter to All.
             viewMode = .bySession
             defaults.set(ViewMode.bySession.rawValue, forKey: PreferenceKey.viewMode)
+            statusFilter = .all
+            defaults.set(StatusFilter.all.rawValue, forKey: PreferenceKey.statusFilter)
             showWindowMetadata = false
             showSessionMetadataInStatusView = false
             showWindowGroupBackground = true
@@ -3611,7 +3686,28 @@ final class AppViewModel: ObservableObject {
     }
 
     private var filteredPanes: [PaneItem] {
-        let visiblePanes = panes.filter { !paneKillInFlightPaneIDs.contains($0.id) }
+        var visiblePanes = panes.filter { !paneKillInFlightPaneIDs.contains($0.id) }
+        let hiddenCategories = hiddenStatusCategories()
+        visiblePanes = visiblePanes.filter { pane in
+            let category = displayCategory(for: pane)
+            guard !hiddenCategories.contains(category) else {
+                return false
+            }
+            switch statusFilter {
+            case .all:
+                return true
+            case .attention:
+                return category == "attention"
+            case .running:
+                return category == "running"
+            case .idle:
+                return category == "idle"
+            case .unmanaged:
+                return category == "unmanaged"
+            case .unknown:
+                return category == "unknown"
+            }
+        }
         let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !q.isEmpty else {
             return visiblePanes
@@ -3647,6 +3743,18 @@ final class AppViewModel: ObservableObject {
         return normalized.contains("complete") ||
             normalized.contains("finished") ||
             normalized.contains("exit")
+    }
+
+    private func isActionableAttentionState(_ state: String?) -> Bool {
+        guard let normalized = normalizedToken(state) else {
+            return false
+        }
+        switch normalized {
+        case "action_required_input", "action_required_approval", "action_required_error":
+            return true
+        default:
+            return false
+        }
     }
 
     private func inferAttentionStateFromReason(_ reasonCode: String?) -> String? {

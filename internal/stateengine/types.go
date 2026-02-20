@@ -29,6 +29,20 @@ const (
 	ActivityUnknown         = "unknown"
 )
 
+const (
+	AttentionNone                   = "none"
+	AttentionActionRequiredInput    = "action_required_input"
+	AttentionActionRequiredApproval = "action_required_approval"
+	AttentionActionRequiredError    = "action_required_error"
+	AttentionInformationalCompleted = "informational_completed"
+)
+
+type SessionTime struct {
+	At         *time.Time
+	Source     string
+	Confidence float64
+}
+
 type EvidenceKind string
 
 const (

@@ -68,9 +68,15 @@ struct PaneItem: Decodable, Identifiable, Hashable {
     let lastEventType: String?
     let lastEventAt: String?
     let awaitingResponseKind: String?
+    let attentionState: String?
+    let attentionReason: String?
+    let attentionSince: String?
     let sessionLabel: String?
     let sessionLabelSource: String?
     let lastInteractionAt: String?
+    let sessionLastActiveAt: String?
+    let sessionTimeSource: String?
+    let sessionTimeConfidence: Double?
     let stateEngineVersion: String?
     let providerV2: String?
     let providerConfidenceV2: Double?
@@ -103,9 +109,15 @@ struct PaneItem: Decodable, Identifiable, Hashable {
         case lastEventType = "last_event_type"
         case lastEventAt = "last_event_at"
         case awaitingResponseKind = "awaiting_response_kind"
+        case attentionState = "attention_state"
+        case attentionReason = "attention_reason"
+        case attentionSince = "attention_since"
         case sessionLabel = "session_label"
         case sessionLabelSource = "session_label_source"
         case lastInteractionAt = "last_interaction_at"
+        case sessionLastActiveAt = "session_last_active_at"
+        case sessionTimeSource = "session_time_source"
+        case sessionTimeConfidence = "session_time_confidence"
         case stateEngineVersion = "state_engine_version"
         case providerV2 = "provider_v2"
         case providerConfidenceV2 = "provider_confidence_v2"
@@ -135,9 +147,15 @@ struct PaneItem: Decodable, Identifiable, Hashable {
         lastEventType: String?,
         lastEventAt: String?,
         awaitingResponseKind: String?,
+        attentionState: String? = nil,
+        attentionReason: String? = nil,
+        attentionSince: String? = nil,
         sessionLabel: String?,
         sessionLabelSource: String?,
         lastInteractionAt: String?,
+        sessionLastActiveAt: String? = nil,
+        sessionTimeSource: String? = nil,
+        sessionTimeConfidence: Double? = nil,
         stateEngineVersion: String? = nil,
         providerV2: String? = nil,
         providerConfidenceV2: Double? = nil,
@@ -165,9 +183,15 @@ struct PaneItem: Decodable, Identifiable, Hashable {
         self.lastEventType = lastEventType
         self.lastEventAt = lastEventAt
         self.awaitingResponseKind = awaitingResponseKind
+        self.attentionState = attentionState
+        self.attentionReason = attentionReason
+        self.attentionSince = attentionSince
         self.sessionLabel = sessionLabel
         self.sessionLabelSource = sessionLabelSource
         self.lastInteractionAt = lastInteractionAt
+        self.sessionLastActiveAt = sessionLastActiveAt
+        self.sessionTimeSource = sessionTimeSource
+        self.sessionTimeConfidence = sessionTimeConfidence
         self.stateEngineVersion = stateEngineVersion
         self.providerV2 = providerV2
         self.providerConfidenceV2 = providerConfidenceV2

@@ -51,6 +51,7 @@ const defaultTerminalProxySessionTTL = 5 * time.Minute
 const minTerminalStreamCaptureInterval = 80 * time.Millisecond
 const defaultClaudeHistoryCacheTTL = 5 * time.Second
 const defaultClaudePreviewCacheTTL = 20 * time.Second
+const sessionTimeMinConfidence = 0.65
 const resizePolicySingleClientApply = "single_client_apply"
 const terminalCursorMarkerPrefix = "__AGTMUX_CURSOR_POSITION__"
 
@@ -2855,6 +2856,7 @@ func (s *Server) buildPaneItems(ctx context.Context, targets []model.Target) ([]
 		ByAgent:              map[string]int{},
 		ByTarget:             map[string]int{},
 		ByCategory:           map[string]int{},
+		ByAttentionState:     map[string]int{},
 		BySessionLabelSource: map[string]int{},
 		ByStateV2:            map[string]int{},
 		ByProviderV2:         map[string]int{},
@@ -2869,6 +2871,9 @@ func (s *Server) buildPaneItems(ctx context.Context, targets []model.Target) ([]
 	v2DecisionLatencyTotal := time.Duration(0)
 	claudeTitleTotal := 0
 	claudeTitleMatchCount := 0
+	managedPaneCount := 0
+	sessionTimeKnownCount := 0
+	sessionTimeMatchCount := 0
 	for _, p := range panes {
 		if _, ok := requestedIDs[p.TargetID]; !ok {
 			continue
@@ -2968,11 +2973,33 @@ func (s *Server) buildPaneItems(ctx context.Context, targets []model.Target) ([]
 			p.LastActivityAt,
 			updatedAt,
 		)
+		sessionTime := derivePaneSessionActiveTime(
+			agentPresence,
+			runtimeID,
+			key,
+			paneLastInput,
+			runtimeLastInput,
+			runtimeLatestEvent,
+			agentType,
+			codexHint,
+			hasCodexHint,
+			claudeHint,
+			hasClaudeHint,
+			stateSource,
+			lastEventType,
+			st.LastEventAt,
+			p.LastActivityAt,
+			updatedAt,
+		)
 		if hasClaudeHint && !claudeHint.at.IsZero() {
 			if lastInteractionAt == nil || claudeHint.at.After(*lastInteractionAt) {
 				v := claudeHint.at.UTC()
 				lastInteractionAt = &v
 			}
+		}
+		if agentPresence == "managed" && sessionTime.at != nil && !sessionTime.at.IsZero() {
+			v := sessionTime.at.UTC()
+			lastInteractionAt = &v
 		}
 		agentPresence, activityState, displayCategory, needsUserAction = refinePanePresentationWithSignals(
 			agentPresence,
@@ -2987,6 +3014,22 @@ func (s *Server) buildPaneItems(ctx context.Context, targets []model.Target) ([]
 		if lastInteractionAt != nil {
 			v := lastInteractionAt.Format(time.RFC3339Nano)
 			lastInteractionAtStr = &v
+		}
+		var sessionLastActiveAtStr *string
+		sessionTimeSource := ""
+		sessionTimeConfidence := 0.0
+		if agentPresence == "managed" {
+			managedPaneCount++
+			sessionTimeSource = strings.TrimSpace(sessionTime.source)
+			sessionTimeConfidence = sessionTime.confidence
+			if sessionTime.at != nil && !sessionTime.at.IsZero() && sessionTimeConfidence >= sessionTimeMinConfidence {
+				v := sessionTime.at.UTC().Format(time.RFC3339Nano)
+				sessionLastActiveAtStr = &v
+				sessionTimeKnownCount++
+				if isSessionTimeMatchSource(sessionTimeSource) {
+					sessionTimeMatchCount++
+				}
+			}
 		}
 		stateV2 := ""
 		activityConfV2 := 0.0
@@ -3032,6 +3075,27 @@ func (s *Server) buildPaneItems(ctx context.Context, targets []model.Target) ([]
 				v2FlipCount++
 			}
 		}
+		effectiveActivityState := strings.ToLower(strings.TrimSpace(activityState))
+		if normalizedV2 := strings.ToLower(strings.TrimSpace(stateV2)); normalizedV2 != "" && normalizedV2 != string(model.StateUnknown) {
+			effectiveActivityState = normalizedV2
+		}
+		attentionState, attentionReason, attentionSince := deriveAttentionState(
+			effectiveActivityState,
+			reason,
+			lastEventType,
+			st.LastEventAt,
+			lastInteractionAt,
+			updatedAt,
+		)
+		if isActionableAttentionState(attentionState) {
+			needsUserAction = true
+			displayCategory = "attention"
+		}
+		var attentionSinceStr *string
+		if attentionSince != nil && !attentionSince.IsZero() {
+			v := attentionSince.UTC().Format(time.RFC3339Nano)
+			attentionSinceStr = &v
+		}
 		item := api.PaneItem{
 			Identity: api.PaneIdentity{
 				Target:      targetName,
@@ -3039,40 +3103,53 @@ func (s *Server) buildPaneItems(ctx context.Context, targets []model.Target) ([]
 				WindowID:    p.WindowID,
 				PaneID:      p.PaneID,
 			},
-			WindowName:      p.WindowName,
-			CurrentCmd:      strings.TrimSpace(p.CurrentCmd),
-			PaneTitle:       strings.TrimSpace(p.PaneTitle),
-			State:           state,
-			ReasonCode:      reason,
-			Confidence:      confidence,
-			RuntimeID:       runtimeID,
-			AgentType:       agentType,
-			AgentPresence:   agentPresence,
-			ActivityState:   activityState,
-			DisplayCategory: displayCategory,
-			NeedsUserAction: needsUserAction,
-			StateSource:     stateSource,
-			LastEventType:   lastEventType,
-			LastEventAt:     lastEventAt,
-			AwaitingKind:    awaitingKind,
-			SessionLabel:    sessionLabel,
-			SessionLabelSrc: sessionLabelSource,
-			LastInputAt:     lastInteractionAtStr,
-			StateEngineVer:  "v2-shadow",
-			ProviderV2:      providerV2,
-			ProviderConfV2:  providerConfV2,
-			ActivityStateV2: stateV2,
-			ActivityConfV2:  activityConfV2,
-			ActivitySrcV2:   activitySrcV2,
-			ActivityWhyV2:   activityReasonsV2,
-			EvidenceTraceID: evidenceTraceID,
-			UpdatedAt:       updatedAt.Format(time.RFC3339Nano),
+			WindowName:            p.WindowName,
+			CurrentCmd:            strings.TrimSpace(p.CurrentCmd),
+			PaneTitle:             strings.TrimSpace(p.PaneTitle),
+			State:                 state,
+			ReasonCode:            reason,
+			Confidence:            confidence,
+			RuntimeID:             runtimeID,
+			AgentType:             agentType,
+			AgentPresence:         agentPresence,
+			ActivityState:         activityState,
+			DisplayCategory:       displayCategory,
+			NeedsUserAction:       needsUserAction,
+			StateSource:           stateSource,
+			LastEventType:         lastEventType,
+			LastEventAt:           lastEventAt,
+			AwaitingKind:          awaitingKind,
+			AttentionState:        attentionState,
+			AttentionReason:       attentionReason,
+			AttentionSince:        attentionSinceStr,
+			SessionLabel:          sessionLabel,
+			SessionLabelSrc:       sessionLabelSource,
+			LastInputAt:           lastInteractionAtStr,
+			SessionLastActiveAt:   sessionLastActiveAtStr,
+			SessionTimeSource:     sessionTimeSource,
+			SessionTimeConfidence: sessionTimeConfidence,
+			StateEngineVer:        "v2-shadow",
+			ProviderV2:            providerV2,
+			ProviderConfV2:        providerConfV2,
+			ActivityStateV2:       stateV2,
+			ActivityConfV2:        activityConfV2,
+			ActivitySrcV2:         activitySrcV2,
+			ActivityWhyV2:         activityReasonsV2,
+			EvidenceTraceID:       evidenceTraceID,
+			UpdatedAt:             updatedAt.Format(time.RFC3339Nano),
 		}
 		items = append(items, item)
 		summary.ByState[state]++
 		summary.ByAgent[agentType]++
 		summary.ByTarget[targetName]++
 		summary.ByCategory[displayCategory]++
+		summary.ByAttentionState[attentionState]++
+		if isActionableAttentionState(attentionState) {
+			summary.ActionableAttentionCount++
+		}
+		if attentionState == "informational_completed" {
+			summary.InformationalCount++
+		}
 		if sessionLabelSource != "" {
 			summary.BySessionLabelSource[sessionLabelSource]++
 		}
@@ -3107,6 +3184,13 @@ func (s *Server) buildPaneItems(ctx context.Context, targets []model.Target) ([]
 	}
 	if claudeTitleTotal > 0 {
 		summary.ClaudeTitleMatchRate = float64(claudeTitleMatchCount) / float64(claudeTitleTotal)
+	}
+	if managedPaneCount > 0 {
+		summary.SessionTimeKnownRate = float64(sessionTimeKnownCount) / float64(managedPaneCount)
+		summary.SessionTimeUnknownRate = float64(managedPaneCount-sessionTimeKnownCount) / float64(managedPaneCount)
+	}
+	if sessionTimeKnownCount > 0 {
+		summary.SessionTimeMatchRate = float64(sessionTimeMatchCount) / float64(sessionTimeKnownCount)
 	}
 	return items, summary, nil
 }
@@ -5148,6 +5232,178 @@ func derivePaneLastInteractionAt(
 		return &v
 	}
 	return nil
+}
+
+type paneSessionActiveTime struct {
+	at         *time.Time
+	source     string
+	confidence float64
+}
+
+func derivePaneSessionActiveTime(
+	agentPresence string,
+	runtimeID string,
+	key string,
+	paneLastInput map[string]actionInputHint,
+	runtimeLastInput map[string]actionInputHint,
+	runtimeLatestEvent map[string]runtimeEventHint,
+	agentType string,
+	codexHint codexThreadHint,
+	hasCodexHint bool,
+	claudeHint claudeSessionHint,
+	hasClaudeHint bool,
+	stateSource string,
+	lastEventType string,
+	lastEventAt *time.Time,
+	_ *time.Time,
+	_ time.Time,
+) paneSessionActiveTime {
+	if agentPresence != "managed" {
+		return paneSessionActiveTime{}
+	}
+	provider := strings.ToLower(strings.TrimSpace(agentType))
+	if provider == "claude" && hasClaudeHint && !claudeHint.at.IsZero() {
+		v := claudeHint.at.UTC()
+		return paneSessionActiveTime{
+			at:         &v,
+			source:     strings.TrimSpace(claudeHint.source),
+			confidence: 0.98,
+		}
+	}
+	if provider == "codex" && hasCodexHint && !codexHint.at.IsZero() {
+		v := codexHint.at.UTC()
+		return paneSessionActiveTime{
+			at:         &v,
+			source:     "codex_thread_list",
+			confidence: 0.98,
+		}
+	}
+	if rid := strings.TrimSpace(runtimeID); rid != "" {
+		if last, ok := runtimeLastInput[rid]; ok && !last.at.IsZero() {
+			v := last.at.UTC()
+			return paneSessionActiveTime{
+				at:         &v,
+				source:     "runtime_last_input",
+				confidence: 0.84,
+			}
+		}
+		if event, ok := runtimeLatestEvent[rid]; ok && !event.at.IsZero() && !isAdministrativeEventType(event.event) {
+			v := event.at.UTC()
+			return paneSessionActiveTime{
+				at:         &v,
+				source:     "runtime_last_event",
+				confidence: 0.74,
+			}
+		}
+	}
+	if latest, ok := paneLastInput[key]; ok && !latest.at.IsZero() {
+		v := latest.at.UTC()
+		return paneSessionActiveTime{
+			at:         &v,
+			source:     "pane_last_input",
+			confidence: 0.68,
+		}
+	}
+	if strings.ToLower(strings.TrimSpace(stateSource)) != string(model.SourcePoller) &&
+		lastEventAt != nil &&
+		!lastEventAt.IsZero() &&
+		!isAdministrativeEventType(lastEventType) {
+		v := lastEventAt.UTC()
+		return paneSessionActiveTime{
+			at:         &v,
+			source:     "state_last_event",
+			confidence: 0.62,
+		}
+	}
+	return paneSessionActiveTime{}
+}
+
+func deriveAttentionState(
+	activityState string,
+	reasonCode string,
+	lastEventType string,
+	lastEventAt *time.Time,
+	lastInteractionAt *time.Time,
+	updatedAt time.Time,
+) (string, string, *time.Time) {
+	state := strings.ToLower(strings.TrimSpace(activityState))
+	switch state {
+	case string(model.StateWaitingInput):
+		return "action_required_input", "waiting_input", selectAttentionSince(lastEventType, lastEventAt, lastInteractionAt, updatedAt)
+	case string(model.StateWaitingApproval):
+		return "action_required_approval", "waiting_approval", selectAttentionSince(lastEventType, lastEventAt, lastInteractionAt, updatedAt)
+	case string(model.StateError):
+		return "action_required_error", "error", selectAttentionSince(lastEventType, lastEventAt, lastInteractionAt, updatedAt)
+	}
+	if isCompletionSignal(reasonCode, lastEventType, state) {
+		return "informational_completed", "task_completed", selectAttentionSince(lastEventType, lastEventAt, lastInteractionAt, updatedAt)
+	}
+	return "none", "", nil
+}
+
+func selectAttentionSince(
+	lastEventType string,
+	lastEventAt *time.Time,
+	lastInteractionAt *time.Time,
+	updatedAt time.Time,
+) *time.Time {
+	if lastEventAt != nil && !lastEventAt.IsZero() && !isAdministrativeEventType(lastEventType) {
+		v := lastEventAt.UTC()
+		return &v
+	}
+	if lastInteractionAt != nil && !lastInteractionAt.IsZero() {
+		v := lastInteractionAt.UTC()
+		return &v
+	}
+	if !updatedAt.IsZero() {
+		v := updatedAt.UTC()
+		return &v
+	}
+	return nil
+}
+
+func isCompletionSignal(reasonCode, lastEventType, activityState string) bool {
+	if strings.EqualFold(strings.TrimSpace(activityState), string(model.StateCompleted)) {
+		return true
+	}
+	for _, raw := range []string{reasonCode, lastEventType} {
+		token := strings.ToLower(strings.TrimSpace(raw))
+		if token == "" {
+			continue
+		}
+		if strings.Contains(token, "input") || strings.Contains(token, "approval") {
+			continue
+		}
+		if strings.Contains(token, "complete") ||
+			strings.Contains(token, "finished") ||
+			strings.Contains(token, "done") ||
+			strings.Contains(token, "exit") {
+			return true
+		}
+	}
+	return false
+}
+
+func isActionableAttentionState(state string) bool {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "action_required_input", "action_required_approval", "action_required_error":
+		return true
+	default:
+		return false
+	}
+}
+
+func isSessionTimeMatchSource(source string) bool {
+	switch strings.ToLower(strings.TrimSpace(source)) {
+	case "codex_thread_list",
+		"claude_session_jsonl",
+		"claude_history_display",
+		"claude_project_recent_jsonl",
+		"claude_resume_id":
+		return true
+	default:
+		return false
+	}
 }
 
 func isAdministrativeEventType(eventType string) bool {
