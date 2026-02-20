@@ -435,6 +435,75 @@ final class AppViewModelSettingsTests: XCTestCase {
         XCTAssertEqual(sections.first?.sessionName, "s-attn")
     }
 
+    func testStatusFilterManagedNarrowsToManagedAgentPanes() throws {
+        let model = try makeModel()
+        let managedPane = PaneItem(
+            identity: PaneIdentity(target: "local", sessionName: "s-managed", windowID: "@1", paneID: "%1"),
+            windowName: nil,
+            currentCmd: "codex",
+            paneTitle: nil,
+            state: "idle",
+            reasonCode: nil,
+            confidence: nil,
+            runtimeID: "rt-1",
+            agentType: "codex",
+            agentPresence: "managed",
+            activityState: "idle",
+            displayCategory: "idle",
+            needsUserAction: false,
+            stateSource: "hook",
+            lastEventType: nil,
+            lastEventAt: nil,
+            awaitingResponseKind: nil,
+            sessionLabel: nil,
+            sessionLabelSource: nil,
+            lastInteractionAt: nil,
+            updatedAt: "2026-02-15T00:00:00Z"
+        )
+        let unmanagedPane = PaneItem(
+            identity: PaneIdentity(target: "local", sessionName: "s-shell", windowID: "@1", paneID: "%2"),
+            windowName: nil,
+            currentCmd: "zsh",
+            paneTitle: nil,
+            state: "idle",
+            reasonCode: nil,
+            confidence: nil,
+            runtimeID: nil,
+            agentType: "none",
+            agentPresence: "none",
+            activityState: "idle",
+            displayCategory: "unmanaged",
+            needsUserAction: false,
+            stateSource: "poller",
+            lastEventType: nil,
+            lastEventAt: nil,
+            awaitingResponseKind: nil,
+            sessionLabel: nil,
+            sessionLabelSource: nil,
+            lastInteractionAt: nil,
+            updatedAt: "2026-02-15T00:00:00Z"
+        )
+        model.panes = [managedPane, unmanagedPane]
+        model.statusFilter = .managed
+
+        let sections = model.sessionSections
+        XCTAssertEqual(sections.count, 1)
+        XCTAssertEqual(sections.first?.sessionName, "s-managed")
+    }
+
+    func testStatusFilterPinnedNarrowsToPinnedSessions() throws {
+        let model = try makeModel()
+        model.panes = [
+            makePane(paneID: "%1", displayCategory: "idle", sessionName: "s-a"),
+            makePane(paneID: "%2", displayCategory: "idle", sessionName: "s-b"),
+        ]
+        model.setSessionPinned(target: "local", sessionName: "s-b", pinned: true)
+        model.statusFilter = .pinned
+
+        let sections = model.sessionSections
+        XCTAssertEqual(sections.map(\.sessionName), ["s-b"])
+    }
+
     func testActivityStateDoesNotPromoteManagedIdleFromUpdatedAtOnly() throws {
         let model = try makeModel()
         let pane = PaneItem(

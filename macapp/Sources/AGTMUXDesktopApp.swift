@@ -121,6 +121,7 @@ private struct CockpitView: View {
     @State private var collapsedSessionIDs: Set<String> = []
     @State private var draggingSessionID: String?
     @State private var dropTargetSessionID: String?
+    @State private var hoveringMenuRowID: String?
     @State private var showSortPopover = false
     @State private var showSettingsPopover = false
     @State private var showAddTargetSheet = false
@@ -474,8 +475,13 @@ private struct CockpitView: View {
 
             ScrollView {
                 LazyVStack(spacing: 8) {
-                    ForEach(model.sessionSections) { section in
-                        sessionSection(section)
+                    switch model.viewMode {
+                    case .bySession:
+                        ForEach(model.sessionSections) { section in
+                            sessionSection(section)
+                        }
+                    case .byChronological:
+                        chronologicalSection
                     }
                 }
                 .padding(.vertical, 4)
@@ -543,7 +549,7 @@ private struct CockpitView: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help("Sort / filter")
+            .help("Organize")
             .popover(isPresented: $showSortPopover, arrowEdge: .top) {
                 sortPopoverContent
             }
@@ -598,61 +604,138 @@ private struct CockpitView: View {
         .padding(.bottom, 1)
     }
 
-    private var sortPopoverContent: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Organize")
-                .font(.system(size: 12, weight: .semibold, design: .rounded))
-                .foregroundStyle(palette.textPrimary)
-            Picker("Status Filter", selection: $model.statusFilter) {
-                ForEach(AppViewModel.StatusFilter.allCases) { filter in
-                    Text(filter.title).tag(filter)
+    private func menuSectionTitle(_ title: String) -> some View {
+        Text(title)
+            .font(.system(size: 11, weight: .semibold, design: .rounded))
+            .foregroundStyle(palette.textMuted)
+            .padding(.horizontal, 3)
+            .padding(.top, 6)
+            .padding(.bottom, 2)
+    }
+
+    private func menuActionRow(
+        id: String,
+        title: String,
+        systemImage: String,
+        selected: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 7) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 11, weight: .regular))
+                    .foregroundStyle(palette.textSecondary)
+                    .frame(width: 13, alignment: .center)
+                Text(title)
+                    .font(.system(size: 12, weight: .regular, design: .rounded))
+                    .foregroundStyle(palette.textPrimary)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                if selected {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(palette.textPrimary)
                 }
             }
-            .pickerStyle(.menu)
-            Picker("Session Order", selection: $model.sessionSortMode) {
-                Text("Stable").tag(AppViewModel.SessionSortMode.stable)
-                Text("Recent Activity").tag(AppViewModel.SessionSortMode.recentActivity)
-                Text("Name").tag(AppViewModel.SessionSortMode.name)
-            }
-            .pickerStyle(.menu)
-            Toggle("Pinned Only", isOn: $model.showPinnedOnly)
-                .toggleStyle(.switch)
-            Toggle("Group By tmux Window", isOn: $model.showWindowGroupBackground)
-                .toggleStyle(.switch)
+            .frame(maxWidth: .infinity, minHeight: 22, maxHeight: 22, alignment: .leading)
+            .padding(.horizontal, 5)
+            .contentShape(Rectangle())
+            .background(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(hoveringMenuRowID == id ? palette.rowHoverFill : Color.clear)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .stroke(hoveringMenuRowID == id ? palette.rowHoverStroke : Color.clear, lineWidth: 1)
+            )
         }
-        .padding(12)
-        .frame(width: 250)
+        .buttonStyle(.plain)
+        .onHover { inside in
+            if inside {
+                hoveringMenuRowID = id
+            } else if hoveringMenuRowID == id {
+                hoveringMenuRowID = nil
+            }
+        }
+    }
+
+    private func flatMenuCard<Content: View>(
+        width: CGFloat,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            content()
+        }
+        .padding(8)
+        .frame(width: width, alignment: .leading)
+    }
+
+    private var sortPopoverContent: some View {
+        flatMenuCard(width: 288) {
+            menuSectionTitle("Organize")
+            menuActionRow(
+                id: "organize.by_session",
+                title: "By Session",
+                systemImage: "folder",
+                selected: model.viewMode == .bySession
+            ) {
+                model.viewMode = .bySession
+            }
+            menuActionRow(
+                id: "organize.chrono",
+                title: "Chronological List",
+                systemImage: "clock",
+                selected: model.viewMode == .byChronological
+            ) {
+                model.viewMode = .byChronological
+            }
+            Divider().padding(.vertical, 4)
+            menuSectionTitle("Sort by")
+            menuActionRow(
+                id: "organize.sort.manual",
+                title: "Manual Order",
+                systemImage: "arrow.up.arrow.down",
+                selected: model.sessionSortMode == .stable
+            ) {
+                model.sessionSortMode = .stable
+            }
+            menuActionRow(
+                id: "organize.sort.updated",
+                title: "Updated",
+                systemImage: "clock.arrow.circlepath",
+                selected: model.sessionSortMode == .recentActivity
+            ) {
+                model.sessionSortMode = .recentActivity
+            }
+            menuActionRow(
+                id: "organize.sort.name",
+                title: "Name",
+                systemImage: "textformat",
+                selected: model.sessionSortMode == .name
+            ) {
+                model.sessionSortMode = .name
+            }
+            Divider().padding(.vertical, 4)
+            menuActionRow(
+                id: "organize.show_tmux_windows",
+                title: "Show tmux window groups",
+                systemImage: "rectangle.3.group",
+                selected: model.showWindowGroupBackground
+            ) {
+                model.showWindowGroupBackground.toggle()
+            }
+        }
     }
 
     private var settingsPopoverContent: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Settings")
-                .font(.system(size: 12, weight: .semibold, design: .rounded))
-                .foregroundStyle(palette.textPrimary)
-            Picker("Window Grouping", selection: $model.windowGrouping) {
-                Text("Off").tag(AppViewModel.WindowGrouping.off)
-                Text("Auto").tag(AppViewModel.WindowGrouping.auto)
-                Text("On").tag(AppViewModel.WindowGrouping.on)
-            }
-            .pickerStyle(.menu)
-            Toggle("Show Unmanaged Panes", isOn: Binding(
-                get: { !model.hideUnmanagedCategory },
-                set: { model.hideUnmanagedCategory = !$0 }
-            ))
-            .toggleStyle(.switch)
-            Toggle("Show Unknown Panes", isOn: $model.showUnknownCategory)
-                .toggleStyle(.switch)
-            Toggle("Show Window Group Cards", isOn: $model.showWindowGroupBackground)
-                .toggleStyle(.switch)
-            Toggle("Show Technical Details", isOn: $model.showTechnicalDetails)
-                .toggleStyle(.switch)
-            Divider()
-            Button("Refresh Now") {
-                model.manualRefresh()
-            }
+        flatMenuCard(width: 180) {
+            menuSectionTitle("Settings")
+            Text("No settings for now.")
+                .font(.system(size: 11, weight: .regular, design: .rounded))
+                .foregroundStyle(palette.textMuted)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 8)
         }
-        .padding(12)
-        .frame(width: 260)
     }
 
     private var addTargetSheet: some View {

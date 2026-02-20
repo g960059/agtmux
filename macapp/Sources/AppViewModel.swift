@@ -13,7 +13,6 @@ final class AppViewModel: ObservableObject {
 
     enum ViewMode: String, CaseIterable, Identifiable {
         case bySession
-        case byStatus
         case byChronological
 
         var id: String { rawValue }
@@ -22,8 +21,6 @@ final class AppViewModel: ObservableObject {
             switch self {
             case .bySession:
                 return "By Session"
-            case .byStatus:
-                return "By Status"
             case .byChronological:
                 return "By Chronological"
             }
@@ -32,11 +29,9 @@ final class AppViewModel: ObservableObject {
 
     enum StatusFilter: String, CaseIterable, Identifiable {
         case all
+        case managed
         case attention
-        case running
-        case idle
-        case unmanaged
-        case unknown
+        case pinned
 
         var id: String { rawValue }
 
@@ -44,16 +39,12 @@ final class AppViewModel: ObservableObject {
             switch self {
             case .all:
                 return "All"
+            case .managed:
+                return "Managed"
             case .attention:
                 return "Attention"
-            case .running:
-                return "Running"
-            case .idle:
-                return "Idle"
-            case .unmanaged:
-                return "Unmanaged"
-            case .unknown:
-                return "Unknown"
+            case .pinned:
+                return "Pinned"
             }
         }
     }
@@ -68,9 +59,9 @@ final class AppViewModel: ObservableObject {
         var title: String {
             switch self {
             case .stable:
-                return "Stable"
+                return "Manual Order"
             case .recentActivity:
-                return "Recent Activity"
+                return "Updated"
             case .name:
                 return "Name"
             }
@@ -416,7 +407,7 @@ final class AppViewModel: ObservableObject {
     private let queueDedupeWindowSeconds: TimeInterval = 30
     private let recoveryCooldownSeconds: TimeInterval = 6
     private let queueLimit = 250
-    private let currentUIPrefsVersion = 8
+    private let currentUIPrefsVersion = 10
     private let terminalCapabilitiesCacheTTLSeconds: TimeInterval = 60
     private let snapshotPollIntervalSeconds: TimeInterval = 2
     private let snapshotPollIntervalStreamingSeconds: TimeInterval = 4
@@ -2501,8 +2492,21 @@ final class AppViewModel: ObservableObject {
             viewMode = .bySession
             defaults.set(ViewMode.bySession.rawValue, forKey: PreferenceKey.viewMode)
         }
-        if let raw = defaults.string(forKey: PreferenceKey.statusFilter), let restored = StatusFilter(rawValue: raw) {
-            statusFilter = restored
+        if let raw = defaults.string(forKey: PreferenceKey.statusFilter) {
+            switch raw {
+            case StatusFilter.all.rawValue:
+                statusFilter = .all
+            case StatusFilter.managed.rawValue, "running", "idle":
+                statusFilter = .managed
+            case StatusFilter.attention.rawValue:
+                statusFilter = .attention
+            case StatusFilter.pinned.rawValue:
+                statusFilter = .pinned
+            case "unmanaged", "unknown":
+                statusFilter = .all
+            default:
+                statusFilter = .all
+            }
         } else {
             statusFilter = .all
             defaults.set(StatusFilter.all.rawValue, forKey: PreferenceKey.statusFilter)
@@ -2532,7 +2536,7 @@ final class AppViewModel: ObservableObject {
 
         let storedVersion = defaults.integer(forKey: PreferenceKey.uiPrefsVersion)
         if storedVersion < currentUIPrefsVersion {
-            // v8: keep tmux-first navigation defaults and reset status filter to All.
+            // v10: keep tmux-first navigation defaults and reset filter/sort surface.
             viewMode = .bySession
             defaults.set(ViewMode.bySession.rawValue, forKey: PreferenceKey.viewMode)
             statusFilter = .all
@@ -3814,16 +3818,13 @@ final class AppViewModel: ObservableObject {
             switch statusFilter {
             case .all:
                 return true
+            case .managed:
+                return agentPresence(for: pane) == "managed"
             case .attention:
                 return category == "attention"
-            case .running:
-                return category == "running"
-            case .idle:
-                return category == "idle"
-            case .unmanaged:
-                return category == "unmanaged"
-            case .unknown:
-                return category == "unknown"
+            case .pinned:
+                let key = paneSessionKey(target: pane.identity.target, sessionName: pane.identity.sessionName)
+                return pinnedSessionKeys.contains(key)
             }
         }
         let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
