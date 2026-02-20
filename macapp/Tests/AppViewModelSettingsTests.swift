@@ -312,6 +312,129 @@ final class AppViewModelSettingsTests: XCTestCase {
         XCTAssertEqual(model.lastActiveShortLabel(for: pane), "-")
     }
 
+    func testLastActiveShortLabelUsesSessionLastActiveForManagedPane() throws {
+        let model = try makeModel()
+        let recent = ISO8601DateFormatter().string(from: Date().addingTimeInterval(-20))
+        let pane = PaneItem(
+            identity: PaneIdentity(target: "local", sessionName: "s1", windowID: "@1", paneID: "%1"),
+            windowName: nil,
+            currentCmd: "codex",
+            paneTitle: nil,
+            state: "idle",
+            reasonCode: nil,
+            confidence: nil,
+            runtimeID: "rt-1",
+            agentType: "codex",
+            agentPresence: "managed",
+            activityState: "idle",
+            displayCategory: "idle",
+            needsUserAction: nil,
+            stateSource: "hook",
+            lastEventType: nil,
+            lastEventAt: nil,
+            awaitingResponseKind: nil,
+            sessionLabel: nil,
+            sessionLabelSource: nil,
+            lastInteractionAt: nil,
+            sessionLastActiveAt: recent,
+            sessionTimeSource: "codex_thread_list",
+            sessionTimeConfidence: 0.98,
+            updatedAt: "2026-02-15T00:00:00Z"
+        )
+        XCTAssertNotEqual(model.lastActiveShortLabel(for: pane), "-")
+    }
+
+    func testDisplayCategoryPromotesActionableAttentionState() throws {
+        let model = try makeModel()
+        let pane = PaneItem(
+            identity: PaneIdentity(target: "local", sessionName: "s1", windowID: "@1", paneID: "%1"),
+            windowName: nil,
+            currentCmd: "claude",
+            paneTitle: nil,
+            state: "idle",
+            reasonCode: nil,
+            confidence: nil,
+            runtimeID: "rt-1",
+            agentType: "claude",
+            agentPresence: "managed",
+            activityState: "idle",
+            displayCategory: "idle",
+            needsUserAction: false,
+            stateSource: "hook",
+            lastEventType: nil,
+            lastEventAt: nil,
+            awaitingResponseKind: nil,
+            attentionState: "action_required_input",
+            attentionReason: "waiting_input",
+            attentionSince: ISO8601DateFormatter().string(from: Date()),
+            sessionLabel: nil,
+            sessionLabelSource: nil,
+            lastInteractionAt: nil,
+            updatedAt: "2026-02-15T00:00:00Z"
+        )
+        XCTAssertEqual(model.displayCategory(for: pane), "attention")
+        XCTAssertTrue(model.needsUserAction(for: pane))
+    }
+
+    func testStatusFilterAttentionNarrowsSessionSectionsToAttentionPanes() throws {
+        let model = try makeModel()
+        let attentionPane = PaneItem(
+            identity: PaneIdentity(target: "local", sessionName: "s-attn", windowID: "@1", paneID: "%1"),
+            windowName: nil,
+            currentCmd: "codex",
+            paneTitle: nil,
+            state: "idle",
+            reasonCode: nil,
+            confidence: nil,
+            runtimeID: "rt-1",
+            agentType: "codex",
+            agentPresence: "managed",
+            activityState: "idle",
+            displayCategory: "idle",
+            needsUserAction: false,
+            stateSource: "hook",
+            lastEventType: nil,
+            lastEventAt: nil,
+            awaitingResponseKind: nil,
+            attentionState: "action_required_input",
+            attentionReason: "waiting_input",
+            attentionSince: ISO8601DateFormatter().string(from: Date()),
+            sessionLabel: nil,
+            sessionLabelSource: nil,
+            lastInteractionAt: nil,
+            updatedAt: "2026-02-15T00:00:00Z"
+        )
+        let idlePane = PaneItem(
+            identity: PaneIdentity(target: "local", sessionName: "s-idle", windowID: "@1", paneID: "%2"),
+            windowName: nil,
+            currentCmd: "zsh",
+            paneTitle: nil,
+            state: "idle",
+            reasonCode: nil,
+            confidence: nil,
+            runtimeID: nil,
+            agentType: "none",
+            agentPresence: "none",
+            activityState: "idle",
+            displayCategory: "unmanaged",
+            needsUserAction: false,
+            stateSource: "poller",
+            lastEventType: nil,
+            lastEventAt: nil,
+            awaitingResponseKind: nil,
+            sessionLabel: nil,
+            sessionLabelSource: nil,
+            lastInteractionAt: nil,
+            updatedAt: "2026-02-15T00:00:00Z"
+        )
+        model.panes = [attentionPane, idlePane]
+        model.statusFilter = .attention
+
+        let sections = model.sessionSections
+        XCTAssertEqual(sections.count, 1)
+        XCTAssertEqual(sections.first?.sessionName, "s-attn")
+    }
+
     func testActivityStateDoesNotPromoteManagedIdleFromUpdatedAtOnly() throws {
         let model = try makeModel()
         let pane = PaneItem(

@@ -739,6 +739,7 @@ private struct CockpitView: View {
         let collapsed = collapsedSessionIDs.contains(section.id)
         let creatingPane = model.isPaneCreationInFlight(target: section.target, sessionName: section.sessionName)
         let hovering = hoveringSessionID == section.id
+        let actionableAttentionCount = model.actionableAttentionCount(target: section.target, sessionName: section.sessionName)
         let anchorPaneID: String? = {
             if let selected = model.selectedPane,
                selected.identity.target == section.target,
@@ -800,6 +801,21 @@ private struct CockpitView: View {
                         Capsule(style: .continuous)
                             .fill(palette.rowFill)
                     )
+                }
+                if actionableAttentionCount > 0 {
+                    Text("A\(actionableAttentionCount)")
+                        .font(.system(size: 10, weight: .semibold, design: .rounded))
+                        .foregroundStyle(palette.attention)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(
+                            Capsule(style: .continuous)
+                                .fill(palette.rowFill)
+                        )
+                        .overlay(
+                            Capsule(style: .continuous)
+                                .stroke(palette.attention.opacity(0.5), lineWidth: 1)
+                        )
                 }
                 Group {
                     if creatingPane {

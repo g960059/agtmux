@@ -152,6 +152,7 @@ final class AppViewModel: ObservableObject {
     private struct PaneObservation {
         let state: String
         let category: String
+        let attentionState: String
         let lastEventType: String
         let lastEventAt: String
         let awaitingKind: String
@@ -374,6 +375,7 @@ final class AppViewModel: ObservableObject {
         }
     }
     @Published private(set) var reviewQueue: [ReviewQueueItem] = []
+    @Published private(set) var informationalQueue: [ReviewQueueItem] = []
 
     private let daemon: DaemonManager
     private let client: AGTMUXCLIClient
@@ -1391,8 +1393,28 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    var informationalUnreadCount: Int {
+        informationalQueue.reduce(into: 0) { acc, item in
+            if item.acknowledgedAt == nil && item.unread {
+                acc += 1
+            }
+        }
+    }
+
     var visibleReviewQueue: [ReviewQueueItem] {
         reviewQueue.filter { item in
+            if item.acknowledgedAt != nil {
+                return false
+            }
+            if reviewUnreadOnly && !item.unread {
+                return false
+            }
+            return true
+        }
+    }
+
+    var visibleInformationalQueue: [ReviewQueueItem] {
+        informationalQueue.filter { item in
             if item.acknowledgedAt != nil {
                 return false
             }
@@ -1551,11 +1573,15 @@ final class AppViewModel: ObservableObject {
     }
 
     func acknowledgeQueueItem(_ item: ReviewQueueItem) {
-        guard let index = reviewQueue.firstIndex(where: { $0.id == item.id }) else {
+        if let index = reviewQueue.firstIndex(where: { $0.id == item.id }) {
+            reviewQueue[index].acknowledgedAt = Date()
+            reviewQueue[index].unread = false
             return
         }
-        reviewQueue[index].acknowledgedAt = Date()
-        reviewQueue[index].unread = false
+        if let index = informationalQueue.firstIndex(where: { $0.id == item.id }) {
+            informationalQueue[index].acknowledgedAt = Date()
+            informationalQueue[index].unread = false
+        }
     }
 
     func acknowledgeAllQueueItems() {
@@ -1564,6 +1590,12 @@ final class AppViewModel: ObservableObject {
             if reviewQueue[idx].acknowledgedAt == nil {
                 reviewQueue[idx].acknowledgedAt = now
                 reviewQueue[idx].unread = false
+            }
+        }
+        for idx in informationalQueue.indices {
+            if informationalQueue[idx].acknowledgedAt == nil {
+                informationalQueue[idx].acknowledgedAt = now
+                informationalQueue[idx].unread = false
             }
         }
     }
@@ -1576,6 +1608,10 @@ final class AppViewModel: ObservableObject {
         })
         if let index = reviewQueue.firstIndex(where: { $0.id == item.id }) {
             reviewQueue[index].unread = false
+            return
+        }
+        if let index = informationalQueue.firstIndex(where: { $0.id == item.id }) {
+            informationalQueue[index].unread = false
         }
     }
 
@@ -1864,6 +1900,17 @@ final class AppViewModel: ObservableObject {
             parts.append("0")
         }
         return parts.joined(separator: " ")
+    }
+
+    func actionableAttentionCount(target: String, sessionName: String) -> Int {
+        panes.reduce(into: 0) { acc, pane in
+            guard pane.identity.target == target, pane.identity.sessionName == sessionName else {
+                return
+            }
+            if isActionableAttentionState(attentionState(for: pane)) {
+                acc += 1
+            }
+        }
     }
 
     func isStateReasonRedundant(for pane: PaneItem, withinCategory category: String? = nil) -> Bool {
@@ -2220,11 +2267,14 @@ final class AppViewModel: ObservableObject {
         for pane in newPanes {
             let category = displayCategory(for: pane)
             let state = normalizedState(pane.state)
+            let currentAttentionState = attentionState(for: pane)
             let lastEventType = normalizedToken(pane.lastEventType) ?? ""
             let lastEventAt = pane.lastEventAt ?? ""
             let awaitingKind = awaitingResponseKind(for: pane) ?? ""
             if let prev = paneObservations[pane.id] {
-                if category == "attention" && prev.category != "attention" {
+                let nowActionable = isActionableAttentionState(currentAttentionState)
+                let prevActionable = isActionableAttentionState(prev.attentionState)
+                if nowActionable && !prevActionable {
                     switch awaitingKind {
                     case "input":
                         enqueueReview(kind: .needsInput, pane: pane, now: now)
@@ -2234,14 +2284,15 @@ final class AppViewModel: ObservableObject {
                         enqueueReview(kind: .error, pane: pane, now: now)
                     }
                 }
-                if isCompletionEventType(lastEventType) &&
+                if currentAttentionState == "informational_completed" &&
                     (prev.lastEventType != lastEventType || prev.lastEventAt != lastEventAt) {
-                    enqueueReview(kind: .taskCompleted, pane: pane, now: now)
+                    enqueueInformational(kind: .taskCompleted, pane: pane, now: now)
                 }
             }
             next[pane.id] = PaneObservation(
                 state: state,
                 category: category,
+                attentionState: currentAttentionState,
                 lastEventType: lastEventType,
                 lastEventAt: lastEventAt,
                 awaitingKind: awaitingKind
@@ -2251,6 +2302,9 @@ final class AppViewModel: ObservableObject {
         queueLastEmitByKey = queueLastEmitByKey.filter { now.timeIntervalSince($0.value) < queueDedupeWindowSeconds * 4 }
         if reviewQueue.count > queueLimit {
             reviewQueue.removeLast(reviewQueue.count - queueLimit)
+        }
+        if informationalQueue.count > queueLimit {
+            informationalQueue.removeLast(informationalQueue.count - queueLimit)
         }
     }
 
@@ -2297,6 +2351,50 @@ final class AppViewModel: ObservableObject {
             acknowledgedAt: nil
         )
         reviewQueue.insert(item, at: 0)
+        queueLastEmitByKey[key] = now
+    }
+
+    private func enqueueInformational(kind: ReviewKind, pane: PaneItem, now: Date) {
+        let key = "\(pane.id)|info|\(kind.rawValue)"
+        if let emittedAt = queueLastEmitByKey[key], now.timeIntervalSince(emittedAt) < queueDedupeWindowSeconds {
+            return
+        }
+        if let existing = informationalQueue.firstIndex(where: {
+            $0.kind == kind &&
+                $0.target == pane.identity.target &&
+                $0.sessionName == pane.identity.sessionName &&
+                $0.paneID == pane.identity.paneID &&
+                $0.acknowledgedAt == nil
+        }) {
+            informationalQueue[existing].unread = true
+            queueLastEmitByKey[key] = now
+            return
+        }
+        let summary: String
+        switch kind {
+        case .taskCompleted:
+            summary = "Task completed in pane \(pane.identity.paneID)"
+        case .needsInput:
+            summary = "Input checkpoint in pane \(pane.identity.paneID)"
+        case .needsApproval:
+            summary = "Approval checkpoint in pane \(pane.identity.paneID)"
+        case .error:
+            summary = "Runtime update in pane \(pane.identity.paneID)"
+        }
+        let item = ReviewQueueItem(
+            id: UUID().uuidString,
+            kind: kind,
+            target: pane.identity.target,
+            sessionName: pane.identity.sessionName,
+            paneID: pane.identity.paneID,
+            windowID: pane.identity.windowID,
+            runtimeID: pane.runtimeID,
+            createdAt: now,
+            summary: summary,
+            unread: true,
+            acknowledgedAt: nil
+        )
+        informationalQueue.insert(item, at: 0)
         queueLastEmitByKey[key] = now
     }
 
@@ -3326,6 +3424,24 @@ final class AppViewModel: ObservableObject {
                 acknowledgedAt: item.acknowledgedAt
             )
         }
+        informationalQueue = informationalQueue.map { item in
+            guard item.target == targetToken, item.sessionName == fromToken else {
+                return item
+            }
+            return ReviewQueueItem(
+                id: item.id,
+                kind: item.kind,
+                target: item.target,
+                sessionName: toToken,
+                paneID: item.paneID,
+                windowID: item.windowID,
+                runtimeID: item.runtimeID,
+                createdAt: item.createdAt,
+                summary: item.summary,
+                unread: item.unread,
+                acknowledgedAt: item.acknowledgedAt
+            )
+        }
         let fromKey = paneSessionKey(target: targetToken, sessionName: fromToken)
         let toKey = paneSessionKey(target: targetToken, sessionName: toToken)
         if let order = sessionStableOrder.removeValue(forKey: fromKey) {
@@ -3349,6 +3465,9 @@ final class AppViewModel: ObservableObject {
         sessions = sessions.filter { liveSessionKeys.contains(paneSessionKey(target: $0.identity.target, sessionName: $0.identity.sessionName)) }
         windows = windows.filter { liveWindowKeys.contains("\($0.identity.target)|\($0.identity.sessionName)|\($0.identity.windowID)") }
         reviewQueue = reviewQueue.filter { item in
+            "\(item.target)|\(item.sessionName)|\(item.windowID ?? "")|\(item.paneID)" != token
+        }
+        informationalQueue = informationalQueue.filter { item in
             "\(item.target)|\(item.sessionName)|\(item.windowID ?? "")|\(item.paneID)" != token
         }
         paneObservations.removeValue(forKey: token)
@@ -3378,6 +3497,9 @@ final class AppViewModel: ObservableObject {
             !($0.identity.target == targetToken && $0.identity.sessionName == sessionToken)
         }
         reviewQueue = reviewQueue.filter {
+            !($0.target == targetToken && $0.sessionName == sessionToken)
+        }
+        informationalQueue = informationalQueue.filter {
             !($0.target == targetToken && $0.sessionName == sessionToken)
         }
         let sessionKey = paneSessionKey(target: targetToken, sessionName: sessionToken)
