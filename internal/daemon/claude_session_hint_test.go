@@ -121,6 +121,18 @@ func TestResolveClaudeSessionHintFallbackToResumeID(t *testing.T) {
 	}
 }
 
+func TestExtractClaudeSessionIDFromLsofOutput(t *testing.T) {
+	raw := `
+p2101
+f4
+n/Users/virtualmachine/.claude/projects/-Users-virtualmachine-ghq-github.com-g960059-agtmux/764d927d-d3a9-4772-9dc7-63bebabd77a2.jsonl
+`
+	got := extractClaudeSessionIDFromLsofOutput(raw)
+	if got != "764d927d-d3a9-4772-9dc7-63bebabd77a2" {
+		t.Fatalf("expected session id from lsof output, got %q", got)
+	}
+}
+
 func TestBuildClaudeWorkspaceSessionHintsFallsBackToHistoryDisplay(t *testing.T) {
 	home := t.TempDir()
 	workspace := filepath.Join(home, "repo")

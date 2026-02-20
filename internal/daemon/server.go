@@ -2753,7 +2753,6 @@ func (s *Server) buildPaneItems(ctx context.Context, targets []model.Target) ([]
 		}
 	}
 	codexHintsByPath := map[string][]codexThreadHint{}
-	codexPaneCountByPath := map[string]int{}
 	codexCandidatesByPath := map[string][]codexPaneCandidate{}
 	if s.codexEnricher != nil {
 		workspacePaths := make([]string, 0, len(panes))
@@ -2789,7 +2788,6 @@ func (s *Server) buildPaneItems(ctx context.Context, targets []model.Target) ([]
 			if strings.ToLower(strings.TrimSpace(agent)) != "codex" && cmd != "codex" {
 				continue
 			}
-			codexPaneCountByPath[pathKey]++
 			candidateKey := runtimeID
 			if candidateKey == "" {
 				candidateKey = key
@@ -2919,8 +2917,6 @@ func (s *Server) buildPaneItems(ctx context.Context, targets []model.Target) ([]
 		targetName := targetNameByID[p.TargetID]
 		agentPresence, activityState, displayCategory, needsUserAction := derivePanePresentation(agentType, state)
 		awaitingKind := deriveAwaitingResponseKind(state, reason, lastEventType)
-		pathKey := normalizeCodexWorkspacePath(p.CurrentPath)
-		codexHints := codexHintsByPath[pathKey]
 		codexHint := codexThreadHint{}
 		hasCodexHint := false
 		if runtimeHint, ok := codexHintByRuntimeID[strings.TrimSpace(runtimeID)]; ok {
@@ -2928,9 +2924,6 @@ func (s *Server) buildPaneItems(ctx context.Context, targets []model.Target) ([]
 			hasCodexHint = true
 		} else if paneHint, ok := codexHintByPaneKey[key]; ok {
 			codexHint = paneHint
-			hasCodexHint = true
-		} else if shouldUseCodexWorkspaceHint(pathKey, codexPaneCountByPath) && len(codexHints) > 0 {
-			codexHint = codexHints[0]
 			hasCodexHint = true
 		}
 		sessionLabel, sessionLabelSource := derivePaneSessionLabel(
@@ -3232,7 +3225,7 @@ func (s *Server) hydrateCodexCandidateThreadIDs(
 	}
 	targetPaneSet := map[targetPane]struct{}{}
 	for pathKey, candidates := range candidatesByPath {
-		if len(candidates) <= 1 || len(hintsByPath[pathKey]) == 0 {
+		if len(candidates) == 0 || len(hintsByPath[pathKey]) == 0 {
 			continue
 		}
 		for _, candidate := range candidates {
@@ -3334,6 +3327,11 @@ func (s *Server) resolveCodexThreadIDsForTargetUncached(ctx context.Context, tar
 	for paneID, panePID := range panePIDByID {
 		codexPID := findLikelyCodexDescendantPID(panePID, processByPID)
 		if codexPID <= 0 {
+			if proc, ok := processByPID[panePID]; ok && codexProcessScore(proc.command) > 0 {
+				codexPID = panePID
+			}
+		}
+		if codexPID <= 0 {
 			continue
 		}
 		codexPIDByPane[paneID] = codexPID
@@ -3344,6 +3342,12 @@ func (s *Server) resolveCodexThreadIDsForTargetUncached(ctx context.Context, tar
 	}
 	threadByPID := map[int]string{}
 	for pid := range uniqueCodexPIDs {
+		if proc, ok := processByPID[pid]; ok {
+			if threadID := extractCodexThreadIDFromCommand(proc.command); threadID != "" {
+				threadByPID[pid] = threadID
+				continue
+			}
+		}
 		threadID := s.readCodexThreadIDFromProcess(ctx, targetRecord, pid)
 		if threadID == "" {
 			continue
@@ -3438,10 +3442,32 @@ func (s *Server) readCodexThreadIDFromProcess(ctx context.Context, targetRecord 
 	return ""
 }
 
+func (s *Server) readClaudeSessionIDFromProcess(ctx context.Context, targetRecord model.Target, pid int) string {
+	if pid <= 0 {
+		return ""
+	}
+	pidText := strconv.Itoa(pid)
+	commands := [][]string{
+		{"lsof", "-Fn", "-p", pidText},
+		{"lsof", "-p", pidText},
+	}
+	for _, command := range commands {
+		res, err := s.executor.Run(ctx, targetRecord, command)
+		if err != nil {
+			continue
+		}
+		sessionID := extractClaudeSessionIDFromLsofOutput(res.Output)
+		if sessionID != "" {
+			return sessionID
+		}
+	}
+	return ""
+}
+
 func assignCodexHintsToCandidates(candidates []codexPaneCandidate, hints []codexThreadHint) (map[string]codexThreadHint, map[string]codexThreadHint) {
 	byRuntime := map[string]codexThreadHint{}
 	byPane := map[string]codexThreadHint{}
-	if len(candidates) <= 1 || len(hints) == 0 {
+	if len(candidates) == 0 || len(hints) == 0 {
 		return byRuntime, byPane
 	}
 	assign := func(candidate codexPaneCandidate, hint codexThreadHint) {
@@ -3451,16 +3477,8 @@ func assignCodexHintsToCandidates(candidates []codexPaneCandidate, hints []codex
 		}
 		byPane[candidate.paneKey] = hint
 	}
-	candidateIndices := make([]int, 0, len(candidates))
-	for idx := range candidates {
-		candidateIndices = append(candidateIndices, idx)
-	}
-	sort.Slice(candidateIndices, func(i, j int) bool {
-		return codexCandidateComesBefore(candidates[candidateIndices[i]], candidates[candidateIndices[j]])
-	})
-	usedCandidates := map[int]struct{}{}
-	usedHints := map[int]struct{}{}
-
+	exactMatches := 0
+	usedHintIdx := map[int]struct{}{}
 	hintIndexByThreadID := map[string]int{}
 	for hintIdx, hint := range hints {
 		threadID := normalizeCodexThreadID(hint.id)
@@ -3471,7 +3489,7 @@ func assignCodexHintsToCandidates(candidates []codexPaneCandidate, hints []codex
 			hintIndexByThreadID[threadID] = hintIdx
 		}
 	}
-	for _, candidateIdx := range candidateIndices {
+	for candidateIdx := range candidates {
 		threadID := normalizeCodexThreadID(candidates[candidateIdx].threadID)
 		if threadID == "" {
 			continue
@@ -3480,85 +3498,43 @@ func assignCodexHintsToCandidates(candidates []codexPaneCandidate, hints []codex
 		if !ok {
 			continue
 		}
-		if _, alreadyUsed := usedHints[hintIdx]; alreadyUsed {
+		if _, exists := usedHintIdx[hintIdx]; exists {
 			continue
 		}
 		assign(candidates[candidateIdx], hints[hintIdx])
-		usedCandidates[candidateIdx] = struct{}{}
-		usedHints[hintIdx] = struct{}{}
+		usedHintIdx[hintIdx] = struct{}{}
+		exactMatches++
+	}
+	if exactMatches > 0 {
+		return byRuntime, byPane
 	}
 
-	type textMatch struct {
-		candidateIdx int
-		hintIdx      int
-		score        int
-		delta        time.Duration
-	}
-	textMatches := make([]textMatch, 0, len(candidates))
-	for candidateIdx, candidate := range candidates {
-		if _, alreadyUsed := usedCandidates[candidateIdx]; alreadyUsed {
-			continue
-		}
-		for hintIdx, hint := range hints {
-			if _, alreadyUsed := usedHints[hintIdx]; alreadyUsed {
-				continue
-			}
-			score := codexLabelMatchScore(candidate.labelHint, hint.label)
-			if score <= 0 {
-				continue
-			}
-			delta := absDuration(candidate.activityAt.Sub(hint.at))
-			textMatches = append(textMatches, textMatch{
-				candidateIdx: candidateIdx,
-				hintIdx:      hintIdx,
-				score:        score,
-				delta:        delta,
-			})
-		}
-	}
-	sort.Slice(textMatches, func(i, j int) bool {
-		lhs := textMatches[i]
-		rhs := textMatches[j]
-		if lhs.score != rhs.score {
-			return lhs.score > rhs.score
-		}
-		if lhs.delta != rhs.delta {
-			return lhs.delta < rhs.delta
-		}
-		return codexCandidateComesBefore(candidates[lhs.candidateIdx], candidates[rhs.candidateIdx])
-	})
-	for _, match := range textMatches {
-		if _, alreadyUsed := usedCandidates[match.candidateIdx]; alreadyUsed {
-			continue
-		}
-		if _, alreadyUsed := usedHints[match.hintIdx]; alreadyUsed {
-			continue
-		}
-		assign(candidates[match.candidateIdx], hints[match.hintIdx])
-		usedCandidates[match.candidateIdx] = struct{}{}
-		usedHints[match.hintIdx] = struct{}{}
+	// Conservative fallback: when ambiguity remains, assign only if the
+	// mapping is effectively unique to avoid cross-pane title/time swaps.
+	if len(candidates) == 1 && len(hints) == 1 {
+		assign(candidates[0], hints[0])
+		return byRuntime, byPane
 	}
 
-	remainingCandidates := make([]int, 0, len(candidates))
-	for _, candidateIdx := range candidateIndices {
-		if _, alreadyUsed := usedCandidates[candidateIdx]; alreadyUsed {
-			continue
+	if len(candidates) == 1 {
+		bestIdx := -1
+		bestScore := 0
+		secondBest := 0
+		for idx, hint := range hints {
+			score := codexLabelMatchScore(candidates[0].labelHint, hint.label)
+			if score > bestScore {
+				secondBest = bestScore
+				bestScore = score
+				bestIdx = idx
+				continue
+			}
+			if score > secondBest {
+				secondBest = score
+			}
 		}
-		remainingCandidates = append(remainingCandidates, candidateIdx)
-	}
-	remainingHints := make([]int, 0, len(hints))
-	for hintIdx := range hints {
-		if _, alreadyUsed := usedHints[hintIdx]; alreadyUsed {
-			continue
+		if bestIdx >= 0 && bestScore >= 1000 && bestScore > secondBest {
+			assign(candidates[0], hints[bestIdx])
 		}
-		remainingHints = append(remainingHints, hintIdx)
-	}
-	limit := len(remainingCandidates)
-	if len(remainingHints) < limit {
-		limit = len(remainingHints)
-	}
-	for idx := 0; idx < limit; idx++ {
-		assign(candidates[remainingCandidates[idx]], hints[remainingHints[idx]])
 	}
 	return byRuntime, byPane
 }
@@ -3690,6 +3666,14 @@ func parseProcessTable(raw string) map[int]codexProcessInfo {
 }
 
 func findLikelyCodexDescendantPID(rootPID int, processByPID map[int]codexProcessInfo) int {
+	return findLikelyDescendantPID(rootPID, processByPID, codexProcessScore)
+}
+
+func findLikelyClaudeDescendantPID(rootPID int, processByPID map[int]codexProcessInfo) int {
+	return findLikelyDescendantPID(rootPID, processByPID, claudeProcessScore)
+}
+
+func findLikelyDescendantPID(rootPID int, processByPID map[int]codexProcessInfo, scoreFn func(string) int) int {
 	if rootPID <= 0 || len(processByPID) == 0 {
 		return 0
 	}
@@ -3718,7 +3702,10 @@ func findLikelyCodexDescendantPID(rootPID int, processByPID map[int]codexProcess
 		if !ok {
 			continue
 		}
-		score := codexProcessScore(proc.command)
+		score := 0
+		if scoreFn != nil {
+			score = scoreFn(proc.command)
+		}
 		if score > bestScore ||
 			(score == bestScore && item.depth > bestDepth) ||
 			(score == bestScore && item.depth == bestDepth && item.pid > bestPID) {
@@ -3754,6 +3741,54 @@ func codexProcessScore(command string) int {
 	}
 }
 
+func claudeProcessScore(command string) int {
+	normalized := strings.ToLower(strings.TrimSpace(command))
+	switch {
+	case normalized == "":
+		return 0
+	case strings.Contains(normalized, "claude code"):
+		return 3
+	case strings.Contains(normalized, "/claude"):
+		return 2
+	case strings.HasPrefix(normalized, "claude "),
+		strings.Contains(normalized, " claude "),
+		strings.Contains(normalized, "agtmux-claude"):
+		return 1
+	default:
+		return 0
+	}
+}
+
+func extractCodexThreadIDFromCommand(command string) string {
+	fields := strings.Fields(strings.TrimSpace(command))
+	if len(fields) == 0 {
+		return ""
+	}
+	for idx, token := range fields {
+		switch {
+		case token == "--resume":
+			if idx+1 >= len(fields) {
+				continue
+			}
+			if id := normalizeProviderSessionID(fields[idx+1]); id != "" {
+				return id
+			}
+		case strings.HasPrefix(token, "--resume="):
+			if id := normalizeProviderSessionID(strings.TrimPrefix(token, "--resume=")); id != "" {
+				return id
+			}
+		case token == "resume":
+			if idx+1 >= len(fields) {
+				continue
+			}
+			if id := normalizeProviderSessionID(fields[idx+1]); id != "" {
+				return id
+			}
+		}
+	}
+	return ""
+}
+
 func extractCodexThreadIDFromLsofOutput(raw string) string {
 	candidatePath := ""
 	for _, line := range strings.Split(raw, "\n") {
@@ -3786,6 +3821,38 @@ func extractCodexThreadIDFromLsofOutput(raw string) string {
 	return extractCodexThreadIDFromPath(candidatePath)
 }
 
+func extractClaudeSessionIDFromLsofOutput(raw string) string {
+	candidatePath := ""
+	for _, line := range strings.Split(raw, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		path := ""
+		switch {
+		case strings.HasPrefix(trimmed, "n/"):
+			path = strings.TrimPrefix(trimmed, "n")
+		case strings.HasPrefix(trimmed, "/"):
+			path = trimmed
+		default:
+			fields := strings.Fields(trimmed)
+			if len(fields) > 0 {
+				last := strings.TrimSpace(fields[len(fields)-1])
+				if strings.HasPrefix(last, "/") {
+					path = last
+				}
+			}
+		}
+		if extractClaudeSessionIDFromPath(path) == "" {
+			continue
+		}
+		if path > candidatePath {
+			candidatePath = path
+		}
+	}
+	return extractClaudeSessionIDFromPath(candidatePath)
+}
+
 func extractCodexThreadIDFromPath(path string) string {
 	trimmed := strings.TrimSpace(path)
 	if trimmed == "" {
@@ -3801,6 +3868,30 @@ func extractCodexThreadIDFromPath(path string) string {
 		return ""
 	}
 	return strings.ToLower(matches[1])
+}
+
+func extractClaudeSessionIDFromPath(path string) string {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return ""
+	}
+	normalized := strings.ReplaceAll(trimmed, "\\", "/")
+	if !strings.Contains(normalized, "/.claude/projects/") {
+		return ""
+	}
+	baseName := strings.TrimSpace(filepath.Base(normalized))
+	if !strings.EqualFold(filepath.Ext(baseName), ".jsonl") {
+		return ""
+	}
+	base := strings.TrimSuffix(baseName, filepath.Ext(baseName))
+	sessionID := strings.ToLower(strings.TrimSpace(base))
+	if sessionID == "" {
+		return ""
+	}
+	if !claudeSessionIDPattern.MatchString(sessionID) {
+		return ""
+	}
+	return sessionID
 }
 
 func buildWindowItems(panes []api.PaneItem) []api.WindowItem {
@@ -4132,13 +4223,17 @@ func (s *Server) collectClaudeSessionHints(
 		if _, exists := probeByRuntimeID[runtimeID]; exists {
 			continue
 		}
+		targetKind := model.TargetKindLocal
+		if targetRecord, ok := targetByID[rt.TargetID]; ok {
+			targetKind = targetRecord.Kind
+		}
 		probeByRuntimeID[runtimeID] = claudeRuntimeProbe{
 			runtimeID:   runtimeID,
 			targetID:    rt.TargetID,
 			currentPath: pane.CurrentPath,
 			pid:         *rt.PID,
 			startedAt:   rt.StartedAt,
-			targetKind:  targetByID[rt.TargetID].Kind,
+			targetKind:  targetKind,
 		}
 
 		seenForTarget, ok := pidSeen[rt.TargetID]
@@ -4156,19 +4251,20 @@ func (s *Server) collectClaudeSessionHints(
 	}
 
 	commandByTarget := map[string]map[int64]string{}
+	processByTarget := map[string]map[int]codexProcessInfo{}
 	for targetID, pids := range pidsByTargetID {
 		tg, ok := targetByID[targetID]
 		if !ok || len(pids) == 0 {
 			continue
 		}
-		byPID, err := s.listProcessCommandsByPID(ctx, tg, pids)
-		if err != nil {
-			continue
+		if byPID, err := s.listProcessCommandsByPID(ctx, tg, pids); err == nil {
+			commandByTarget[targetID] = byPID
 		}
-		commandByTarget[targetID] = byPID
+		processByTarget[targetID] = s.readProcessTable(ctx, tg)
 	}
 
 	homeDir, _ := os.UserHomeDir()
+	claudeSessionByTargetPID := map[string]map[int]string{}
 	localGroups := map[string][]claudeRuntimeProbe{}
 	runtimeIDs := make([]string, 0, len(probeByRuntimeID))
 	for runtimeID := range probeByRuntimeID {
@@ -4177,8 +4273,36 @@ func (s *Server) collectClaudeSessionHints(
 	sort.Strings(runtimeIDs)
 	for _, runtimeID := range runtimeIDs {
 		probe := probeByRuntimeID[runtimeID]
+		targetRecord, hasTarget := targetByID[probe.targetID]
 		if commands := commandByTarget[probe.targetID]; len(commands) > 0 {
 			probe.resumeID = extractClaudeResumeID(strings.TrimSpace(commands[probe.pid]))
+		}
+		if probe.resumeID == "" && hasTarget {
+			candidatePID := int(probe.pid)
+			if processByPID := processByTarget[probe.targetID]; len(processByPID) > 0 {
+				if descendant := findLikelyClaudeDescendantPID(int(probe.pid), processByPID); descendant > 0 {
+					candidatePID = descendant
+				}
+				if proc, ok := processByPID[candidatePID]; ok {
+					if resumeID := extractClaudeResumeID(proc.command); resumeID != "" {
+						probe.resumeID = resumeID
+					}
+				}
+			}
+			if probe.resumeID == "" && candidatePID > 0 {
+				if _, ok := claudeSessionByTargetPID[probe.targetID]; !ok {
+					claudeSessionByTargetPID[probe.targetID] = map[int]string{}
+				}
+				if cachedID, ok := claudeSessionByTargetPID[probe.targetID][candidatePID]; ok {
+					probe.resumeID = cachedID
+				} else {
+					sessionID := s.readClaudeSessionIDFromProcess(ctx, targetRecord, candidatePID)
+					claudeSessionByTargetPID[probe.targetID][candidatePID] = sessionID
+					if sessionID != "" {
+						probe.resumeID = sessionID
+					}
+				}
+			}
 		}
 		if probe.targetKind != model.TargetKindLocal {
 			if probe.resumeID != "" {
@@ -5011,6 +5135,20 @@ func normalizeSessionID(raw string) string {
 	return candidate
 }
 
+func normalizeProviderSessionID(raw string) string {
+	candidate := strings.ToLower(normalizeSessionID(raw))
+	if candidate == "" {
+		return ""
+	}
+	if claudeSessionIDPattern.MatchString(candidate) {
+		return candidate
+	}
+	if len(candidate) >= 8 && strings.Count(candidate, "-") >= 1 {
+		return candidate
+	}
+	return ""
+}
+
 func resolveClaudeSessionHint(homeDir, workspacePath, sessionID string, targetKind model.TargetKind) claudeSessionHint {
 	normalizedID := normalizeSessionID(sessionID)
 	if normalizedID == "" {
@@ -5277,6 +5415,12 @@ func derivePaneSessionActiveTime(
 			source:     "codex_thread_list",
 			confidence: 0.98,
 		}
+	}
+	// Keep provider session time aligned with /resume semantics:
+	// if we cannot resolve provider session time, return unknown instead of
+	// falling back to pane/runtime activity timestamps.
+	if provider == "claude" || provider == "codex" {
+		return paneSessionActiveTime{}
 	}
 	if rid := strings.TrimSpace(runtimeID); rid != "" {
 		if last, ok := runtimeLastInput[rid]; ok && !last.at.IsZero() {

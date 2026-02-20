@@ -1552,10 +1552,6 @@ final class AppViewModel: ObservableObject {
         if let sessionLastActive = parseTimestamp(pane.sessionLastActiveAt ?? "") {
             return sessionLastActive
         }
-        // Transitional fallback while daemon/session-time rollout converges.
-        if let lastInteraction = parseTimestamp(pane.lastInteractionAt ?? "") {
-            return lastInteraction
-        }
         return nil
     }
 

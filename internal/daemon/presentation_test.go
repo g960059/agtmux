@@ -47,7 +47,7 @@ func TestShouldUseCodexWorkspaceHint(t *testing.T) {
 	}
 }
 
-func TestAssignCodexHintsToCandidates(t *testing.T) {
+func TestAssignCodexHintsToCandidatesRequiresDeterministicBinding(t *testing.T) {
 	now := time.Now().UTC()
 	candidates := []codexPaneCandidate{
 		{paneKey: "t1|%2", runtimeID: "rt-2", startedAt: now.Add(-1 * time.Minute), activityAt: now.Add(-1 * time.Minute)},
@@ -62,41 +62,28 @@ func TestAssignCodexHintsToCandidates(t *testing.T) {
 	if len(byPane) != 0 {
 		t.Fatalf("expected no pane fallback assignments, got %+v", byPane)
 	}
-	if got := byRuntime["rt-2"].label; got != "new prompt" {
-		t.Fatalf("expected rt-2 to map newest hint, got %q", got)
-	}
-	if got := byRuntime["rt-1"].label; got != "old prompt" {
-		t.Fatalf("expected rt-1 to map second hint, got %q", got)
+	if len(byRuntime) != 0 {
+		t.Fatalf("expected no runtime mapping without deterministic id match, got %+v", byRuntime)
 	}
 }
 
-func TestAssignCodexHintsToCandidatesPrefersRecentActivityOverStartTime(t *testing.T) {
+func TestAssignCodexHintsToCandidatesSingleCandidateSingleHintFallback(t *testing.T) {
 	now := time.Now().UTC()
 	candidates := []codexPaneCandidate{
 		{
-			paneKey:    "t1|%newer-start",
-			runtimeID:  "rt-newer-start",
-			startedAt:  now.Add(-1 * time.Minute),
-			activityAt: now.Add(-10 * time.Minute),
-		},
-		{
-			paneKey:    "t1|%older-start",
-			runtimeID:  "rt-older-start",
-			startedAt:  now.Add(-30 * time.Minute),
+			paneKey:    "t1|%single",
+			runtimeID:  "rt-single",
+			startedAt:  now.Add(-2 * time.Minute),
 			activityAt: now.Add(-30 * time.Second),
 		},
 	}
 	hints := []codexThreadHint{
-		{id: "thread-most-recent", label: "most recent thread", at: now},
-		{id: "thread-older", label: "older thread", at: now.Add(-5 * time.Minute)},
+		{id: "thread-active", label: "single active thread", at: now},
 	}
 
 	byRuntime, _ := assignCodexHintsToCandidates(candidates, hints)
-	if got := byRuntime["rt-older-start"].label; got != "most recent thread" {
-		t.Fatalf("expected rt-older-start to receive most recent hint by activity, got %q", got)
-	}
-	if got := byRuntime["rt-newer-start"].label; got != "older thread" {
-		t.Fatalf("expected rt-newer-start to receive second hint, got %q", got)
+	if got := byRuntime["rt-single"].label; got != "single active thread" {
+		t.Fatalf("expected deterministic single fallback mapping, got %q", got)
 	}
 }
 
@@ -152,6 +139,38 @@ n/Users/virtualmachine/.codex/sessions/2026/02/13/rollout-2026-02-13T08-06-04-01
 	got := extractCodexThreadIDFromLsofOutput(raw)
 	if got != "019c57c0-9429-73d3-8a96-53bfc6e80d7f" {
 		t.Fatalf("expected thread id from lsof output, got %q", got)
+	}
+}
+
+func TestExtractCodexThreadIDFromCommand(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		want    string
+	}{
+		{
+			name:    "resume subcommand",
+			command: "codex resume 019c57c0-9429-73d3-8a96-53bfc6e80d7f",
+			want:    "019c57c0-9429-73d3-8a96-53bfc6e80d7f",
+		},
+		{
+			name:    "resume long flag",
+			command: "node /Users/vm/.nvm/versions/node/v24.12.0/bin/codex --resume=019c61bc-1144-7700-826a-b2eeeb910d0c --yolo",
+			want:    "019c61bc-1144-7700-826a-b2eeeb910d0c",
+		},
+		{
+			name:    "no session id",
+			command: "codex --dangerously-bypass-approvals",
+			want:    "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := extractCodexThreadIDFromCommand(tt.command); got != tt.want {
+				t.Fatalf("extractCodexThreadIDFromCommand(%q)=%q want=%q", tt.command, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -290,5 +309,61 @@ func TestDerivePaneLastInteractionAtIgnoresAdministrativeStateEvent(t *testing.T
 	)
 	if got != nil {
 		t.Fatalf("expected nil for managed pane when only administrative state event exists, got %s", got.Format(time.RFC3339Nano))
+	}
+}
+
+func TestDerivePaneSessionActiveTimeManagedCodexWithoutThreadHintReturnsUnknown(t *testing.T) {
+	now := time.Now().UTC()
+	lastInput := now.Add(-2 * time.Minute)
+	sessionTime := derivePaneSessionActiveTime(
+		"managed",
+		"rt-1",
+		"t1|%1",
+		nil,
+		map[string]actionInputHint{
+			"rt-1": {preview: "fallback", at: lastInput},
+		},
+		nil,
+		"codex",
+		codexThreadHint{},
+		false,
+		claudeSessionHint{},
+		false,
+		string(model.SourceNotify),
+		"agent-turn-complete",
+		nil,
+		nil,
+		now,
+	)
+	if sessionTime.at != nil {
+		t.Fatalf("expected unknown session time for codex without thread hint, got %+v", sessionTime)
+	}
+}
+
+func TestDerivePaneSessionActiveTimeManagedClaudeWithoutSessionHintReturnsUnknown(t *testing.T) {
+	now := time.Now().UTC()
+	lastInput := now.Add(-2 * time.Minute)
+	sessionTime := derivePaneSessionActiveTime(
+		"managed",
+		"rt-2",
+		"t1|%2",
+		nil,
+		map[string]actionInputHint{
+			"rt-2": {preview: "fallback", at: lastInput},
+		},
+		nil,
+		"claude",
+		codexThreadHint{},
+		false,
+		claudeSessionHint{},
+		false,
+		string(model.SourceHook),
+		"task-finished",
+		nil,
+		nil,
+		now,
+	)
+	if sessionTime.at != nil {
+		t.Fatalf("expected unknown session time for claude without resolved session hint, got %+v", sessionTime)
 	}
 }
