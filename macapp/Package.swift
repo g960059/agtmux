@@ -25,5 +25,10 @@ let package = Package(
             dependencies: ["AGTMUXDesktop"],
             path: "Tests"
         ),
+        .testTarget(
+            name: "AGTMUXDesktopUITests",
+            dependencies: ["AGTMUXDesktop"],
+            path: "UITests"
+        ),
     ]
 )

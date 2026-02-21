@@ -66,6 +66,32 @@
 open ~/Applications/AGTMUXDesktop.app
 ```
 
+## UI テスト（AGTMUXDesktopUITests）
+
+UI テストはデフォルトで無効化されています。実行時のみ有効化してください。
+
+```bash
+AGTMUX_RUN_UI_TESTS=1 ./scripts/run-ui-tests.sh
+```
+
+`AGTMUXDesktopUITests` は次の権限が必要です。
+
+- Accessibility
+- Screen Recording
+
+注意:
+
+- SSH セッション（host WezTerm -> ssh -> VM など）では TCC 権限が適用されないため UI テストは失敗します。
+- VM の GUI ログイン内で `Terminal.app` か `Xcode` から実行してください。
+- セキュリティ最小化のため、UI テスト実行後は権限を外す運用を推奨します。
+
+実行ファイルの解決順:
+
+1. `AGTMUX_UI_TEST_APP_BUNDLE` で明示指定
+2. `~/Applications/AGTMUXDesktop.app`
+
+先にアプリをインストールしていない場合は `./scripts/install-app.sh` を実行してください。
+
 ## データ保存先
 
 アプリ実行時に以下を使用します。
