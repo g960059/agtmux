@@ -94,6 +94,15 @@ AGTMUX_RUN_UI_TESTS=1 AGTMUX_UI_TEST_CAPTURE=1 ./scripts/run-ui-tests.sh
 - 既定保存先: `/tmp/agtmux-ui-captures`
 - 保存先変更: `AGTMUX_UI_TEST_CAPTURE_DIR=/path/to/dir`
 
+反復実行（修正ループ）:
+
+```bash
+./scripts/run-ui-loop.sh 5
+```
+
+- `5` は実行回数（省略時 `3`）
+- 間隔は `AGTMUX_UI_LOOP_DELAY_SECONDS`（既定 `2` 秒）
+
 実行ファイルの解決順:
 
 1. `AGTMUX_UI_TEST_APP_BUNDLE` で明示指定
