@@ -107,8 +107,8 @@ cargo new --bin apps/agtmux-desktop
 
 UIを触るphaseでは、下記を phase gate 前に実行する。
 
-1. `cd macapp && AGTMUX_RUN_UI_TESTS=1 ./scripts/run-ui-tests.sh`
-2. `./scripts/run-ui-feedback-report.sh 1`
+1. `AGTMUX_RUN_UI_TESTS=1 ./scripts/ui-feedback/run-ui-tests.sh`
+2. `./scripts/ui-feedback/run-ui-feedback-report.sh 1`
 3. report の `tests_failures = 0` を確認
 4. report artifact を implementation record に添付
 

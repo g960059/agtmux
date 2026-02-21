@@ -53,14 +53,13 @@ UI修正のたびに手動確認だけへ戻らないため、最小の自動ル
 
 ```bash
 # 単発
-cd macapp
-AGTMUX_RUN_UI_TESTS=1 ./scripts/run-ui-tests.sh
+AGTMUX_RUN_UI_TESTS=1 ./scripts/ui-feedback/run-ui-tests.sh
 
 # 反復
-./scripts/run-ui-loop.sh 3
+./scripts/ui-feedback/run-ui-loop.sh 3
 
 # 反復 + markdown artifact
-./scripts/run-ui-feedback-report.sh 3
+./scripts/ui-feedback/run-ui-feedback-report.sh 3
 ```
 
 主な環境変数:
@@ -70,6 +69,19 @@ AGTMUX_RUN_UI_TESTS=1 ./scripts/run-ui-tests.sh
 3. `AGTMUX_UI_TEST_CAPTURE_DIR=/tmp/agtmux-ui-captures`
 4. `AGTMUX_UI_REPORT_PATH=/tmp/agtmux-ui-feedback-report-<ts>.md`
 5. `AGTMUX_UI_LOOP_DELAY_SECONDS=2`
+
+## 5.1 Template Bootstrap
+
+このリポジトリにはテンプレートとして次を配置する。
+
+1. `scripts/ui-feedback/run-ui-tests.sh`
+2. `scripts/ui-feedback/run-ui-loop.sh`
+3. `scripts/ui-feedback/run-ui-feedback-report.sh`
+
+最初にプロジェクトへ合わせる項目:
+
+1. `AGTMUX_UI_TEST_WORKDIR`（例: `macapp`, `apps/desktop`）
+2. `AGTMUX_UI_TEST_COMMAND`（例: `swift test --filter AGTMUXDesktopUITests`）
 
 ## 6. Required Report Fields
 

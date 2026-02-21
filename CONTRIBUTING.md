@@ -65,7 +65,7 @@ Constitutional 変更は実装前に理由と影響を文書化する。
 3. acceptance criteria を明記した
 4. rollback 手順を明記した
 5. `docs/v2/00-index.md` との整合を確認した
-6. UI変更時は `run-ui-feedback-report.sh` 結果を残した
+6. UI変更時は `scripts/ui-feedback/run-ui-feedback-report.sh` 結果を残した
 
 ## Context Budget Rule (for implementation agents)
 
