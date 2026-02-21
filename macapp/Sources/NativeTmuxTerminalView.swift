@@ -18,6 +18,16 @@ final class IMEAwareTerminalView: TerminalView {
 
     override var isOpaque: Bool { false }
 
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let window = self.window else { return }
+            if window.firstResponder !== self {
+                window.makeFirstResponder(self)
+            }
+        }
+    }
+
     override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
         let nextMarkedText: NSAttributedString?
         if let attributed = string as? NSAttributedString {
@@ -298,6 +308,8 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
     let pane: PaneItem
     let darkMode: Bool
     let content: String
+    let frameSource: String?
+    let renderVersion: Int
     let cursorX: Int?
     let cursorY: Int?
     let paneCols: Int?
@@ -330,6 +342,8 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
         context.coordinator.update(
             pane: pane,
             content: content,
+            frameSource: frameSource,
+            renderVersion: renderVersion,
             cursorX: cursorX,
             cursorY: cursorY,
             paneCols: paneCols,
@@ -345,6 +359,8 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
         context.coordinator.update(
             pane: pane,
             content: content,
+            frameSource: frameSource,
+            renderVersion: renderVersion,
             cursorX: cursorX,
             cursorY: cursorY,
             paneCols: paneCols,
@@ -447,12 +463,13 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
         private weak var terminalView: TerminalView?
         private var currentPaneID = ""
         private var lastRenderedContent = ""
-        private var lastRenderedLines: [String] = [""]
         private var lastCursorX: Int?
         private var lastCursorY: Int?
         private var lastPaneCols: Int?
         private var lastPaneRows: Int?
         private var pendingContent = ""
+        private var pendingFrameSource: String?
+        private var pendingRenderVersion: Int = 0
         private var pendingCursorX: Int?
         private var pendingCursorY: Int?
         private var pendingPaneCols: Int?
@@ -467,7 +484,8 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
         private var didConfigureAppearance = false
         private var appearanceModeIsDark = true
         private var paletteVariant: PaletteVariant?
-        private let maxCachedLines = 2400
+        private var lastRenderedSource: String?
+        private var lastRenderedVersion: Int = 0
         private let minimumRenderInterval: CFTimeInterval = 1.0 / 60.0
         private let minimumResizeSyncInterval: CFTimeInterval = 0.18
 
@@ -485,12 +503,13 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
             terminalView = nil
             currentPaneID = ""
             lastRenderedContent = ""
-            lastRenderedLines = [""]
             lastCursorX = nil
             lastCursorY = nil
             lastPaneCols = nil
             lastPaneRows = nil
             pendingContent = ""
+            pendingFrameSource = nil
+            pendingRenderVersion = 0
             pendingCursorX = nil
             pendingCursorY = nil
             pendingPaneCols = nil
@@ -503,11 +522,15 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
             lastResizeSyncCols = nil
             lastResizeSyncRows = nil
             paletteVariant = nil
+            lastRenderedSource = nil
+            lastRenderedVersion = 0
         }
 
         func update(
             pane: PaneItem,
             content: String,
+            frameSource: String?,
+            renderVersion: Int,
             cursorX: Int?,
             cursorY: Int?,
             paneCols: Int?,
@@ -523,11 +546,9 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
                 claudePromptContrast: claudePromptContrast,
                 terminal: terminal
             )
-            var normalizedContent = normalizedTerminalText(content)
-            if claudePromptContrast {
-                normalizedContent = applyClaudePromptTryLeadingGlyphHighlight(normalizedContent)
-            }
-            pendingContent = normalizedContent
+            pendingContent = content
+            pendingFrameSource = normalizedToken(frameSource)
+            pendingRenderVersion = renderVersion
             pendingCursorX = cursorX
             pendingCursorY = cursorY
             pendingPaneCols = paneCols
@@ -537,11 +558,10 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
             if paneSwitched {
                 renderWorkItem?.cancel()
                 renderWorkItem = nil
-            }
-            if paneID != currentPaneID {
                 currentPaneID = paneID
                 lastRenderedContent = ""
-                lastRenderedLines = [""]
+                lastRenderedSource = nil
+                lastRenderedVersion = 0
                 lastCursorX = nil
                 lastCursorY = nil
                 lastPaneCols = nil
@@ -551,6 +571,7 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
                 updateFocusIfNeeded(terminal: terminal)
                 requestResizeSync(terminal: terminal, force: true)
             }
+            updateFocusIfNeeded(terminal: terminal)
             scheduleRender(force: paneSwitched)
         }
 
@@ -592,6 +613,8 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
             if renderIfNeeded(
                 terminal: terminal,
                 content: pendingContent,
+                frameSource: pendingFrameSource,
+                renderVersion: pendingRenderVersion,
                 cursorX: pendingCursorX,
                 cursorY: pendingCursorY,
                 paneCols: pendingPaneCols,
@@ -605,79 +628,74 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
         private func renderIfNeeded(
             terminal: TerminalView,
             content: String,
+            frameSource: String?,
+            renderVersion: Int,
             cursorX: Int?,
             cursorY: Int?,
             paneCols: Int?,
             paneRows: Int?,
             force: Bool
         ) -> Bool {
-            let contentChanged = content != lastRenderedContent
-            let cursorChanged = cursorX != lastCursorX || cursorY != lastCursorY
             let paneSizeChanged = paneCols != lastPaneCols || paneRows != lastPaneRows
-
             if paneSizeChanged || force {
                 if hasPaneGeometryDrift(terminal: terminal, paneCols: paneCols, paneRows: paneRows) {
                     requestResizeSync(terminal: terminal, force: false)
                 }
             }
-
-            guard force || contentChanged || cursorChanged || paneSizeChanged else {
+            let sourceToken = normalizedToken(frameSource)
+            let contentChanged = content != lastRenderedContent
+            let versionChanged = renderVersion != lastRenderedVersion
+            let sourceChanged = sourceToken != lastRenderedSource
+            guard force || contentChanged || versionChanged || sourceChanged || paneSizeChanged else {
                 return false
             }
             if holdRepaintWhileScrolled && !force {
                 return false
             }
 
-            if contentChanged {
-                lastRenderedLines = updatedCachedLines(
-                    previousContent: lastRenderedContent,
-                    nextContent: content,
-                    previousLines: lastRenderedLines
-                )
+            if force || sourceToken == "reset" {
+                resetTerminal(terminal)
             }
-
-            let repaint: RepaintFrame
-            if !force, !contentChanged, !paneSizeChanged, cursorChanged {
-                repaint = buildCursorOnlyFrame(
-                    terminal: terminal,
-                    cursorX: cursorX,
-                    cursorY: cursorY,
-                    paneCols: paneCols,
-                    paneRows: paneRows
-                )
-            } else {
-                repaint = buildAbsoluteRepaintFrame(
-                    terminal: terminal,
-                    lines: lastRenderedLines,
-                    cursorX: cursorX,
-                    cursorY: cursorY,
-                    paneCols: paneCols,
-                    paneRows: paneRows
-                )
+            if !content.isEmpty {
+                terminal.feed(byteArray: ArraySlice(content.utf8))
             }
-            terminal.feed(text: repaint.frame)
             onFrameRendered()
             if let imeTerminal = terminal as? IMEAwareTerminalView {
                 imeTerminal.updateCompositionMetrics(
-                    cursorX: repaint.cursorX,
-                    cursorY: repaint.cursorY,
-                    paneCols: repaint.paneCols,
-                    paneRows: repaint.paneRows
+                    cursorX: cursorX,
+                    cursorY: cursorY,
+                    paneCols: paneCols,
+                    paneRows: paneRows
                 )
                 imeTerminal.syncCursorVisibilityForComposition()
             }
             lastRenderedContent = content
-            lastCursorX = cursorX
-            lastCursorY = cursorY
-            lastPaneCols = paneCols
-            lastPaneRows = paneRows
+            lastRenderedSource = sourceToken
+            lastRenderedVersion = renderVersion
+            if let cursorX {
+                lastCursorX = cursorX
+            }
+            if let cursorY {
+                lastCursorY = cursorY
+            }
+            if let paneCols {
+                lastPaneCols = paneCols
+            }
+            if let paneRows {
+                lastPaneRows = paneRows
+            }
             return true
         }
 
-        private func normalizedTerminalText(_ raw: String) -> String {
-            var normalized = raw.replacingOccurrences(of: "\r\n", with: "\n")
-            normalized = normalized.replacingOccurrences(of: "\r", with: "\n")
-            return normalized
+        private func normalizedToken(_ value: String?) -> String? {
+            guard let value else {
+                return nil
+            }
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty {
+                return nil
+            }
+            return trimmed.lowercased()
         }
 
         private func isLikelyClaudePane(_ pane: PaneItem) -> Bool {
@@ -757,412 +775,6 @@ struct NativeTmuxTerminalView: NSViewRepresentable {
                     ? NSColor(calibratedRed: 0.16, green: 0.20, blue: 0.28, alpha: 0.95)
                     : NSColor(calibratedRed: 0.12, green: 0.44, blue: 0.90, alpha: 0.90)
             }
-        }
-
-        private func applyClaudePromptTryLeadingGlyphHighlight(_ raw: String) -> String {
-            guard raw.contains("Try ") else {
-                return raw
-            }
-            let open = "\u{001B}[30;47m"
-            let close = "\u{001B}[39;49m"
-            let marker = "30;47m"
-            var lines = raw.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-            guard !lines.isEmpty else {
-                return raw
-            }
-            for idx in lines.indices {
-                var line = lines[idx]
-                guard !line.contains(marker) else {
-                    continue
-                }
-                let plain = stripANSI(line).trimmingCharacters(in: .whitespacesAndNewlines)
-                guard plain.hasPrefix("› ") || plain.hasPrefix("❯ ") || plain.hasPrefix("> ") else {
-                    continue
-                }
-                guard let firstPromptChar = firstPromptInputCharacterRange(in: line) else {
-                    continue
-                }
-                let glyph = String(line[firstPromptChar])
-                line.replaceSubrange(firstPromptChar, with: "\(open)\(glyph)\(close)")
-                lines[idx] = line
-            }
-            return lines.joined(separator: "\n")
-        }
-
-        private func firstPromptInputCharacterRange(in line: String) -> Range<String.Index>? {
-            let plain = stripANSI(line)
-            if let symbol = plain.first,
-               symbol == "›" || symbol == "❯" || symbol == ">" {
-                var visibleIndex = 1
-                var plainIndex = plain.index(after: plain.startIndex)
-                while plainIndex < plain.endIndex, plain[plainIndex].isWhitespace {
-                    visibleIndex += 1
-                    plain.formIndex(after: &plainIndex)
-                }
-                guard plainIndex < plain.endIndex else {
-                    return nil
-                }
-                return visibleCharacterRange(in: line, atVisibleIndex: visibleIndex)
-            }
-
-            if let range = plain.range(of: "Try "), range.lowerBound < plain.endIndex {
-                let visibleIndex = plain.distance(from: plain.startIndex, to: range.lowerBound)
-                return visibleCharacterRange(in: line, atVisibleIndex: visibleIndex)
-            }
-
-            if plain.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("Try") {
-                var visibleIndex = 0
-                var plainIndex = plain.startIndex
-                while plainIndex < plain.endIndex, plain[plainIndex].isWhitespace {
-                    visibleIndex += 1
-                    plain.formIndex(after: &plainIndex)
-                }
-                guard plainIndex < plain.endIndex else {
-                    return nil
-                }
-                return visibleCharacterRange(in: line, atVisibleIndex: visibleIndex)
-            }
-
-            return nil
-        }
-
-        private func visibleCharacterRange(in raw: String, atVisibleIndex target: Int) -> Range<String.Index>? {
-            guard target >= 0 else {
-                return nil
-            }
-            var visible = 0
-            var idx = raw.startIndex
-            while idx < raw.endIndex {
-                let scalar = raw[idx].unicodeScalars.first?.value
-                if scalar == 0x1B {
-                    idx = consumeEscapeSequence(in: raw, from: idx)
-                    continue
-                }
-                let next = raw.index(after: idx)
-                if visible == target {
-                    return idx ..< next
-                }
-                visible += 1
-                idx = next
-            }
-            return nil
-        }
-
-        private func stripANSI(_ raw: String) -> String {
-            guard raw.contains("\u{001B}[") else {
-                return raw
-            }
-            var out = ""
-            out.reserveCapacity(raw.count)
-            var idx = raw.startIndex
-            while idx < raw.endIndex {
-                let scalar = raw[idx].unicodeScalars.first?.value
-                if scalar == 0x1B {
-                    idx = consumeEscapeSequence(in: raw, from: idx)
-                    continue
-                }
-                out.append(raw[idx])
-                idx = raw.index(after: idx)
-            }
-            return out
-        }
-
-        private func updatedCachedLines(
-            previousContent: String,
-            nextContent: String,
-            previousLines: [String]
-        ) -> [String] {
-            if previousContent.isEmpty || previousLines.isEmpty {
-                return splitLines(nextContent)
-            }
-            guard nextContent.count >= previousContent.count,
-                  nextContent.hasPrefix(previousContent) else {
-                return splitLines(nextContent)
-            }
-            let suffix = nextContent.dropFirst(previousContent.count)
-            if suffix.isEmpty {
-                return previousLines
-            }
-            var lines = previousLines
-            if lines.isEmpty {
-                lines = [""]
-            }
-            for ch in suffix {
-                if ch == "\n" {
-                    lines.append("")
-                } else {
-                    lines[lines.count - 1].append(ch)
-                }
-            }
-            if lines.count > maxCachedLines {
-                lines = Array(lines.suffix(maxCachedLines))
-            }
-            return lines
-        }
-
-        private func splitLines(_ content: String) -> [String] {
-            let lines = content.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-            if lines.isEmpty {
-                return [""]
-            }
-            if lines.count > maxCachedLines {
-                return Array(lines.suffix(maxCachedLines))
-            }
-            return lines
-        }
-
-        private struct RepaintFrame {
-            let frame: String
-            let cursorX: Int?
-            let cursorY: Int?
-            let paneCols: Int
-            let paneRows: Int
-        }
-
-        private func buildAbsoluteRepaintFrame(
-            terminal: TerminalView,
-            lines sourceLines: [String],
-            cursorX: Int?,
-            cursorY: Int?,
-            paneCols: Int?,
-            paneRows: Int?
-        ) -> RepaintFrame {
-            let terminalRows = max(1, terminal.getTerminal().rows)
-            let terminalCols = max(1, terminal.getTerminal().cols)
-            let sourceRows = max(terminalRows, max(1, paneRows ?? terminalRows))
-            let sourceCols = max(terminalCols, max(1, paneCols ?? terminalCols))
-            var lines = sourceLines.isEmpty ? [""] : sourceLines
-            let maxBufferedLines = max(sourceRows, min(max(sourceRows * 12, 500), 3000))
-            if lines.count > maxBufferedLines {
-                lines = Array(lines.suffix(maxBufferedLines))
-            }
-            // Interpret cursorY as row index inside the pane viewport (sourceRows),
-            // then map to absolute line index inside the retained history buffer.
-            var viewportLines = Array(lines.suffix(sourceRows))
-            if viewportLines.count < sourceRows {
-                viewportLines.insert(
-                    contentsOf: Array(repeating: "", count: sourceRows - viewportLines.count),
-                    at: 0
-                )
-            }
-
-            let inferredSourceCursorY = inferCursorRow(lines: viewportLines)
-            let effectiveSourceCursorY = min(max(cursorY ?? inferredSourceCursorY, 0), sourceRows - 1)
-            let sourceCursorLineIndex = min(max(effectiveSourceCursorY, 0), max(viewportLines.count - 1, 0))
-            let inferredSourceCursorX = inferCursorColumn(
-                line: viewportLines[sourceCursorLineIndex],
-                maxCols: sourceCols
-            )
-            let effectiveSourceCursorX = min(max(cursorX ?? inferredSourceCursorX, 0), sourceCols - 1)
-            let cursorDistanceFromBottom = max(0, sourceRows - 1 - effectiveSourceCursorY)
-            var cursorAbsoluteLine = max(0, lines.count - 1 - cursorDistanceFromBottom)
-
-            // Keep enough local history for wheel scroll while bounding repaint cost.
-            let maxRenderLines = max(terminalRows * 6, 240)
-            if lines.count > maxRenderLines {
-                let dropCount = lines.count - maxRenderLines
-                lines = Array(lines.suffix(maxRenderLines))
-                cursorAbsoluteLine = max(0, cursorAbsoluteLine - dropCount)
-            }
-
-            var out = ""
-            let estimatedContentChars = lines.reduce(into: 0) { $0 += min($1.count, terminalCols) + 1 }
-            out.reserveCapacity(max(estimatedContentChars + 256, lines.count * min(terminalCols, 160)))
-
-            // Paint from a complete snapshot while preserving internal scrollback.
-            out += "\u{001B}[?25l" // hide cursor
-            out += "\u{001B}[?7l"  // disable line wrap
-            out += "\u{001B}[H"
-            out += "\u{001B}[2J"
-            for (idx, rawLine) in lines.enumerated() {
-                out += rawLine
-                // Extend current line attributes (including background color) to full width.
-                out += "\u{001B}[K"
-                if idx < lines.count - 1 {
-                    out += "\r\n"
-                }
-            }
-            let viewportStart = max(0, lines.count - terminalRows)
-            let mappedCursorY = min(max(cursorAbsoluteLine - viewportStart, 0), terminalRows - 1)
-            let clampedX = min(max(effectiveSourceCursorX, 0), min(sourceCols - 1, terminalCols - 1))
-            out += "\u{001B}[\(mappedCursorY + 1);\(clampedX + 1)H"
-
-            out += "\u{001B}[?7h"  // enable line wrap
-            out += "\u{001B}[?25h" // show cursor
-            let mappedCursorX = clampedX
-            return RepaintFrame(
-                frame: out,
-                cursorX: mappedCursorX,
-                cursorY: mappedCursorY,
-                paneCols: terminalCols,
-                paneRows: terminalRows
-            )
-        }
-
-        private func buildCursorOnlyFrame(
-            terminal: TerminalView,
-            cursorX: Int?,
-            cursorY: Int?,
-            paneCols: Int?,
-            paneRows: Int?
-        ) -> RepaintFrame {
-            let terminalRows = max(1, terminal.getTerminal().rows)
-            let terminalCols = max(1, terminal.getTerminal().cols)
-            let sourceRows = max(terminalRows, max(1, paneRows ?? terminalRows))
-            let sourceCols = max(terminalCols, max(1, paneCols ?? terminalCols))
-            let lines = lastRenderedLines.isEmpty ? [""] : lastRenderedLines
-            var viewportLines = Array(lines.suffix(sourceRows))
-            if viewportLines.count < sourceRows {
-                viewportLines.insert(
-                    contentsOf: Array(repeating: "", count: sourceRows - viewportLines.count),
-                    at: 0
-                )
-            }
-
-            let inferredCursorY = inferCursorRow(lines: viewportLines)
-            let sourceCursorY = min(max(cursorY ?? inferredCursorY, 0), sourceRows - 1)
-            let sourceCursorLineIndex = min(max(sourceCursorY, 0), max(viewportLines.count - 1, 0))
-            let inferredCursorX = inferCursorColumn(
-                line: viewportLines[sourceCursorLineIndex],
-                maxCols: sourceCols
-            )
-            let sourceCursorX = min(max(cursorX ?? inferredCursorX, 0), sourceCols - 1)
-            let cursorDistanceFromBottom = max(0, sourceRows - 1 - sourceCursorY)
-            let cursorAbsoluteLine = max(0, lines.count - 1 - cursorDistanceFromBottom)
-            let viewportStart = max(0, lines.count - terminalRows)
-            let mappedY = min(max(cursorAbsoluteLine - viewportStart, 0), terminalRows - 1)
-            let mappedX = min(max(sourceCursorX, 0), min(sourceCols - 1, terminalCols - 1))
-            let frame = "\u{001B}[?25l\u{001B}[\(mappedY + 1);\(mappedX + 1)H\u{001B}[?25h"
-            return RepaintFrame(
-                frame: frame,
-                cursorX: mappedX,
-                cursorY: mappedY,
-                paneCols: terminalCols,
-                paneRows: terminalRows
-            )
-        }
-
-        private func inferCursorRow(lines: [String]) -> Int {
-            guard !lines.isEmpty else {
-                return 0
-            }
-            var idx = lines.count - 1
-            while idx > 0 {
-                if !lines[idx].isEmpty {
-                    return idx
-                }
-                idx -= 1
-            }
-            return 0
-        }
-
-        private func inferCursorColumn(line: String, maxCols: Int) -> Int {
-            guard maxCols > 0 else {
-                return 0
-            }
-            return min(max(0, visibleColumnCount(line)), maxCols - 1)
-        }
-
-        private func visibleColumnCount(_ raw: String) -> Int {
-            guard !raw.isEmpty else {
-                return 0
-            }
-            var count = 0
-            var idx = raw.startIndex
-            while idx < raw.endIndex {
-                let scalar = raw[idx].unicodeScalars.first?.value
-                if scalar == 0x1B {
-                    idx = consumeEscapeSequence(in: raw, from: idx)
-                    continue
-                }
-                count += 1
-                idx = raw.index(after: idx)
-            }
-            return count
-        }
-
-        private func clampLine(_ raw: String, toColumns cols: Int) -> String {
-            guard cols > 0 else {
-                return ""
-            }
-            guard !raw.isEmpty else {
-                return ""
-            }
-            var out = ""
-            out.reserveCapacity(min(raw.count, cols + 16))
-            var visibleColumns = 0
-            var idx = raw.startIndex
-            while idx < raw.endIndex {
-                let scalar = raw[idx].unicodeScalars.first?.value
-                if scalar == 0x1B {
-                    let end = consumeEscapeSequence(in: raw, from: idx)
-                    out.append(contentsOf: raw[idx..<end])
-                    idx = end
-                    continue
-                }
-                if visibleColumns >= cols {
-                    break
-                }
-                out.append(raw[idx])
-                visibleColumns += 1
-                idx = raw.index(after: idx)
-            }
-            return out
-        }
-
-        private func consumeEscapeSequence(in raw: String, from start: String.Index) -> String.Index {
-            var idx = raw.index(after: start)
-            guard idx < raw.endIndex else {
-                return idx
-            }
-            let lead = raw[idx].unicodeScalars.first?.value ?? 0
-            // CSI: ESC [ ... final-byte(@..~)
-            if lead == 0x5B {
-                idx = raw.index(after: idx)
-                while idx < raw.endIndex {
-                    let value = raw[idx].unicodeScalars.first?.value ?? 0
-                    idx = raw.index(after: idx)
-                    if value >= 0x40 && value <= 0x7E {
-                        break
-                    }
-                }
-                return idx
-            }
-            // OSC: ESC ] ... BEL or ST(ESC \)
-            if lead == 0x5D {
-                idx = raw.index(after: idx)
-                while idx < raw.endIndex {
-                    let value = raw[idx].unicodeScalars.first?.value ?? 0
-                    if value == 0x07 {
-                        return raw.index(after: idx)
-                    }
-                    if value == 0x1B {
-                        let next = raw.index(after: idx)
-                        if next < raw.endIndex, (raw[next].unicodeScalars.first?.value ?? 0) == 0x5C {
-                            return raw.index(after: next)
-                        }
-                    }
-                    idx = raw.index(after: idx)
-                }
-                return raw.endIndex
-            }
-            // DCS/SOS/PM/APC: ESC P/X/^/_ ... ST(ESC \)
-            if lead == 0x50 || lead == 0x58 || lead == 0x5E || lead == 0x5F {
-                idx = raw.index(after: idx)
-                while idx < raw.endIndex {
-                    let value = raw[idx].unicodeScalars.first?.value ?? 0
-                    if value == 0x1B {
-                        let next = raw.index(after: idx)
-                        if next < raw.endIndex, (raw[next].unicodeScalars.first?.value ?? 0) == 0x5C {
-                            return raw.index(after: next)
-                        }
-                    }
-                    idx = raw.index(after: idx)
-                }
-                return raw.endIndex
-            }
-            // Generic two-byte escape sequence.
-            return raw.index(after: idx)
         }
 
         private func updateFocusIfNeeded(terminal: TerminalView) {

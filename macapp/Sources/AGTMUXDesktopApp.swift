@@ -25,7 +25,8 @@ struct AGTMUXDesktopApp: App {
             model = AppViewModel(
                 daemon: daemon,
                 client: client,
-                nativeTmuxTerminalEnabled: true
+                nativeTmuxTerminalEnabled: true,
+                allowTerminalV1Fallback: false
             )
             launchError = nil
             appendLauncherLog(baseDir: paths.baseDir, message: "app init: model ready")
@@ -388,6 +389,8 @@ private struct CockpitView: View {
                             pane: pane,
                             darkMode: colorScheme == .dark,
                             content: model.outputPreview,
+                            frameSource: model.terminalRenderSource,
+                            renderVersion: model.terminalRenderVersion,
                             cursorX: model.terminalCursorX,
                             cursorY: model.terminalCursorY,
                             paneCols: model.terminalPaneCols,

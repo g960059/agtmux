@@ -121,6 +121,20 @@ final class AppViewModel: ObservableObject {
         var acknowledgedAt: Date?
     }
 
+    private enum TTYV2RenderMode: String {
+        case streamLive = "stream_live"
+        case streamRecovering = "stream_recovering"
+    }
+
+    private struct TTYV2RenderFrame {
+        let content: String
+        let source: String
+        let cursorX: Int?
+        let cursorY: Int?
+        let paneCols: Int?
+        let paneRows: Int?
+    }
+
     struct WindowSection: Identifiable, Hashable {
         let id: String
         let windowID: String
@@ -155,12 +169,20 @@ final class AppViewModel: ObservableObject {
         let cursorY: Int?
         let paneCols: Int?
         let paneRows: Int?
+        let source: String?
+        let version: Int
     }
 
     private struct InteractiveInputError: LocalizedError {
         let message: String
 
         var errorDescription: String? { message }
+    }
+
+    private enum TerminalProxyProtocol {
+        case none
+        case v1
+        case v2
     }
 
     private struct TargetReconnectState {
@@ -220,6 +242,7 @@ final class AppViewModel: ObservableObject {
         didSet {
             if oldValue?.id != selectedPane?.id {
                 terminalStreamTask?.cancel()
+                stopTTYV2Session()
                 if let oldPaneID = oldValue?.id {
                     cancelBufferedInteractiveInput(for: oldPaneID)
                     Task { [weak self] in
@@ -233,12 +256,17 @@ final class AppViewModel: ObservableObject {
                 }
                 let nextPaneID = selectedPane?.id
                 if let nextPaneID {
+                    if ttyV2RenderModeByPaneID[nextPaneID] == nil {
+                        ttyV2RenderModeByPaneID[nextPaneID] = .streamRecovering
+                    }
                     if !applyCachedTerminalRender(for: nextPaneID) {
                         outputPreview = ""
                         terminalCursorX = nil
                         terminalCursorY = nil
                         terminalPaneCols = nil
                         terminalPaneRows = nil
+                        terminalRenderSource = nil
+                        terminalRenderVersion = 0
                     }
                 } else {
                     outputPreview = ""
@@ -246,6 +274,8 @@ final class AppViewModel: ObservableObject {
                     terminalCursorY = nil
                     terminalPaneCols = nil
                     terminalPaneRows = nil
+                    terminalRenderSource = nil
+                    terminalRenderVersion = 0
                 }
                 if nextPaneID != nil {
                     syncSelectedPaneViewportIfKnown()
@@ -298,6 +328,8 @@ final class AppViewModel: ObservableObject {
     @Published var terminalCursorY: Int?
     @Published var terminalPaneCols: Int?
     @Published var terminalPaneRows: Int?
+    @Published var terminalRenderSource: String?
+    @Published var terminalRenderVersion: Int = 0
     @Published private(set) var terminalPerformance: TerminalPerformanceSnapshot = .empty
     @Published var refreshInFlight: Bool = false
     @Published var viewMode: ViewMode = .bySession {
@@ -372,6 +404,7 @@ final class AppViewModel: ObservableObject {
     private let client: AGTMUXCLIClient
     private let defaults: UserDefaults
     private let externalTerminalCommandRunner: ExternalTerminalCommandRunner
+    private let allowTerminalV1Fallback: Bool
     // Keeps production behavior enabled by default while allowing deterministic unit tests.
     private let autoStreamOnSelection: Bool
     private var pollingTask: Task<Void, Never>?
@@ -393,6 +426,11 @@ final class AppViewModel: ObservableObject {
     private let terminalSessionController: TerminalSessionController
     private var terminalStreamTask: Task<Void, Never>?
     private var terminalResizeTask: Task<Void, Never>?
+    private var ttyV2Session: TTYV2TransportSession?
+    private var ttyV2FrameTask: Task<Void, Never>?
+    private var ttyV2ActivePaneID: String?
+    private var ttyV2ActivePaneRef: TTYV2PaneRef?
+    private var ttyV2RenderModeByPaneID: [String: TTYV2RenderMode] = [:]
     private var terminalStreamGeneration: Int = 0
     private var didBootstrap = false
     private var recoveryInFlight = false
@@ -439,6 +477,7 @@ final class AppViewModel: ObservableObject {
         defaults: UserDefaults = .standard,
         nativeTmuxTerminalEnabled: Bool = false,
         autoStreamOnSelection: Bool = true,
+        allowTerminalV1Fallback: Bool = false,
         terminalSessionController: TerminalSessionController = TerminalSessionController(),
         externalTerminalCommandRunner: @escaping ExternalTerminalCommandRunner = AppViewModel.runExternalTerminalCommand
     ) {
@@ -448,6 +487,7 @@ final class AppViewModel: ObservableObject {
         self.nativeTmuxTerminalEnabled = nativeTmuxTerminalEnabled
         self.externalTerminalCommandRunner = externalTerminalCommandRunner
         self.autoStreamOnSelection = autoStreamOnSelection
+        self.allowTerminalV1Fallback = allowTerminalV1Fallback
         self.terminalSessionController = terminalSessionController
         loadPreferences()
     }
@@ -456,6 +496,12 @@ final class AppViewModel: ObservableObject {
         pollingTask?.cancel()
         terminalStreamTask?.cancel()
         terminalResizeTask?.cancel()
+        ttyV2FrameTask?.cancel()
+        if let session = ttyV2Session {
+            Task.detached {
+                await session.close()
+            }
+        }
     }
 
     func bootstrap() {
@@ -930,7 +976,10 @@ final class AppViewModel: ObservableObject {
     }
 
     func supportsNativeTmuxTerminal(for pane: PaneItem) -> Bool {
-        normalizedToken(pane.identity.target) == "local"
+        if let target = targetRecord(for: pane.identity.target) {
+            return normalizedToken(target.kind) == "local"
+        }
+        return normalizedToken(pane.identity.target) == "local"
     }
 
     var canSend: Bool {
@@ -955,7 +1004,41 @@ final class AppViewModel: ObservableObject {
                 }
                 let streamGeneration = terminalStreamGeneration
                 let guardOptions = writeGuardOptions(for: pane)
-                if await shouldUseTerminalProxy(for: pane.id) {
+                let proxyProtocol = await preferredTerminalProxyProtocol(for: pane.id)
+                if proxyProtocol == .v2 {
+                    do {
+                        let session = try await ensureTTYV2Session(for: pane, generation: streamGeneration)
+                        guard selectedPane?.id == pane.id else {
+                            return
+                        }
+                        markInteractiveInput(for: pane.id)
+                        var bytes = Array(sendText.utf8)
+                        if sendEnter {
+                            bytes.append(0x0a)
+                        }
+                        _ = try await session.write(
+                            paneRef: TTYV2PaneRef(
+                                target: pane.identity.target,
+                                sessionName: pane.identity.sessionName,
+                                windowID: pane.identity.windowID,
+                                paneID: pane.identity.paneID
+                            ),
+                            bytes: bytes
+                        )
+                        await terminalSessionController.recordSuccess(for: pane.id)
+                        infoMessage = "tty-v2 write: completed"
+                    } catch {
+                        if error is CancellationError {
+                            throw error
+                        }
+                        pendingInputLatencyStartByPaneID.removeValue(forKey: pane.id)
+                        let outcome = await terminalSessionController.recordFailure(for: pane.id)
+                        if outcome.didEnterDegradedMode {
+                            infoMessage = "interactive terminal recovering..."
+                        }
+                        throw error
+                    }
+                } else if proxyProtocol == .v1 {
                     do {
                         let sessionID = try await ensureTerminalProxySession(for: pane, generation: streamGeneration)
                         guard selectedPane?.id == pane.id else {
@@ -1013,7 +1096,7 @@ final class AppViewModel: ObservableObject {
                             await detachTerminalProxySession(sessionID: staleSessionID)
                         }
                         if outcome.didEnterDegradedMode {
-                            infoMessage = "interactive terminal degraded to snapshot mode"
+                            infoMessage = "interactive terminal recovering..."
                         }
                         throw error
                     }
@@ -1102,9 +1185,6 @@ final class AppViewModel: ObservableObject {
         guard let pane = selectedPane else {
             return
         }
-        guard supportsNativeTmuxTerminal(for: pane) else {
-            return
-        }
 
         let paneID = pane.id
         markInteractiveInput(for: paneID)
@@ -1132,7 +1212,53 @@ final class AppViewModel: ObservableObject {
         let hasKey = !inputKey.isEmpty
         let hasBytes = !inputBytes.isEmpty
         let guardOptions = writeGuardOptions(for: pane)
-        if await shouldUseTerminalProxy(for: pane.id) {
+        let proxyProtocol = await preferredTerminalProxyProtocol(for: pane.id)
+        if proxyProtocol == .v2 {
+            guard !hasKey else {
+                throw InteractiveInputError(message: "interactive key input is not available in tty-v2 yet")
+            }
+            let bytes: [UInt8]
+            if hasBytes {
+                bytes = inputBytes
+            } else if hasText {
+                bytes = Array(inputText.utf8)
+            } else {
+                bytes = []
+            }
+            guard !bytes.isEmpty else {
+                return
+            }
+            do {
+                let session = try await ensureTTYV2Session(for: pane, generation: streamGeneration)
+                guard selectedPane?.id == pane.id else {
+                    return
+                }
+                markInteractiveInput(for: pane.id)
+                _ = try await session.write(
+                    paneRef: TTYV2PaneRef(
+                        target: pane.identity.target,
+                        sessionName: pane.identity.sessionName,
+                        windowID: pane.identity.windowID,
+                        paneID: pane.identity.paneID
+                    ),
+                    bytes: bytes
+                )
+                await terminalSessionController.recordSuccess(for: pane.id)
+                return
+            } catch {
+                if error is CancellationError {
+                    throw error
+                }
+                pendingInputLatencyStartByPaneID.removeValue(forKey: pane.id)
+                let outcome = await terminalSessionController.recordFailure(for: pane.id)
+                if outcome.didEnterDegradedMode {
+                    infoMessage = "interactive terminal recovering..."
+                }
+                throw error
+            }
+        }
+
+        if proxyProtocol == .v1 {
             do {
                 let sessionID = try await ensureTerminalProxySession(for: pane, generation: streamGeneration)
                 guard selectedPane?.id == pane.id else {
@@ -1189,7 +1315,7 @@ final class AppViewModel: ObservableObject {
                     await detachTerminalProxySession(sessionID: staleSessionID)
                 }
                 if outcome.didEnterDegradedMode {
-                    infoMessage = "interactive terminal degraded to snapshot mode"
+                    infoMessage = "interactive terminal recovering..."
                 }
                 throw error
             }
@@ -1257,12 +1383,27 @@ final class AppViewModel: ObservableObject {
                 return
             }
             do {
-                _ = try await self.client.terminalResize(
-                    target: pane.identity.target,
-                    paneID: pane.identity.paneID,
-                    cols: cols,
-                    rows: rows
-                )
+                let proxyProtocol = await self.preferredTerminalProxyProtocol(for: pane.id)
+                if proxyProtocol == .v2 {
+                    let session = try await self.ensureTTYV2Session(for: pane, generation: self.terminalStreamGeneration)
+                    _ = try await session.resize(
+                        paneRef: TTYV2PaneRef(
+                            target: pane.identity.target,
+                            sessionName: pane.identity.sessionName,
+                            windowID: pane.identity.windowID,
+                            paneID: pane.identity.paneID
+                        ),
+                        cols: cols,
+                        rows: rows
+                    )
+                } else if proxyProtocol == .v1 {
+                    _ = try await self.client.terminalResize(
+                        target: pane.identity.target,
+                        paneID: pane.identity.paneID,
+                        cols: cols,
+                        rows: rows
+                    )
+                }
             } catch {
                 // Keep resize errors non-blocking for typing interaction.
             }
@@ -1280,7 +1421,25 @@ final class AppViewModel: ObservableObject {
                     return
                 }
                 let streamGeneration = terminalStreamGeneration
-                if await shouldUseTerminalProxy(for: pane.id) {
+                let proxyProtocol = await preferredTerminalProxyProtocol(for: pane.id)
+                if proxyProtocol == .v2 {
+                    let session = try await ensureTTYV2Session(for: pane, generation: streamGeneration)
+                    if forceSnapshot {
+                        try await session.resync(
+                            paneRef: TTYV2PaneRef(
+                                target: pane.identity.target,
+                                sessionName: pane.identity.sessionName,
+                                windowID: pane.identity.windowID,
+                                paneID: pane.identity.paneID
+                            ),
+                            reason: "manual_view_output"
+                        )
+                        infoMessage = "tty-v2 resync requested"
+                    } else {
+                        infoMessage = "tty-v2 stream active"
+                    }
+                    await terminalSessionController.recordSuccess(for: pane.id)
+                } else if proxyProtocol == .v1 {
                     do {
                         if forceSnapshot {
                             await terminalSessionController.clearCursor(for: pane.id)
@@ -1321,7 +1480,7 @@ final class AppViewModel: ObservableObject {
                             await detachTerminalProxySession(sessionID: staleSessionID)
                         }
                         if outcome.didEnterDegradedMode {
-                            infoMessage = "interactive terminal degraded to snapshot mode"
+                            infoMessage = "interactive terminal recovering..."
                         }
                         throw error
                     }
@@ -2770,6 +2929,7 @@ final class AppViewModel: ObservableObject {
 
     private func restartTerminalStreamForSelectedPane() {
         terminalStreamTask?.cancel()
+        stopTTYV2Session()
         guard let pane = selectedPane else {
             return
         }
@@ -2777,11 +2937,23 @@ final class AppViewModel: ObservableObject {
         let generation = terminalStreamGeneration
         let paneID = pane.id
         terminalStreamTask = Task { [weak self] in
-            await self?.terminalStreamLoop(for: paneID, generation: generation)
+            await self?.terminalStreamLoopEntry(for: paneID, generation: generation)
         }
     }
 
-    private func terminalStreamLoop(for paneID: String, generation: Int) async {
+    private func terminalStreamLoopEntry(for paneID: String, generation: Int) async {
+        if await preferredTerminalProxyProtocol(for: paneID) == .v2 {
+            await terminalStreamLoopV2(for: paneID, generation: generation)
+            if Task.isCancelled || generation != terminalStreamGeneration || selectedPane?.id != paneID {
+                return
+            }
+        }
+        if allowTerminalV1Fallback {
+            await terminalStreamLoopV1(for: paneID, generation: generation)
+        }
+    }
+
+    private func terminalStreamLoopV1(for paneID: String, generation: Int) async {
         while !Task.isCancelled {
             guard generation == terminalStreamGeneration else {
                 return
@@ -2852,7 +3024,7 @@ final class AppViewModel: ObservableObject {
                 let outcome = await terminalSessionController.recordFailure(for: paneID)
                 if selectedPane?.id == paneID {
                     if outcome.didEnterDegradedMode {
-                        infoMessage = "interactive terminal degraded to snapshot mode"
+                        infoMessage = "interactive terminal recovering..."
                     } else {
                         infoMessage = "terminal stream reconnecting..."
                     }
@@ -2862,11 +3034,334 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    private func terminalStreamLoopV2(for paneID: String, generation: Int) async {
+        guard generation == terminalStreamGeneration, selectedPane?.id == paneID else {
+            return
+        }
+        while !Task.isCancelled {
+            guard generation == terminalStreamGeneration, selectedPane?.id == paneID else {
+                return
+            }
+            if ttyV2Session == nil || ttyV2ActivePaneID != paneID {
+                guard let pane = panes.first(where: { $0.id == paneID }) else {
+                    return
+                }
+                do {
+                    let startedAt = Date()
+                    _ = try await ensureTTYV2Session(for: pane, generation: generation)
+                    noteTerminalStreamRoundTrip(startedAt: startedAt)
+                    await terminalSessionController.recordSuccess(for: paneID)
+                } catch {
+                    if error is CancellationError || Task.isCancelled || generation != terminalStreamGeneration {
+                        return
+                    }
+                    let outcome = await terminalSessionController.recordFailure(for: paneID)
+                    if selectedPane?.id == paneID {
+                        if outcome.didEnterDegradedMode {
+                            infoMessage = "interactive terminal recovering..."
+                        } else {
+                            infoMessage = "tty-v2 stream reconnecting..."
+                        }
+                    }
+                    try? await Task.sleep(for: .milliseconds(outcome.delayMillis))
+                    continue
+                }
+            }
+            do {
+                try await Task.sleep(for: .milliseconds(250))
+            } catch {
+                return
+            }
+        }
+    }
+
+    private func stopTTYV2Session() {
+        ttyV2FrameTask?.cancel()
+        ttyV2FrameTask = nil
+        let session = ttyV2Session
+        ttyV2Session = nil
+        ttyV2ActivePaneID = nil
+        ttyV2ActivePaneRef = nil
+        if let session {
+            Task {
+                await session.close()
+            }
+        }
+    }
+
+    private func ensureTTYV2Session(for pane: PaneItem, generation: Int) async throws -> TTYV2TransportSession {
+        let paneRef = TTYV2PaneRef(
+            target: pane.identity.target,
+            sessionName: pane.identity.sessionName,
+            windowID: pane.identity.windowID,
+            paneID: pane.identity.paneID
+        )
+        if let session = ttyV2Session,
+           ttyV2ActivePaneID == pane.id,
+           ttyV2ActivePaneRef == paneRef {
+            return session
+        }
+
+        stopTTYV2Session()
+        let session = TTYV2TransportSession(socketPath: client.socketPath)
+        let frameStream = try await session.open()
+        guard generation == terminalStreamGeneration, selectedPane?.id == pane.id else {
+            await session.close()
+            throw CancellationError()
+        }
+        let attachCols: Int? = {
+            if let cols = lastKnownTerminalViewportCols, cols > 0 { return cols }
+            if let cols = terminalPaneCols, cols > 0 { return cols }
+            return 120
+        }()
+        let attachRows: Int? = {
+            if let rows = lastKnownTerminalViewportRows, rows > 0 { return rows }
+            if let rows = terminalPaneRows, rows > 0 { return rows }
+            return 40
+        }()
+        try await session.attach(
+            paneRef: paneRef,
+            cols: attachCols,
+            rows: attachRows
+        )
+        try await session.focus(paneRef: paneRef)
+        if let cols = lastKnownTerminalViewportCols,
+           let rows = lastKnownTerminalViewportRows,
+           cols > 0,
+           rows > 0 {
+            _ = try? await session.resize(paneRef: paneRef, cols: cols, rows: rows)
+        }
+
+        ttyV2Session = session
+        ttyV2ActivePaneID = pane.id
+        ttyV2ActivePaneRef = paneRef
+        ttyV2RenderModeByPaneID[pane.id] = .streamRecovering
+        ttyV2FrameTask = Task { [weak self] in
+            guard let self else {
+                return
+            }
+            do {
+                for try await frame in frameStream {
+                    await self.handleTTYV2Frame(frame, paneID: pane.id, generation: generation)
+                }
+            } catch {
+                await self.handleTTYV2StreamError(error, paneID: pane.id, generation: generation)
+            }
+        }
+        return session
+    }
+
+    private func handleTTYV2StreamError(_ error: Error, paneID: String, generation: Int) async {
+        if error is CancellationError || Task.isCancelled || generation != terminalStreamGeneration {
+            return
+        }
+        if ttyV2ActivePaneID == paneID {
+            stopTTYV2Session()
+        }
+        setTTYV2RenderMode(.streamRecovering, for: paneID)
+    }
+
+    private func handleTTYV2Frame(_ frame: TTYV2Frame, paneID: String, generation: Int) async {
+        guard generation == terminalStreamGeneration, selectedPane?.id == paneID else {
+            return
+        }
+        switch frame.type {
+        case "hello_ack":
+            await terminalSessionController.recordSuccess(for: paneID)
+        case "ack":
+            if let payload = try? frame.decodePayload(TTYV2AckPayload.self) {
+                applyTTYV2Ack(payload, paneID: paneID)
+            }
+        case "attached":
+            if let payload = try? frame.decodePayload(TTYV2AttachedPayload.self) {
+                applyTTYV2Attached(payload, paneID: paneID)
+            }
+            await terminalSessionController.recordSuccess(for: paneID)
+        case "output":
+            if let payload = try? frame.decodePayload(TTYV2OutputPayload.self) {
+                applyTTYV2Output(payload, paneID: paneID)
+            }
+            await terminalSessionController.recordSuccess(for: paneID)
+        case "state":
+            if let payload = try? frame.decodePayload(TTYV2StatePayload.self) {
+                applyTTYV2State(payload, paneID: paneID)
+            }
+        case "error":
+            if let payload = try? frame.decodePayload(TTYV2ErrorPayload.self) {
+                errorMessage = "tty-v2 error: \(payload.code): \(payload.message)"
+            } else {
+                errorMessage = "tty-v2 error"
+            }
+        case "detached":
+            if ttyV2ActivePaneID == paneID {
+                stopTTYV2Session()
+            }
+            if selectedPane?.id == paneID {
+                infoMessage = "tty-v2 detached"
+            }
+        default:
+            break
+        }
+    }
+
+    private func applyTTYV2Ack(_ payload: TTYV2AckPayload, paneID: String) {
+        guard selectedPane?.id == paneID else {
+            return
+        }
+        let kind = payload.ackKind.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let result = payload.resultCode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if result == "ok" {
+            return
+        }
+        if kind == "write" {
+            errorMessage = "tty-v2 write failed: \(result)"
+            return
+        }
+        if kind == "resize" {
+            infoMessage = "tty-v2 resize skipped: \(result)"
+            return
+        }
+        if kind == "resync" {
+            infoMessage = "tty-v2 resync: \(result)"
+        }
+    }
+
+    private func applyTTYV2Attached(_ payload: TTYV2AttachedPayload, paneID: String) {
+        guard selectedPane?.id == paneID else {
+            return
+        }
+        noteTerminalFrameApplied(for: paneID)
+        let source = normalizedToken(payload.snapshotMode) ?? "stream"
+        let content: String
+        if let b64 = payload.initialSnapshotANSIBase64,
+           let data = Data(base64Encoded: b64) {
+            content = String(decoding: data, as: UTF8.self)
+        } else {
+            content = ""
+        }
+        let frame = TTYV2RenderFrame(
+            content: content,
+            source: source,
+            cursorX: payload.cursorX,
+            cursorY: payload.cursorY,
+            paneCols: payload.paneCols,
+            paneRows: payload.paneRows
+        )
+        handleTTYV2RenderFrame(frame, paneID: paneID)
+    }
+
+    private func applyTTYV2Output(_ payload: TTYV2OutputPayload, paneID: String) {
+        guard selectedPane?.id == paneID else {
+            return
+        }
+        guard let data = Data(base64Encoded: payload.bytesBase64) else {
+            return
+        }
+        noteTerminalFrameApplied(for: paneID)
+        // Be resilient when daemon omits source: in tty-v2 stream mode
+        // output frames should be treated as live stream by default.
+        let source = normalizedToken(payload.source) ?? "bridge"
+        let frame = TTYV2RenderFrame(
+            content: String(decoding: data, as: UTF8.self),
+            source: source,
+            cursorX: payload.cursorX,
+            cursorY: payload.cursorY,
+            paneCols: payload.paneCols,
+            paneRows: payload.paneRows
+        )
+        handleTTYV2RenderFrame(frame, paneID: paneID)
+    }
+
+    private func handleTTYV2RenderFrame(_ frame: TTYV2RenderFrame, paneID: String) {
+        let mode = ttyV2RenderMode(for: paneID)
+        if isTTYV2LiveStreamSource(frame.source) {
+            if mode != .streamLive {
+                applyTTYV2ResetBarrier(paneID: paneID)
+            }
+            setTTYV2RenderMode(.streamLive, for: paneID)
+            applyTTYV2RenderFrameContent(frame, paneID: paneID)
+            return
+        }
+
+        if isTTYV2SnapshotLikeSource(frame.source) {
+            // Phase 27 stream-only selected-pane policy:
+            // ignore snapshot-like frames to avoid snapshot/stream VT mixing.
+            if mode != .streamRecovering {
+                setTTYV2RenderMode(.streamRecovering, for: paneID)
+            }
+            return
+        }
+
+        // Any non-snapshot frame while recovering should promote to live stream.
+        if mode == .streamRecovering {
+            setTTYV2RenderMode(.streamLive, for: paneID)
+        }
+        applyTTYV2RenderFrameContent(frame, paneID: paneID)
+    }
+
+    private func applyTTYV2RenderFrameContent(_ frame: TTYV2RenderFrame, paneID: String) {
+        terminalRenderSource = frame.source
+        setOutputPreviewIfChanged(frame.content)
+        trimOutputPreviewIfNeeded()
+        updateTerminalRenderMetadata(
+            cursorX: frame.cursorX,
+            cursorY: frame.cursorY,
+            paneCols: frame.paneCols,
+            paneRows: frame.paneRows,
+            clearCursorIfMissing: false
+        )
+        bumpTerminalRenderVersion()
+        updateTerminalRenderCache(for: paneID)
+    }
+
+    private func applyTTYV2ResetBarrier(paneID: String) {
+        terminalRenderSource = "reset"
+        setOutputPreviewIfChanged("")
+        bumpTerminalRenderVersion()
+        updateTerminalRenderCache(for: paneID)
+    }
+
+    private func isTTYV2SnapshotLikeSource(_ source: String) -> Bool {
+        switch source {
+        case "snapshot", "initial", "resync", "reset":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func isTTYV2LiveStreamSource(_ source: String) -> Bool {
+        switch source {
+        case "bridge", "pane_tap":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func ttyV2RenderMode(for paneID: String) -> TTYV2RenderMode {
+        ttyV2RenderModeByPaneID[paneID] ?? .streamRecovering
+    }
+
+    private func setTTYV2RenderMode(_ mode: TTYV2RenderMode, for paneID: String) {
+        ttyV2RenderModeByPaneID[paneID] = mode
+    }
+
+    private func applyTTYV2State(_ payload: TTYV2StatePayload, paneID: String) {
+        guard selectedPane?.id == paneID else {
+            return
+        }
+        if payload.state.activityState == "idle" {
+            // Keep state frames as heartbeat; rendering is output-driven.
+        }
+    }
+
     private func applyTerminalFrame(_ frame: TerminalFrame, paneID: String) {
         guard selectedPane?.id == paneID else {
             return
         }
         noteTerminalFrameApplied(for: paneID)
+        terminalRenderSource = normalizedToken(frame.frameType)
         updateTerminalRenderMetadata(
             cursorX: frame.cursorX,
             cursorY: frame.cursorY,
@@ -2883,6 +3378,7 @@ final class AppViewModel: ObservableObject {
             setOutputPreviewIfChanged(content)
         }
         trimOutputPreviewIfNeeded()
+        bumpTerminalRenderVersion()
         updateTerminalRenderCache(for: paneID)
     }
 
@@ -2891,6 +3387,7 @@ final class AppViewModel: ObservableObject {
             return
         }
         noteTerminalFrameApplied(for: paneID)
+        terminalRenderSource = normalizedToken(frame.frameType)
         updateTerminalRenderMetadata(
             cursorX: frame.cursorX,
             cursorY: frame.cursorY,
@@ -2926,6 +3423,7 @@ final class AppViewModel: ObservableObject {
             return
         }
         trimOutputPreviewIfNeeded()
+        bumpTerminalRenderVersion()
         updateTerminalRenderCache(for: paneID)
     }
 
@@ -2935,7 +3433,9 @@ final class AppViewModel: ObservableObject {
             cursorX: terminalCursorX,
             cursorY: terminalCursorY,
             paneCols: terminalPaneCols,
-            paneRows: terminalPaneRows
+            paneRows: terminalPaneRows,
+            source: terminalRenderSource,
+            version: terminalRenderVersion
         )
     }
 
@@ -2948,6 +3448,8 @@ final class AppViewModel: ObservableObject {
         setTerminalCursorYIfChanged(cached.cursorY)
         setTerminalPaneColsIfChanged(cached.paneCols)
         setTerminalPaneRowsIfChanged(cached.paneRows)
+        terminalRenderSource = cached.source
+        terminalRenderVersion = cached.version
         return true
     }
 
@@ -3013,6 +3515,14 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    private func bumpTerminalRenderVersion() {
+        if terminalRenderVersion == Int.max {
+            terminalRenderVersion = 1
+        } else {
+            terminalRenderVersion += 1
+        }
+    }
+
     private func ensureTerminalProxySession(for pane: PaneItem, generation: Int? = nil) async throws -> String {
         if let sessionID = await terminalSessionController.proxySession(for: pane.id), !sessionID.isEmpty {
             return sessionID
@@ -3055,15 +3565,30 @@ final class AppViewModel: ObservableObject {
         guard await terminalSessionController.shouldUseProxy(for: paneID) else {
             return false
         }
-        guard let caps = await fetchTerminalCapabilities() else {
-            // Capabilities fetch can transiently fail during daemon restarts.
-            // Keep embedded terminal usable by optimistically attempting proxy.
-            return true
+        return await preferredTerminalProxyProtocol(for: paneID) != .none
+    }
+
+    private func preferredTerminalProxyProtocol(for paneID: String) async -> TerminalProxyProtocol {
+        guard await terminalSessionController.shouldUseProxy(for: paneID) else {
+            return .none
         }
-        return shouldUseTerminalProxy(caps: caps)
+        guard let caps = await fetchTerminalCapabilities() else {
+            return allowTerminalV1Fallback ? .v1 : .none
+        }
+        if shouldUseTerminalProxyV2(caps: caps) {
+            return .v2
+        }
+        if allowTerminalV1Fallback && shouldUseTerminalProxyV1(caps: caps) {
+            return .v1
+        }
+        return .none
     }
 
     func shouldUseTerminalProxy(caps: CapabilityFlags) -> Bool {
+        shouldUseTerminalProxyV2(caps: caps) || (allowTerminalV1Fallback && shouldUseTerminalProxyV1(caps: caps))
+    }
+
+    private func shouldUseTerminalProxyV1(caps: CapabilityFlags) -> Bool {
         if !(caps.embeddedTerminal &&
             caps.terminalAttach &&
             caps.terminalWrite &&
@@ -3077,6 +3602,19 @@ final class AppViewModel: ObservableObject {
             return false
         }
         return true
+    }
+
+    private func shouldUseTerminalProxyV2(caps: CapabilityFlags) -> Bool {
+        if !(caps.embeddedTerminal &&
+            caps.terminalAttach &&
+            caps.terminalWrite &&
+            caps.terminalStream) {
+            return false
+        }
+        guard normalizedToken(caps.terminalProxyMode) == "daemon-proxy-pty-poc" else {
+            return false
+        }
+        return normalizedToken(caps.terminalFrameProtocol) == "tty-v2"
     }
 
     private struct WriteGuardOptions {
@@ -3809,7 +4347,12 @@ final class AppViewModel: ObservableObject {
 
     private var filteredPanes: [PaneItem] {
         var visiblePanes = panes.filter { !paneKillInFlightPaneIDs.contains($0.id) }
-        let hiddenCategories = hiddenStatusCategories()
+        var hiddenCategories = hiddenStatusCategories()
+        if statusFilter == .all {
+            // "All" should always include unmanaged panes, even if an older
+            // persisted preference still has hideUnmanagedCategory=true.
+            hiddenCategories.remove("unmanaged")
+        }
         visiblePanes = visiblePanes.filter { pane in
             let category = displayCategory(for: pane)
             guard !hiddenCategories.contains(category) else {

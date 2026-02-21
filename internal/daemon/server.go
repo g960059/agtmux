@@ -175,12 +175,15 @@ func NewServerWithDeps(cfg config.Config, store *db.Store, executor *target.Exec
 		mux.HandleFunc("/v1/sessions", s.sessionsHandler)
 		mux.HandleFunc("/v1/snapshot", s.snapshotHandler)
 		mux.HandleFunc("/v1/watch", s.watchHandler)
-		mux.HandleFunc("/v1/terminal/attach", s.terminalAttachHandler)
-		mux.HandleFunc("/v1/terminal/detach", s.terminalDetachHandler)
-		mux.HandleFunc("/v1/terminal/write", s.terminalWriteHandler)
-		mux.HandleFunc("/v1/terminal/stream", s.terminalStreamHandler)
-		mux.HandleFunc("/v1/terminal/read", s.terminalReadHandler)
-		mux.HandleFunc("/v1/terminal/resize", s.terminalResizeHandler)
+		mux.HandleFunc("/v2/tty/session", s.ttyV2SessionHandler)
+		if cfg.EnableLegacyTerminalV1 {
+			mux.HandleFunc("/v1/terminal/attach", s.terminalAttachHandler)
+			mux.HandleFunc("/v1/terminal/detach", s.terminalDetachHandler)
+			mux.HandleFunc("/v1/terminal/write", s.terminalWriteHandler)
+			mux.HandleFunc("/v1/terminal/stream", s.terminalStreamHandler)
+			mux.HandleFunc("/v1/terminal/read", s.terminalReadHandler)
+			mux.HandleFunc("/v1/terminal/resize", s.terminalResizeHandler)
+		}
 		mux.HandleFunc("/v1/actions/attach", s.attachActionHandler)
 		mux.HandleFunc("/v1/actions/send", s.sendActionHandler)
 		mux.HandleFunc("/v1/actions/view-output", s.viewOutputActionHandler)
@@ -305,8 +308,8 @@ func (s *Server) capabilitiesHandler(w http.ResponseWriter, r *http.Request) {
 			TerminalWrite:            true,
 			TerminalStream:           true,
 			TerminalProxyMode:        "daemon-proxy-pty-poc",
-			TerminalFrameProtocol:    "terminal-stream-v1",
-			TerminalFrameProtocolVer: "1",
+			TerminalFrameProtocol:    "tty-v2",
+			TerminalFrameProtocolVer: "2",
 		},
 	}
 	s.writeJSON(w, http.StatusOK, resp)

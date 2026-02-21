@@ -35,6 +35,7 @@ func main() {
 	cfg := config.DefaultConfig()
 	flag.StringVar(&cfg.SocketPath, "socket", cfg.SocketPath, "UDS path for agtmuxd")
 	flag.StringVar(&cfg.DBPath, "db", cfg.DBPath, "SQLite path")
+	flag.BoolVar(&cfg.EnableTTYV2PaneTap, "tty-v2-pane-tap", cfg.EnableTTYV2PaneTap, "enable tty-v2 pane tap stream path (experimental)")
 	flag.Parse()
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

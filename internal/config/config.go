@@ -9,6 +9,8 @@ import (
 type Config struct {
 	SocketPath              string
 	DBPath                  string
+	EnableLegacyTerminalV1  bool
+	EnableTTYV2PaneTap      bool
 	SnapshotTTL             time.Duration
 	CompletedDemotionAfter  time.Duration
 	StaleSignalTTL          time.Duration
@@ -31,6 +33,8 @@ func DefaultConfig() Config {
 	return Config{
 		SocketPath:              defaultSocketPath(),
 		DBPath:                  defaultDBPath(),
+		EnableLegacyTerminalV1:  false,
+		EnableTTYV2PaneTap:      true,
 		SnapshotTTL:             30 * time.Second,
 		CompletedDemotionAfter:  120 * time.Second,
 		StaleSignalTTL:          30 * time.Second,

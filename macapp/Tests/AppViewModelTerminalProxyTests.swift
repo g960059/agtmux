@@ -625,13 +625,15 @@ final class AppViewModelTerminalProxyTests: XCTestCase {
                 daemon: daemon,
                 client: client,
                 defaults: defaults,
-                autoStreamOnSelection: autoStreamOnSelection
+                autoStreamOnSelection: autoStreamOnSelection,
+                allowTerminalV1Fallback: true
             )
         case .useDefaultInitializer:
             model = AppViewModel(
                 daemon: daemon,
                 client: client,
-                defaults: defaults
+                defaults: defaults,
+                allowTerminalV1Fallback: true
             )
         }
         return ModelFixture(model: model, logURL: logURL)

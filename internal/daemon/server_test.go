@@ -247,8 +247,54 @@ func newAPITestServer(t *testing.T, runner target.Runner) (*Server, *db.Store) {
 	}
 	cfg := config.DefaultConfig()
 	cfg.CommandTimeout = 1 * time.Second
+	cfg.EnableLegacyTerminalV1 = true
 	executor := target.NewExecutorWithRunner(cfg, runner)
 	return NewServerWithDeps(cfg, store, executor), store
+}
+
+func TestTerminalV1EndpointsDisabledByDefault(t *testing.T) {
+	store, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := db.ApplyMigrations(context.Background(), store.DB()); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.CommandTimeout = time.Second
+	srv := NewServerWithDeps(cfg, store, target.NewExecutorWithRunner(cfg, &stubRunner{}))
+
+	rec := doJSONRequest(t, srv.httpSrv.Handler, http.MethodPost, "/v1/terminal/read", map[string]any{
+		"target":  "local",
+		"pane_id": "%1",
+		"lines":   80,
+	})
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 when legacy terminal endpoints are disabled, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestTerminalV1EndpointsEnabledWithConfig(t *testing.T) {
+	store, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := db.ApplyMigrations(context.Background(), store.DB()); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.CommandTimeout = time.Second
+	cfg.EnableLegacyTerminalV1 = true
+	srv := NewServerWithDeps(cfg, store, target.NewExecutorWithRunner(cfg, &stubRunner{}))
+
+	rec := doJSONRequest(t, srv.httpSrv.Handler, http.MethodGet, "/v1/terminal/read", nil)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected legacy terminal endpoint to be registered (405 on GET), got %d body=%s", rec.Code, rec.Body.String())
+	}
 }
 
 func doJSONRequest(t *testing.T, handler http.Handler, method, path string, body any) *httptest.ResponseRecorder {
@@ -3316,7 +3362,7 @@ func TestCapabilitiesEndpoint(t *testing.T) {
 	if !resp.Capabilities.TerminalAttach || !resp.Capabilities.TerminalWrite || !resp.Capabilities.TerminalStream {
 		t.Fatalf("expected interactive terminal capabilities, got %+v", resp.Capabilities)
 	}
-	if resp.Capabilities.TerminalFrameProtocol != "terminal-stream-v1" {
+	if resp.Capabilities.TerminalFrameProtocol != "tty-v2" {
 		t.Fatalf("unexpected terminal frame protocol: %+v", resp.Capabilities)
 	}
 }

@@ -491,6 +491,19 @@ final class AppViewModelSettingsTests: XCTestCase {
         XCTAssertEqual(sections.first?.sessionName, "s-managed")
     }
 
+    func testStatusFilterAllIncludesUnmanagedEvenWhenHideUnmanagedPreferenceIsTrue() throws {
+        let model = try makeModel()
+        let managedPane = makePane(paneID: "%1", displayCategory: "idle", sessionName: "s-managed")
+        let unmanagedPane = makePane(paneID: "%2", displayCategory: "unmanaged", sessionName: "s-unmanaged")
+        model.panes = [managedPane, unmanagedPane]
+        model.hideUnmanagedCategory = true
+        model.statusFilter = .all
+
+        let sections = model.sessionSections
+        XCTAssertEqual(sections.count, 2)
+        XCTAssertTrue(sections.contains(where: { $0.sessionName == "s-unmanaged" }))
+    }
+
     func testStatusFilterPinnedNarrowsToPinnedSessions() throws {
         let model = try makeModel()
         model.panes = [
@@ -956,8 +969,24 @@ final class AppViewModelSettingsTests: XCTestCase {
         XCTAssertFalse(labels.contains("Queue"))
     }
 
-    func testShouldUseTerminalProxyRequiresCanonicalValuesAfterNormalization() throws {
+    func testShouldUseTerminalProxyV1IsDisabledWithoutFallback() throws {
         let model = try makeModel()
+        let valid = CapabilityFlags(
+            embeddedTerminal: true,
+            terminalRead: true,
+            terminalResize: true,
+            terminalWriteViaActionSend: true,
+            terminalAttach: true,
+            terminalWrite: true,
+            terminalStream: true,
+            terminalProxyMode: "daemon-proxy-pty-poc",
+            terminalFrameProtocol: "terminal-stream-v1"
+        )
+        XCTAssertFalse(model.shouldUseTerminalProxy(caps: valid))
+    }
+
+    func testShouldUseTerminalProxyV1RequiresCanonicalValuesWhenFallbackEnabled() throws {
+        let model = try makeModel(allowTerminalV1Fallback: true)
         let valid = CapabilityFlags(
             embeddedTerminal: true,
             terminalRead: true,
@@ -1009,6 +1038,22 @@ final class AppViewModelSettingsTests: XCTestCase {
             terminalFrameProtocol: "snapshot-delta-reset"
         )
         XCTAssertFalse(model.shouldUseTerminalProxy(caps: wrongProtocol))
+    }
+
+    func testShouldUseTerminalProxyAcceptsTTYV2Protocol() throws {
+        let model = try makeModel()
+        let caps = CapabilityFlags(
+            embeddedTerminal: true,
+            terminalRead: true,
+            terminalResize: true,
+            terminalWriteViaActionSend: true,
+            terminalAttach: true,
+            terminalWrite: true,
+            terminalStream: true,
+            terminalProxyMode: "daemon-proxy-pty-poc",
+            terminalFrameProtocol: "tty-v2"
+        )
+        XCTAssertTrue(model.shouldUseTerminalProxy(caps: caps))
     }
 
     func testShouldAcceptTerminalAttachResponseRequiresCompletedAndSessionID() throws {
@@ -1514,6 +1559,7 @@ final class AppViewModelSettingsTests: XCTestCase {
     private func makeModel(
         defaults providedDefaults: UserDefaults? = nil,
         client providedClient: AGTMUXCLIClient? = nil,
+        allowTerminalV1Fallback: Bool = false,
         externalTerminalCommandRunner: @escaping AppViewModel.ExternalTerminalCommandRunner = { _, _ in "" }
     ) throws -> AppViewModel {
         let daemon = try DaemonManager(
@@ -1543,6 +1589,7 @@ final class AppViewModelSettingsTests: XCTestCase {
             daemon: daemon,
             client: client,
             defaults: defaults,
+            allowTerminalV1Fallback: allowTerminalV1Fallback,
             externalTerminalCommandRunner: externalTerminalCommandRunner
         )
     }
