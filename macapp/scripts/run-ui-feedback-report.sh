@@ -18,22 +18,22 @@ set +e
 STATUS=$?
 set -e
 
-SUMMARY_LINE="$(grep -E 'Executed [0-9]+ tests, with [0-9]+ tests skipped and [0-9]+ failures' "$LOG_FILE" | tail -n 1 || true)"
 SNAPSHOT_ERROR_COUNT="$(grep -c 'ui-snapshot-error:' "$LOG_FILE" || true)"
-PARSED_EXECUTED=""
-PARSED_SKIPPED=""
-PARSED_FAILURES=""
-if [[ -n "$SUMMARY_LINE" ]]; then
-  if [[ "$SUMMARY_LINE" =~ Executed[[:space:]]+([0-9]+)[[:space:]]+tests, ]]; then
-    PARSED_EXECUTED="${BASH_REMATCH[1]}"
-  fi
-  if [[ "$SUMMARY_LINE" =~ with[[:space:]]+([0-9]+)[[:space:]]+tests[[:space:]]+skipped ]]; then
-    PARSED_SKIPPED="${BASH_REMATCH[1]}"
-  fi
-  if [[ "$SUMMARY_LINE" =~ and[[:space:]]+([0-9]+)[[:space:]]+failures ]]; then
-    PARSED_FAILURES="${BASH_REMATCH[1]}"
-  fi
-fi
+RUNS_COMPLETED="$(grep -c '\[ui-loop\] run' "$LOG_FILE" || true)"
+read -r PARSED_EXECUTED PARSED_SKIPPED PARSED_FAILURES < <(
+  awk '
+    /Test Suite '\''AGTMUXDesktopUITests'\'' passed/ {capture=1; next}
+    capture && /Executed [0-9]+ tests, with [0-9]+ tests skipped and [0-9]+ failures/ {
+      executed += $2
+      skipped += $5
+      failures += $9
+      capture=0
+    }
+    END {
+      printf "%d %d %d\n", executed+0, skipped+0, failures+0
+    }
+  ' "$LOG_FILE"
+)
 
 {
   echo "# AGTMUX UI Feedback Report"
@@ -42,15 +42,10 @@ fi
   echo "- iterations: $ITERATIONS"
   echo "- status: $([ "$STATUS" -eq 0 ] && echo "PASS" || echo "FAIL")"
   echo "- capture_dir: $CAPTURE_DIR"
-  if [[ -n "$PARSED_EXECUTED" ]]; then
-    echo "- tests_executed: $PARSED_EXECUTED"
-  fi
-  if [[ -n "$PARSED_SKIPPED" ]]; then
-    echo "- tests_skipped: $PARSED_SKIPPED"
-  fi
-  if [[ -n "$PARSED_FAILURES" ]]; then
-    echo "- tests_failures: $PARSED_FAILURES"
-  fi
+  echo "- runs_completed: $RUNS_COMPLETED"
+  echo "- tests_executed: $PARSED_EXECUTED"
+  echo "- tests_skipped: $PARSED_SKIPPED"
+  echo "- tests_failures: $PARSED_FAILURES"
   echo "- ui_snapshot_errors: $SNAPSHOT_ERROR_COUNT"
   echo ""
   echo "## Latest Captures"

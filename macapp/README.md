@@ -113,7 +113,7 @@ AGTMUX_RUN_UI_TESTS=1 AGTMUX_UI_TEST_CAPTURE=1 ./scripts/run-ui-tests.sh
 
 - 既定出力先: `/tmp/agtmux-ui-feedback-report-<timestamp>.md`
 - 出力先変更: `AGTMUX_UI_REPORT_PATH=/path/to/report.md`
-- レポート先頭に `tests_executed` / `tests_skipped` / `tests_failures` / `ui_snapshot_errors` の実行サマリを出力します
+- レポート先頭に `runs_completed` / `tests_executed` / `tests_skipped` / `tests_failures` / `ui_snapshot_errors` の実行サマリを出力します
 
 実行ファイルの解決順:
 
