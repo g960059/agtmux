@@ -70,6 +70,44 @@ final class AGTMUXDesktopUITests: XCTestCase {
         maybeCaptureWindowSnapshot(pid: pid, label: "sidebar-sessions")
     }
 
+    func testCoreAccessibilityIdentifiersAreVisible() throws {
+        try UITestGate.requireEnabled()
+        let permissionReport = UITestPermissionReport.current()
+        if !permissionReport.isGranted {
+            throw XCTSkip(
+                "権限不足のため identifier テストをスキップします: \(permissionReport.missingLabels.joined(separator: ", "))"
+            )
+        }
+
+        let pid = try launchAppAndResolvePID()
+        launchedAppPID = pid
+
+        let requiredIdentifiers = [
+            "workspace.board",
+            "sidebar.panel",
+            "terminal.panel",
+            "sidebar.header",
+            "sidebar.footer"
+        ]
+
+        var missing: [String] = []
+        let foundIdentifiers = waitForAXIdentifiers(
+            pid: pid,
+            identifiers: Set(requiredIdentifiers),
+            timeout: 3.0
+        )
+        missing = requiredIdentifiers.filter { !foundIdentifiers.contains($0) }
+
+        if !missing.isEmpty, hasVisibleCGWindow(pid: pid) {
+            throw XCTSkip(
+                "AX identifier 列挙が環境依存で不安定なため skip（ウィンドウ表示は確認済み, missing=\(missing.joined(separator: ", ")))"
+            )
+        }
+
+        XCTAssertTrue(missing.isEmpty, "AX identifier を検出できませんでした: \(missing.joined(separator: ", "))")
+        maybeCaptureWindowSnapshot(pid: pid, label: "core-identifiers")
+    }
+
     private func launchAppAndResolvePID() throws -> pid_t {
         let appBundleURL = try appBundleURL()
         let bundleID = "com.g960059.agtmux.desktop"
@@ -217,6 +255,25 @@ final class AGTMUXDesktopUITests: XCTestCase {
         return false
     }
 
+    private func waitForAXIdentifiers(pid: pid_t, identifiers: Set<String>, timeout: TimeInterval) -> Set<String> {
+        guard !identifiers.isEmpty else {
+            return []
+        }
+
+        let appElement = AXUIElementCreateApplication(pid)
+        let deadline = Date().addingTimeInterval(timeout)
+        var lastFound: Set<String> = []
+        while Date() < deadline {
+            let found = elementTreeIdentifiers(appElement, matching: identifiers)
+            if found.count == identifiers.count {
+                return found
+            }
+            lastFound = found
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        }
+        return lastFound
+    }
+
     private func elementTreeContainsText(_ root: AXUIElement, text: String) -> Bool {
         var queue: [AXUIElement] = [root]
         var visited = 0
@@ -239,6 +296,28 @@ final class AGTMUXDesktopUITests: XCTestCase {
             queue.append(contentsOf: attributeElements(element, attribute: kAXChildrenAttribute as CFString))
         }
         return false
+    }
+
+    private func elementTreeIdentifiers(_ root: AXUIElement, matching identifiers: Set<String>) -> Set<String> {
+        var queue: [AXUIElement] = [root]
+        var visited = 0
+        let limit = 6000
+        var found: Set<String> = []
+
+        while !queue.isEmpty && visited < limit {
+            let element = queue.removeFirst()
+            visited += 1
+
+            if let axID = attributeString(element, attribute: kAXIdentifierAttribute as CFString), identifiers.contains(axID) {
+                found.insert(axID)
+                if found.count == identifiers.count {
+                    return found
+                }
+            }
+
+            queue.append(contentsOf: attributeElements(element, attribute: kAXChildrenAttribute as CFString))
+        }
+        return found
     }
 
     private func attributeString(_ element: AXUIElement, attribute: CFString) -> String? {

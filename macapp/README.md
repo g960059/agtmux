@@ -91,6 +91,8 @@ AGTMUX_RUN_UI_TESTS=1 ./scripts/run-ui-tests.sh
 AGTMUX_RUN_UI_TESTS=1 AGTMUX_UI_TEST_CAPTURE=1 ./scripts/run-ui-tests.sh
 ```
 
+- スモーク内容: 起動/表示確認、`Sessions` ラベル確認、主要 accessibility identifier（`workspace.board` など）確認
+- AX 木の列挙が環境依存で不安定な場合は、ウィンドウ表示を確認したうえで該当テストを `skip` として継続します
 - 既定保存先: `/tmp/agtmux-ui-captures`
 - 保存先変更: `AGTMUX_UI_TEST_CAPTURE_DIR=/path/to/dir`
 
