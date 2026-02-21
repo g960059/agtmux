@@ -103,6 +103,15 @@ AGTMUX_RUN_UI_TESTS=1 AGTMUX_UI_TEST_CAPTURE=1 ./scripts/run-ui-tests.sh
 - `5` は実行回数（省略時 `3`）
 - 間隔は `AGTMUX_UI_LOOP_DELAY_SECONDS`（既定 `2` 秒）
 
+実行結果を Markdown レポート化:
+
+```bash
+./scripts/run-ui-feedback-report.sh 1
+```
+
+- 既定出力先: `/tmp/agtmux-ui-feedback-report-<timestamp>.md`
+- 出力先変更: `AGTMUX_UI_REPORT_PATH=/path/to/report.md`
+
 実行ファイルの解決順:
 
 1. `AGTMUX_UI_TEST_APP_BUNDLE` で明示指定
