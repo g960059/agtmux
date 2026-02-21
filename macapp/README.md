@@ -85,6 +85,15 @@ AGTMUX_RUN_UI_TESTS=1 ./scripts/run-ui-tests.sh
 - VM の GUI ログイン内で `Terminal.app` か `Xcode` から実行してください。
 - セキュリティ最小化のため、UI テスト実行後は権限を外す運用を推奨します。
 
+任意でスクリーンショット保存を有効化できます。
+
+```bash
+AGTMUX_RUN_UI_TESTS=1 AGTMUX_UI_TEST_CAPTURE=1 ./scripts/run-ui-tests.sh
+```
+
+- 既定保存先: `/tmp/agtmux-ui-captures`
+- 保存先変更: `AGTMUX_UI_TEST_CAPTURE_DIR=/path/to/dir`
+
 実行ファイルの解決順:
 
 1. `AGTMUX_UI_TEST_APP_BUNDLE` で明示指定

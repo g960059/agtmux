@@ -329,6 +329,7 @@ private struct CockpitView: View {
             Rectangle()
                 .stroke(palette.workspaceStroke, lineWidth: 1)
         }
+        .accessibilityIdentifier("workspace.board")
     }
 
     private var paneNavigatorPanel: some View {
@@ -347,6 +348,7 @@ private struct CockpitView: View {
                 .fill(palette.sidebarDivider)
                 .frame(width: 1)
         }
+        .accessibilityIdentifier("sidebar.panel")
     }
 
     private var terminalWorkspacePanel: some View {
@@ -379,6 +381,7 @@ private struct CockpitView: View {
                     .padding(.top, 9)
                     .padding(.bottom, 8)
                     .transition(.opacity)
+                    .accessibilityIdentifier("terminal.header")
                 }
 
                 if let pane = model.selectedPane,
@@ -407,6 +410,7 @@ private struct CockpitView: View {
                             }
                         )
                         .id("native-terminal-\(pane.id)")
+                        .accessibilityIdentifier("terminal.native")
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .background(Color.clear)
                         .clipShape(Rectangle())
@@ -429,6 +433,7 @@ private struct CockpitView: View {
                         RoundedRectangle(cornerRadius: 10, style: .continuous)
                             .fill(palette.surfaceMuted)
                     )
+                    .accessibilityIdentifier("terminal.unsupported")
                 }
 
                 if !model.errorMessage.isEmpty {
@@ -459,6 +464,7 @@ private struct CockpitView: View {
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
                         .fill(palette.surfaceMuted)
                 )
+                .accessibilityIdentifier("terminal.empty")
             }
         }
         .frame(maxHeight: .infinity, alignment: .top)
@@ -469,6 +475,7 @@ private struct CockpitView: View {
             }
         }
         .clipped()
+        .accessibilityIdentifier("terminal.panel")
     }
 
     private var contentBoard: some View {
@@ -521,6 +528,7 @@ private struct CockpitView: View {
             .padding(.horizontal, 2)
         }
         .padding(.bottom, 2)
+        .accessibilityIdentifier("sidebar.status_filters")
     }
 
     private var sidebarSectionHeader: some View {
@@ -528,6 +536,7 @@ private struct CockpitView: View {
             Text("Sessions")
                 .font(.system(size: 15, weight: .semibold, design: .rounded))
                 .foregroundStyle(palette.textPrimary)
+                .accessibilityIdentifier("sidebar.sessions_title")
             Spacer(minLength: 0)
             Button {
                 resetAddTargetForm()
@@ -541,6 +550,7 @@ private struct CockpitView: View {
             }
             .buttonStyle(.plain)
             .help("Add target")
+            .accessibilityIdentifier("sidebar.add_target_button")
 
             Button {
                 showSortPopover.toggle()
@@ -553,12 +563,14 @@ private struct CockpitView: View {
             }
             .buttonStyle(.plain)
             .help("Organize")
+            .accessibilityIdentifier("sidebar.organize_button")
             .popover(isPresented: $showSortPopover, arrowEdge: .top) {
                 sortPopoverContent
             }
         }
         .padding(.horizontal, 2)
         .padding(.bottom, 8)
+        .accessibilityIdentifier("sidebar.header")
     }
 
     private var sidebarFooter: some View {
@@ -592,6 +604,7 @@ private struct CockpitView: View {
                 }
                 .buttonStyle(.plain)
                 .help("View settings")
+                .accessibilityIdentifier("sidebar.settings_button")
                 .popover(isPresented: $showSettingsPopover, arrowEdge: .bottom) {
                     settingsPopoverContent
                 }
@@ -605,6 +618,7 @@ private struct CockpitView: View {
         }
         .padding(.horizontal, 2)
         .padding(.bottom, 1)
+        .accessibilityIdentifier("sidebar.footer")
     }
 
     private func menuSectionTitle(_ title: String) -> some View {
@@ -924,6 +938,7 @@ private struct CockpitView: View {
                         }
                         .buttonStyle(.plain)
                         .help("Create New Pane")
+                        .accessibilityIdentifier("sidebar.session.\(section.id).create_pane")
                     }
                 }
                 .opacity(hovering ? 1 : 0)
@@ -968,6 +983,7 @@ private struct CockpitView: View {
                     requestSessionKill(section)
                 }
             }
+            .accessibilityIdentifier("sidebar.session.\(section.id)")
 
             if !collapsed {
                 paneList(
@@ -1164,6 +1180,7 @@ private struct CockpitView: View {
         }
         .help("\(pane.identity.target)/\(pane.identity.sessionName)/\(pane.identity.paneID)")
         .buttonStyle(.plain)
+        .accessibilityIdentifier("sidebar.pane.\(pane.id)")
     }
 
     private func windowGroups(for panes: [PaneItem]) -> [WindowPaneGroup] {

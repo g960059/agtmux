@@ -48,10 +48,33 @@ final class AGTMUXDesktopUITests: XCTestCase {
             timeout: 10.0
         )
         XCTAssertTrue(windowVisible, "起動後 10 秒以内に UI ウィンドウを検出できませんでした。")
+        maybeCaptureWindowSnapshot(pid: pid, label: "launch-window")
+    }
+
+    func testSidebarSessionsLabelIsVisible() throws {
+        try UITestGate.requireEnabled()
+        let permissionReport = UITestPermissionReport.current()
+        if !permissionReport.isGranted {
+            throw XCTSkip(
+                "権限不足のため sidebar テストをスキップします: \(permissionReport.missingLabels.joined(separator: ", "))"
+            )
+        }
+
+        let pid = try launchAppAndResolvePID()
+        launchedAppPID = pid
+        let found = waitForAXStaticText(pid: pid, text: "Sessions", timeout: 10.0)
+        XCTAssertTrue(found, "サイドバー内に Sessions ラベルを検出できませんでした。")
+        maybeCaptureWindowSnapshot(pid: pid, label: "sidebar-sessions")
     }
 
     private func launchAppAndResolvePID() throws -> pid_t {
         let appBundleURL = try appBundleURL()
+        let bundleID = "com.g960059.agtmux.desktop"
+
+        for app in NSRunningApplication.runningApplications(withBundleIdentifier: bundleID) {
+            app.terminate()
+        }
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
 
         let opener = Process()
         opener.executableURL = URL(fileURLWithPath: "/usr/bin/open")
@@ -69,7 +92,6 @@ final class AGTMUXDesktopUITests: XCTestCase {
             )
         }
 
-        let bundleID = "com.g960059.agtmux.desktop"
         let deadline = Date().addingTimeInterval(10.0)
         while Date() < deadline {
             let apps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
@@ -143,13 +165,17 @@ final class AGTMUXDesktopUITests: XCTestCase {
     }
 
     private func hasVisibleCGWindow(pid: pid_t) -> Bool {
+        firstVisibleCGWindowID(pid: pid) != nil
+    }
+
+    private func firstVisibleCGWindowID(pid: pid_t) -> CGWindowID? {
         guard
             let raw = CGWindowListCopyWindowInfo(
                 [.optionOnScreenOnly, .excludeDesktopElements],
                 kCGNullWindowID
             ) as? [[String: Any]]
         else {
-            return false
+            return nil
         }
 
         for window in raw {
@@ -160,6 +186,9 @@ final class AGTMUXDesktopUITests: XCTestCase {
             if alpha <= 0 {
                 continue
             }
+            guard let windowIDInt = window[kCGWindowNumber as String] as? Int else {
+                continue
+            }
             if
                 let bounds = window[kCGWindowBounds as String] as? [String: Any],
                 let width = bounds["Width"] as? Double,
@@ -167,9 +196,91 @@ final class AGTMUXDesktopUITests: XCTestCase {
                 width > 40,
                 height > 40
             {
-                return true
+                return CGWindowID(windowIDInt)
             }
         }
+        return nil
+    }
+
+    private func waitForAXStaticText(pid: pid_t, text: String, timeout: TimeInterval) -> Bool {
+        let appElement = AXUIElementCreateApplication(pid)
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if elementTreeContainsText(appElement, text: text) {
+                return true
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        }
         return false
+    }
+
+    private func elementTreeContainsText(_ root: AXUIElement, text: String) -> Bool {
+        var queue: [AXUIElement] = [root]
+        var visited = 0
+        let limit = 6000
+
+        while !queue.isEmpty && visited < limit {
+            let element = queue.removeFirst()
+            visited += 1
+
+            if let value = attributeString(element, attribute: kAXValueAttribute as CFString), value == text {
+                return true
+            }
+            if let title = attributeString(element, attribute: kAXTitleAttribute as CFString), title == text {
+                return true
+            }
+            if let description = attributeString(element, attribute: kAXDescriptionAttribute as CFString), description == text {
+                return true
+            }
+
+            queue.append(contentsOf: attributeElements(element, attribute: kAXChildrenAttribute as CFString))
+        }
+        return false
+    }
+
+    private func attributeString(_ element: AXUIElement, attribute: CFString) -> String? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success else {
+            return nil
+        }
+        return value as? String
+    }
+
+    private func attributeElements(_ element: AXUIElement, attribute: CFString) -> [AXUIElement] {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success else {
+            return []
+        }
+        return value as? [AXUIElement] ?? []
+    }
+
+    private func maybeCaptureWindowSnapshot(pid: pid_t, label: String) {
+        guard ProcessInfo.processInfo.environment["AGTMUX_UI_TEST_CAPTURE"] == "1" else {
+            return
+        }
+        guard let windowID = firstVisibleCGWindowID(pid: pid) else {
+            return
+        }
+
+        let fm = FileManager.default
+        let customDir = ProcessInfo.processInfo.environment["AGTMUX_UI_TEST_CAPTURE_DIR"]
+        let outputDir = URL(fileURLWithPath: customDir?.isEmpty == false ? customDir! : "/tmp/agtmux-ui-captures", isDirectory: true)
+        do {
+            try fm.createDirectory(at: outputDir, withIntermediateDirectories: true)
+            let ts = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+            let out = outputDir.appendingPathComponent("\(ts)-\(label).png")
+            let capture = Process()
+            capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+            capture.arguments = ["-x", "-l", String(windowID), out.path]
+            try capture.run()
+            capture.waitUntilExit()
+            if capture.terminationStatus == 0 {
+                print("ui-snapshot: \(out.path)")
+            } else {
+                print("ui-snapshot-error: screencapture exit=\(capture.terminationStatus)")
+            }
+        } catch {
+            print("ui-snapshot-error: \(error.localizedDescription)")
+        }
     }
 }
