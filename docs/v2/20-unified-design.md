@@ -135,6 +135,18 @@ v2 は UI host を次で固定する。
 2. custom terminal renderer の再発リスクを避けるため
 3. tmux operations UX への開発リソース集中のため
 
+## 9.0.1 Fork implementation model (fixed)
+
+fork 実装モデルを次で固定する。
+
+1. `wezterm-gui` を **renderer host** として使う
+2. AGTMUX 専用機能は `agtmux UI layer` として fork 内に追加する
+3. `wezterm mux` は置換しない（直接改造しない）
+4. tmux topology は daemon の `topology_sync/delta` を唯一の正とする
+5. desktop は `AgtmuxRuntimeBridge` で protocol v3 と terminal feed を接続する
+
+この境界の詳細は `./adr/ADR-0004-wezterm-fork-integration-boundary.md` と `./specs/74-fork-surface-map.md` を正本とする。
+
 ## 9.1 Runtime components
 
 1. `agtmuxd-rs` daemon
@@ -174,6 +186,23 @@ v2 は UI host を次で固定する。
 2. daemon/client の terminal 二重状態管理
 3. snapshotベース active redraw
 4. `WezTerm thin integration`（forkなし混成構成）
+5. `wezterm mux` 全面差し替え
+
+## 9.6 Fork surface governance
+
+1. 通常変更は `specs/74-fork-surface-map.md` の allowed zones に限定する
+2. restricted zones の変更は ADR 承認前に行わない
+3. CI で restricted zone 変更を検知し、ADR 未添付なら fail する
+4. fork update window（ADR-0001）ごとに replay gate を必須実行する
+
+## 9.7 Fork source integration model
+
+1. core repo と fork repo を分離する（two-repo model）
+2. core repo は `third_party/wezterm` submodule pin で fork を参照する
+3. desktop host は fork 側 `wezterm-gui` の AGTMUX mode を使う
+4. `apps/desktop-launcher` は起動・配布補助に限定する
+
+詳細は `./adr/ADR-0005-fork-source-integration-model.md` を正本とする。
 
 ## 10. Protocol v3
 
@@ -295,8 +324,10 @@ DnD drop targets:
 ## 14. Workspace Layout
 
 ```text
-agtmux-rs/
+agtmux/
   Cargo.toml
+  third_party/
+    wezterm/
   crates/
     agtmux-protocol/
     agtmux-target/
@@ -307,7 +338,9 @@ agtmux-rs/
     agtmux-daemon/
     agtmux-cli/
   apps/
-    agtmux-desktop/
+    desktop-launcher/
+  scripts/
+    ui-feedback/
   docs/
     architecture/
     implementation-records/
@@ -322,6 +355,8 @@ agtmux-rs/
 4. pane switch p95 < 120ms
 5. layout mutate commit p95 < 250ms
 6. selected stream gap p95 < 40ms
+
+実装段階での暫定閾値は `./specs/71-quality-gates.md` の stage gate を使う。
 
 ## 16. Metrics and Gates
 
@@ -363,6 +398,14 @@ Merge gates:
 4. ssh jitter -> target isolation + retry/backoff
 5. update regression -> replay suite + fast rollback
 6. fork scope creep -> fork surface map + owner rule + ADR gate
+
+Accepted ADRs:
+
+1. `./adr/ADR-0001-wezterm-fork-branch-strategy.md`
+2. `./adr/ADR-0002-ssh-tunnel-framing.md`
+3. `./adr/ADR-0003-notification-scope.md`
+4. `./adr/ADR-0004-wezterm-fork-integration-boundary.md`
+5. `./adr/ADR-0005-fork-source-integration-model.md`
 
 ## 19. Decision Policy
 

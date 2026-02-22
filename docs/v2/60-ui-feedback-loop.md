@@ -119,7 +119,7 @@ UIスモーク対象コンポーネントには identifier を付与し、文言
 UIを触るPRでは、最低限次を満たす。
 
 1. `swift test` pass
-2. GUIセッションで `run-ui-feedback-report.sh 1` 実行
+2. GUIセッションで `scripts/ui-feedback/run-ui-feedback-report.sh 1` 実行
 3. `tests_failures = 0`
 4. report artifact をPR説明に添付
 

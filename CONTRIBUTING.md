@@ -24,6 +24,7 @@
 3. local echo しない
 4. cursor/IME/scroll を app 側で推定しない
 5. `wezterm-gui fork` 一本（thin integration は不採用）
+6. fork改造範囲は `docs/v2/specs/74-fork-surface-map.md` を超えない
 
 ## Document Editing Rules
 
@@ -32,7 +33,10 @@
 3. 実装順序・ゲートの正本は `docs/v2/40-execution-plan.md`
 4. 教訓・再発防止は `docs/v2/50-poc-learnings.md`
 5. UI検証運用は `docs/v2/60-ui-feedback-loop.md`
-6. 過去資料は `docs/v2/references/` のみ
+6. wire/gate/bootstrap は `docs/v2/specs/` を正本にする
+7. ADR決定は `docs/v2/adr/` を正本にする
+8. 過去資料は `docs/v2/references/` のみ
+9. fork境界は `docs/v2/specs/74-fork-surface-map.md` を正本にする
 
 ## Naming and Indexing
 
@@ -45,6 +49,8 @@
 5. `40-` execution plan
 6. `50-` learnings
 7. `60-` operational guides
+8. `specs/` fixed technical contracts
+9. `adr/` accepted decisions
 
 新規ファイルが必要な場合は `60-` 以降を使う。
 

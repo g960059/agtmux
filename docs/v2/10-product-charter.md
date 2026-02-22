@@ -63,6 +63,7 @@ AGTMUX は、tmux を使った複数エージェント運用で発生する以�
 4. cursor/IME/scroll は terminal engine を真実源とし、推定しない
 5. control plane と data plane を分離する
 6. target 障害時も全体表示は partial result で継続する
+7. fork戦略は `renderer host + agtmux UI layer` 境界を維持し、terminal core/mux core を安易に改造しない
 
 ## 6. UX 不変条件（Product Invariants）
 

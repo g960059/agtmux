@@ -10,6 +10,29 @@ v2をゼロから実装開始し、MVP到達までの順序とゲートを固定
 
 ## 2. Phase Plan
 
+## Phase A0: Fork Bootstrap
+
+1. `wezterm-gui fork` 作成（long-lived `fork/main`）
+2. `third_party/wezterm` submodule pin 導入
+3. `specs/74-fork-surface-map.md` の allowed/restricted チェックを CI 追加
+4. `scripts/ci/check-submodule-window.sh` / `scripts/ci/check-fork-surface.sh` の雛形作成
+
+Gate:
+
+1. fork/main build pass
+2. restricted zone change check pass
+
+## Phase A1: Fork Hook Map Spike
+
+1. `specs/75-fork-hook-map-spike.md` の成果物を作成
+2. file/function-level hook points を確定
+3. Phase C 実装範囲を hook map に固定
+
+Gate:
+
+1. hook map sufficient 判定 pass
+2. Phase C で追加調査不要な状態を確認
+
 ## Phase A: Foundation
 
 1. Rust workspace作成
@@ -35,13 +58,15 @@ Gate:
 ## Phase C: Desktop Terminal
 
 1. `wezterm-gui fork` 統合
-2. attach/focus/write/resize
-3. IME preedit/commit
+2. `AgtmuxRuntimeBridge` / `TerminalFeedRouter` 実装
+3. attach/focus/write/resize
+4. IME preedit/commit
 
 Gate:
 
 1. cursor/scroll/IME replay pass
-2. local input p95 < 25ms
+2. `71-quality-gates.md` の **Dev Gate** を満たす
+3. restricted zone modifications = 0 (or ADR attached)
 
 ## Phase D: Sidebar + Window UX
 
@@ -73,8 +98,7 @@ Gate:
 
 Gate:
 
-1. status precision gate pass
-2. attention precision gate pass
+1. `71-quality-gates.md` の **Beta Gate**（state/attention）を満たす
 
 ## Phase G: Multi-target Hardening
 
@@ -85,13 +109,27 @@ Gate:
 Gate:
 
 1. local unaffected under ssh failure
-2. perf gate pass
+2. `71-quality-gates.md` の **Release Gate** を満たす
+
+## Phase H: Hotpath Framing Decision
+
+1. `specs/76-output-hotpath-framing-policy.md` に従い計測
+2. MessagePack 維持 or `output_raw` 導入を ADR で決定
+3. 導入時は protocol spec 更新と回帰計測を実施
+
+Gate:
+
+1. decision ADR merged
+2. SLO 達成を再確認
 
 ## 3. Bootstrap Commands
 
 ```bash
-mkdir -p agtmux-rs/{crates,apps,docs}
-cd agtmux-rs
+cd /Users/virtualmachine/ghq/github.com/g960059/agtmux
+
+cargo init --vcs none .
+mkdir -p crates apps scripts/ui-feedback
+
 cargo new --lib crates/agtmux-protocol
 cargo new --lib crates/agtmux-target
 cargo new --lib crates/agtmux-tmux
@@ -100,8 +138,12 @@ cargo new --lib crates/agtmux-agent-adapters
 cargo new --lib crates/agtmux-store
 cargo new --bin crates/agtmux-daemon
 cargo new --bin crates/agtmux-cli
-cargo new --bin apps/agtmux-desktop
+cargo new --bin apps/desktop-launcher
+git submodule add <YOUR_WEZTERM_FORK_URL> third_party/wezterm
+git -C third_party/wezterm checkout <PINNED_COMMIT_OR_TAG>
 ```
+
+レイアウトの正本は `./specs/72-bootstrap-workspace.md` を参照。
 
 ## 4. Cross-cutting UI Feedback Loop
 
@@ -127,6 +169,8 @@ Preflight:
 1. `10-product-charter.md` を確認
 2. `20-unified-design.md` の fork一本方針を確認
 3. `30-detailed-design.md` の invariants を確認
+4. `specs/74-fork-surface-map.md` の allowed/restricted を確認
+5. `specs/75-fork-hook-map-spike.md` の要件を確認（Phase C着手前）
 
 Implementation:
 
@@ -140,6 +184,7 @@ Validation:
 2. layout rollback tests
 3. ssh partial-result tests
 4. UI feedback report (`tests_failures = 0`)
+5. phase 対応 gate (`./specs/71-quality-gates.md`) 達成
 
 Release:
 

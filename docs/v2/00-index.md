@@ -18,6 +18,28 @@ Status: Active
 POCで何が壊れたかを確認したい時だけ読む。
 2. `60-ui-feedback-loop.md`  
 UI検証ループ（権限/TCC/skip運用/レポート）を整備する時だけ読む。
+3. `specs/70-protocol-v3-wire-spec.md`  
+wire実装時に必読。
+4. `specs/71-quality-gates.md`  
+gate閾値を確認する時に読む。
+5. `specs/72-bootstrap-workspace.md`  
+ゼロからworkspace作成時に読む。
+6. `specs/73-notification-sink-extension.md`  
+v2.1 で webhook 拡張を実装する時に読む。
+7. `specs/74-fork-surface-map.md`  
+fork 改造範囲と禁止範囲を確認する時に読む。
+8. `specs/75-fork-hook-map-spike.md`  
+Phase C 前に fork の hook 点を確定する時に読む。
+9. `specs/76-output-hotpath-framing-policy.md`  
+output hotpath を MessagePack のまま維持するか判定する時に読む。
+
+## Decisions (Accepted ADRs)
+
+1. `adr/ADR-0001-wezterm-fork-branch-strategy.md`
+2. `adr/ADR-0002-ssh-tunnel-framing.md`
+3. `adr/ADR-0003-notification-scope.md`
+4. `adr/ADR-0004-wezterm-fork-integration-boundary.md`
+5. `adr/ADR-0005-fork-source-integration-model.md`
 
 ## Historical References (Do Not Read By Default)
 

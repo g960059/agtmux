@@ -15,4 +15,6 @@ v2設計の必読セット:
 
 1. `docs/v2/50-poc-learnings.md`
 2. `docs/v2/60-ui-feedback-loop.md`
-3. `docs/v2/references/*`（必要時のみ）
+3. `docs/v2/specs/*`（wire/gate/bootstrapの実装時）
+4. `docs/v2/adr/*`（意思決定の根拠確認時）
+5. `docs/v2/references/*`（必要時のみ）

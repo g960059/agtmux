@@ -22,8 +22,10 @@ Depends on: `./10-product-charter.md`, `./20-unified-design.md`
 ## 3. Workspace and Package Layout
 
 ```text
-agtmux-rs/
+agtmux/
   Cargo.toml
+  third_party/
+    wezterm/
   crates/
     agtmux-protocol/
     agtmux-target/
@@ -34,8 +36,30 @@ agtmux-rs/
     agtmux-daemon/
     agtmux-cli/
   apps/
-    agtmux-desktop/
+    desktop-launcher/
+  scripts/
+    ui-feedback/
 ```
+
+## 3.1 Fork Integration Boundary
+
+fork 実装は次を固定する（詳細正本: `./specs/74-fork-surface-map.md`）。
+
+1. fork 側 `wezterm-gui` を renderer/input host として利用する
+2. AGTMUX UX（sidebar/menu/DnD）は fork repo の allowed zones に実装する
+3. daemon 接続は fork repo の integration layer に実装する
+4. `wezterm mux` は置換せず、desktop 側で projection model を構築する
+5. tmux topology は daemon 由来イベントのみを採用する
+6. `termwiz` / `wezterm-term` / parser core / mux core の変更は ADR 必須
+
+Runtime bridge 分担:
+
+1. `AgtmuxRuntimeBridge`: protocol v3 の encode/decode, attach session lifecycle
+2. `TerminalFeedRouter`: paneごとの output seq 適用と stale frame drop
+3. `InputRouter`: write/resize/focus を daemon API に変換
+4. `TopologyProjectionStore`: session/window/pane の UI 投影を管理
+
+fork 実体の取り込み方式は `ADR-0005`、改造範囲は `specs/74` を正本とする。
 
 ## 4. Data Model
 
@@ -57,7 +81,7 @@ CREATE TABLE targets (
   target_id TEXT PRIMARY KEY,
   name TEXT NOT NULL UNIQUE,
   kind TEXT NOT NULL CHECK(kind IN ('local','ssh')),
-  connection_ref TEXT NOT NULL,
+  connection_ref TEXT NOT NULL DEFAULT 'local',
   health TEXT NOT NULL CHECK(health IN ('ok','degraded','down')),
   last_seen_at TEXT,
   updated_at TEXT NOT NULL
@@ -118,7 +142,8 @@ CREATE TABLE runtimes (
   source TEXT NOT NULL CHECK(source IN ('hook','wrapper','adapter','heuristic')),
   title TEXT NOT NULL DEFAULT '',
   last_event_at TEXT,
-  confidence REAL NOT NULL DEFAULT 0.0
+  confidence REAL NOT NULL DEFAULT 0.0,
+  FOREIGN KEY (target_id, session_id, window_id, pane_id) REFERENCES panes(target_id, session_id, window_id, pane_id) ON DELETE CASCADE
 );
 
 CREATE TABLE runtime_states (
@@ -139,6 +164,7 @@ CREATE TABLE layout_mutations (
   status TEXT NOT NULL CHECK(status IN ('pending','committed','reverted','failed')),
   requested_by TEXT NOT NULL,
   payload_json TEXT NOT NULL,
+  topology_snapshot_json TEXT NOT NULL,
   error_text TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -161,8 +187,12 @@ CREATE TABLE attention_events (
 2. `runtime_states` は state engine のみ書き込み可能
 3. `layout_mutations` は必ず terminal topology snapshot を持つ
 4. `manual_order` は user action でのみ更新
+5. `targets.connection_ref` は `local` target では `local` を使う
+6. `targets.connection_ref` は `ssh` target では接続プロファイルIDを使う
 
 ## 5. Protocol v3 Detailed Contract
+
+wire-level fixed spec は `./specs/70-protocol-v3-wire-spec.md` を正本とする。
 
 ## 5.1 Transport
 
@@ -264,6 +294,8 @@ CREATE TABLE attention_events (
 
 ## 8. Performance and Reliability Plan
 
+定量gateの正本は `./specs/71-quality-gates.md` を参照。
+
 ## 8.1 Targets
 
 1. local input p95 < 20ms
@@ -291,6 +323,12 @@ CREATE TABLE attention_events (
 2. protocol crate with unit tests
 3. store crate + migrations
 
+## Phase A1: Fork Hook Map Spike (2-3 days)
+
+1. `specs/75-fork-hook-map-spike.md` 成果物を作成
+2. file/function-level hook points を確定
+3. hook map を Phase C の実装入力として固定
+
 Exit criteria:
 
 1. protocol round-trip test pass
@@ -309,14 +347,23 @@ Exit criteria:
 
 ## Phase C: Desktop Terminal (1-2 weeks)
 
-1. wezterm-gui fork integration
-2. attach/focus/write/resize path
-3. IME basic preedit/commit
+1. wezterm-gui fork integration skeleton
+2. runtime bridge (`AgtmuxRuntimeBridge`, `TerminalFeedRouter`, `InputRouter`)
+3. attach/focus/write/resize path
+4. IME basic preedit/commit
+5. allowed/restricted path CI check導入
 
 Exit criteria:
 
 1. cursor/scroll/IME replay tests pass
-2. local input p95 < 25ms
+2. quality gate の Dev stage pass
+3. restricted zone 変更が 0（または ADR 付きのみ）
+
+## Phase H: Output Hotpath Decision (2-3 days)
+
+1. `specs/76-output-hotpath-framing-policy.md` に従い計測
+2. MessagePack 維持 or `output_raw` 導入を ADR で決定
+3. protocol spec と回帰計測結果を更新
 
 ## Phase D: Sidebar/Window UX (1 week)
 
@@ -347,8 +394,7 @@ Exit criteria:
 
 Exit criteria:
 
-1. status precision budget pass
-2. attention precision budget pass
+1. quality gate の Beta stage（state/attention）pass
 
 ## Phase G: Multi-target Hardening (1 week)
 
@@ -359,6 +405,7 @@ Exit criteria:
 Exit criteria:
 
 1. local unaffected under ssh failure
+2. quality gates pass (`./specs/71-quality-gates.md`)
 
 ## 10. Test Matrix
 
@@ -385,16 +432,18 @@ Exit criteria:
 
 1. GUIセッション実行のみ許可（SSH実行禁止）
 2. `AGTMUX_RUN_UI_TESTS=1` opt-in でUI testsを起動
-3. `run-ui-feedback-report.sh` で loop 実行とmarkdown artifactを生成
+3. `scripts/ui-feedback/run-ui-feedback-report.sh` で loop 実行とmarkdown artifactを生成
 4. report の `tests_failures=0` を UI変更PR の必須条件にする
 5. AX列挙の環境揺れは `window visible` 確認後に skip 許容
 6. `ui_snapshot_errors` は fail ではなく診断指標として集計
 
-## 11. Open Decisions (Need explicit ADR)
+## 11. Decision Resolution (ADR)
 
-1. wezterm fork branch strategy (long-lived vs rebase windows)
-2. ssh tunnel framing detail
-3. notification channel scope (app only vs external webhook)
+1. fork branch strategy: `./adr/ADR-0001-wezterm-fork-branch-strategy.md`
+2. ssh framing: `./adr/ADR-0002-ssh-tunnel-framing.md`
+3. notification scope: `./adr/ADR-0003-notification-scope.md`
+4. fork integration boundary: `./adr/ADR-0004-wezterm-fork-integration-boundary.md`
+5. fork source integration model: `./adr/ADR-0005-fork-source-integration-model.md`
 
 ## 12. Definition of Ready (Before coding)
 
@@ -402,4 +451,7 @@ Exit criteria:
 2. protocol v3 draft fixed
 3. schema migration test ready
 4. first E2E fixture prepared
-5. UI feedback loop script set ready (`run-ui-tests.sh`, `run-ui-loop.sh`, `run-ui-feedback-report.sh`)
+5. UI feedback loop script set ready (`scripts/ui-feedback/run-ui-tests.sh`, `scripts/ui-feedback/run-ui-loop.sh`, `scripts/ui-feedback/run-ui-feedback-report.sh`)
+6. workspace bootstrap path fixed (`./specs/72-bootstrap-workspace.md`)
+7. fork surface map confirmed (`./specs/74-fork-surface-map.md`)
+8. fork hook map spike completed (`./specs/75-fork-hook-map-spike.md`)

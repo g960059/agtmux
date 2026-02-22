@@ -20,6 +20,7 @@
 4. cursor/IME/scroll を app 側で推定しない
 5. data plane と control plane を分離する
 6. `wezterm-gui fork` 一本（thin integration は採用しない）
+7. fork改造範囲は `docs/v2/specs/74-fork-surface-map.md` に従う
 
 ## 3. 変更管理ルール
 
@@ -37,6 +38,9 @@
 2. Data Model / protocol: `docs/v2/30-detailed-design.md`
 3. 実装順序 / gate: `docs/v2/40-execution-plan.md`
 4. 教訓 / 再発防止: `docs/v2/50-poc-learnings.md`
+5. wire/gate/bootstrap: `docs/v2/specs/*`
+6. 意思決定: `docs/v2/adr/*`
+7. fork境界: `docs/v2/specs/74-fork-surface-map.md`
 
 過去資料は `docs/v2/references/*` に隔離し、通常作業では読まない。
 
@@ -59,4 +63,3 @@
 1. 新規設計文書は `docs/v2` 配下に追加する
 2. 番号付き命名を維持する（`60-` 以降を使用）
 3. 実験メモや比較資料は `docs/v2/references` に置く
-
