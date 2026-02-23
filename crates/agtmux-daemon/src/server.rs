@@ -5,6 +5,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, RwLock};
+use tokio_util::sync::CancellationToken;
 
 use crate::orchestrator::StateNotification;
 
@@ -109,6 +110,8 @@ pub struct DaemonServer {
     socket_path: PathBuf,
     state: SharedState,
     notify_tx: broadcast::Sender<StateNotification>,
+    /// Cancellation token for graceful shutdown.
+    cancel: CancellationToken,
 }
 
 impl DaemonServer {
@@ -123,16 +126,26 @@ impl DaemonServer {
         state: SharedState,
         notify_tx: broadcast::Sender<StateNotification>,
     ) -> Self {
+        Self::with_cancel(socket_path, state, notify_tx, CancellationToken::new())
+    }
+
+    /// Create a server with an explicit cancellation token for graceful shutdown.
+    pub fn with_cancel(
+        socket_path: impl Into<PathBuf>,
+        state: SharedState,
+        notify_tx: broadcast::Sender<StateNotification>,
+        cancel: CancellationToken,
+    ) -> Self {
         Self {
             socket_path: socket_path.into(),
             state,
             notify_tx,
+            cancel,
         }
     }
 
-    /// Run the server: bind the listener and accept connections forever.
-    ///
-    /// This method only returns on fatal listener errors.
+    /// Run the server: bind the listener and accept connections until
+    /// cancelled or a fatal listener error occurs.
     pub async fn run(self) -> std::io::Result<()> {
         // Ensure parent directory exists.
         if let Some(parent) = self.socket_path.parent() {
@@ -146,21 +159,31 @@ impl DaemonServer {
         tracing::info!(path = %self.socket_path.display(), "daemon server listening");
 
         loop {
-            match listener.accept().await {
-                Ok((stream, _addr)) => {
-                    let state = Arc::clone(&self.state);
-                    let notify_rx = self.notify_tx.subscribe();
-                    tokio::spawn(async move {
-                        if let Err(e) = handle_client(stream, state, notify_rx).await {
-                            tracing::debug!(error = %e, "client handler finished with error");
+            tokio::select! {
+                result = listener.accept() => {
+                    match result {
+                        Ok((stream, _addr)) => {
+                            let state = Arc::clone(&self.state);
+                            let notify_rx = self.notify_tx.subscribe();
+                            tokio::spawn(async move {
+                                if let Err(e) = handle_client(stream, state, notify_rx).await {
+                                    tracing::debug!(error = %e, "client handler finished with error");
+                                }
+                            });
                         }
-                    });
+                        Err(e) => {
+                            tracing::error!(error = %e, "accept failed");
+                        }
+                    }
                 }
-                Err(e) => {
-                    tracing::error!(error = %e, "accept failed");
+                _ = self.cancel.cancelled() => {
+                    tracing::info!("daemon server: cancellation requested, shutting down");
+                    break;
                 }
             }
         }
+
+        Ok(())
     }
 }
 

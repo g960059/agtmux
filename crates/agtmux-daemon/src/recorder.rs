@@ -4,6 +4,7 @@ use std::path::Path;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
 
 use crate::orchestrator::StateNotification;
 
@@ -20,6 +21,8 @@ pub struct RecordedEvent {
 pub struct Recorder {
     writer: std::fs::File,
     rx: broadcast::Receiver<StateNotification>,
+    /// Cancellation token for graceful shutdown.
+    cancel: CancellationToken,
 }
 
 impl Recorder {
@@ -27,38 +30,56 @@ impl Recorder {
         path: &Path,
         rx: broadcast::Receiver<StateNotification>,
     ) -> std::io::Result<Self> {
-        let writer = std::fs::File::create(path)?;
-        Ok(Self { writer, rx })
+        Self::with_cancel(path, rx, CancellationToken::new())
     }
 
-    /// Run the recorder. Writes one JSON line per event.
+    /// Create a recorder with an explicit cancellation token for graceful shutdown.
+    pub fn with_cancel(
+        path: &Path,
+        rx: broadcast::Receiver<StateNotification>,
+        cancel: CancellationToken,
+    ) -> std::io::Result<Self> {
+        let writer = std::fs::File::create(path)?;
+        Ok(Self { writer, rx, cancel })
+    }
+
+    /// Run the recorder. Writes one JSON line per event until cancelled or
+    /// the broadcast channel is closed.
     pub async fn run(&mut self) {
         loop {
-            match self.rx.recv().await {
-                Ok(notification) => {
-                    let record = RecordedEvent {
-                        ts: Utc::now().to_rfc3339(),
-                        event: notification,
-                    };
-                    match serde_json::to_string(&record) {
-                        Ok(line) => {
-                            if let Err(e) = writeln!(self.writer, "{}", line) {
-                                tracing::error!("recorder write failed: {e}");
-                            }
-                            if let Err(e) = self.writer.flush() {
-                                tracing::error!("recorder flush failed: {e}");
+            tokio::select! {
+                result = self.rx.recv() => {
+                    match result {
+                        Ok(notification) => {
+                            let record = RecordedEvent {
+                                ts: Utc::now().to_rfc3339(),
+                                event: notification,
+                            };
+                            match serde_json::to_string(&record) {
+                                Ok(line) => {
+                                    if let Err(e) = writeln!(self.writer, "{}", line) {
+                                        tracing::error!("recorder write failed: {e}");
+                                    }
+                                    if let Err(e) = self.writer.flush() {
+                                        tracing::error!("recorder flush failed: {e}");
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::error!("recorder serialization failed: {e}");
+                                }
                             }
                         }
-                        Err(e) => {
-                            tracing::error!("recorder serialization failed: {e}");
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::warn!(skipped = n, "recorder lagged, dropped events");
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            tracing::info!("recorder: broadcast channel closed, stopping");
+                            break;
                         }
                     }
                 }
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    tracing::warn!(skipped = n, "recorder lagged, dropped events");
-                }
-                Err(broadcast::error::RecvError::Closed) => {
-                    tracing::info!("recorder: broadcast channel closed, stopping");
+                _ = self.cancel.cancelled() => {
+                    tracing::info!("recorder: cancellation requested, shutting down");
                     break;
                 }
             }

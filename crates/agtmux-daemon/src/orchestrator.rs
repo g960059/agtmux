@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::sync::{broadcast, mpsc};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
 use crate::server::{PaneInfo, SharedState};
@@ -53,6 +54,8 @@ pub struct Orchestrator {
     notify_tx: broadcast::Sender<StateNotification>,
     /// Shared state written by orchestrator, read by server for list_panes API.
     shared_state: SharedState,
+    /// Cancellation token for graceful shutdown.
+    cancel: CancellationToken,
 }
 
 /// Serialize an enum variant to its serde snake_case string representation.
@@ -61,6 +64,12 @@ fn serde_variant_name<T: Serialize>(value: &T) -> String {
     // We strip the surrounding quotes to get the raw string.
     let json = serde_json::to_string(value).unwrap_or_default();
     json.trim_matches('"').to_string()
+}
+
+/// Parse a serde snake_case string back into an enum variant.
+fn parse_enum<T: serde::de::DeserializeOwned>(s: &str) -> Option<T> {
+    let json = format!("\"{}\"", s);
+    serde_json::from_str(&json).ok()
 }
 
 impl From<&PaneState> for PaneInfo {
@@ -85,12 +94,62 @@ impl From<&PaneState> for PaneInfo {
     }
 }
 
+impl From<&PaneInfo> for PaneState {
+    fn from(pi: &PaneInfo) -> Self {
+        let provider: Option<Provider> = pi.provider.as_deref().and_then(parse_enum);
+        let activity_state: ActivityState =
+            parse_enum(&pi.activity_state).unwrap_or(ActivityState::Unknown);
+        let activity_source: SourceType =
+            parse_enum(&pi.activity_source).unwrap_or(SourceType::Poller);
+        let attention_state: AttentionState =
+            parse_enum(&pi.attention_state).unwrap_or(AttentionState::None);
+        let attention_since: Option<DateTime<Utc>> = pi
+            .attention_since
+            .as_deref()
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.with_timezone(&Utc));
+        let updated_at: DateTime<Utc> = DateTime::parse_from_rfc3339(&pi.updated_at)
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or_else(|_| Utc::now());
+
+        PaneState {
+            pane_id: pi.pane_id.clone(),
+            provider,
+            provider_confidence: pi.provider_confidence,
+            activity: ResolvedActivity {
+                state: activity_state,
+                confidence: pi.activity_confidence,
+                source: activity_source,
+                reason_code: String::new(),
+            },
+            attention: AttentionResult {
+                state: attention_state,
+                reason: pi.attention_reason.clone(),
+                since: attention_since,
+            },
+            last_event_type: String::new(),
+            updated_at,
+        }
+    }
+}
+
 impl Orchestrator {
     pub fn new(
         source_rx: mpsc::Receiver<SourceEvent>,
         notify_tx: broadcast::Sender<StateNotification>,
         shared_state: SharedState,
         detectors: Vec<Box<dyn ProviderDetector>>,
+    ) -> Self {
+        Self::with_cancel(source_rx, notify_tx, shared_state, detectors, CancellationToken::new())
+    }
+
+    /// Create an orchestrator with an explicit cancellation token for graceful shutdown.
+    pub fn with_cancel(
+        source_rx: mpsc::Receiver<SourceEvent>,
+        notify_tx: broadcast::Sender<StateNotification>,
+        shared_state: SharedState,
+        detectors: Vec<Box<dyn ProviderDetector>>,
+        cancel: CancellationToken,
     ) -> Self {
         info!(
             detector_count = detectors.len(),
@@ -105,16 +164,31 @@ impl Orchestrator {
             source_rx,
             notify_tx,
             shared_state,
+            cancel,
         }
     }
 
-    /// Main event loop. Runs until the source channel is closed.
+    /// Main event loop. Runs until the source channel is closed or the
+    /// cancellation token is triggered.
     pub async fn run(&mut self) {
         info!("orchestrator: event loop started");
-        while let Some(event) = self.source_rx.recv().await {
-            self.handle_event(event);
+        loop {
+            tokio::select! {
+                event = self.source_rx.recv() => {
+                    match event {
+                        Some(event) => self.handle_event(event),
+                        None => {
+                            info!("orchestrator: source channel closed, shutting down");
+                            break;
+                        }
+                    }
+                }
+                _ = self.cancel.cancelled() => {
+                    info!("orchestrator: cancellation requested, shutting down");
+                    break;
+                }
+            }
         }
-        info!("orchestrator: source channel closed, shutting down");
     }
 
     fn handle_event(&mut self, event: SourceEvent) {
@@ -1434,5 +1508,71 @@ mod tests {
         assert_eq!(meta.pane_id, "%5");
         assert_eq!(meta.current_cmd, "");
         assert_eq!(meta.pane_title, "");
+    }
+
+    // -----------------------------------------------------------------------
+    // CancellationToken / graceful shutdown tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn orchestrator_stops_when_token_cancelled() {
+        use tokio_util::sync::CancellationToken;
+
+        let cancel = CancellationToken::new();
+        let (tx, rx) = mpsc::channel::<SourceEvent>(64);
+        let (ntx, _nrx) = broadcast::channel::<StateNotification>(64);
+        let shared: SharedState = Arc::new(RwLock::new(DaemonState::default()));
+        let mut orch = Orchestrator::with_cancel(rx, ntx, shared.clone(), vec![], cancel.clone());
+
+        // Send an event before cancellation
+        let ev = make_evidence(
+            Provider::Claude,
+            ActivityState::Running,
+            0.9,
+            0.9,
+            SourceType::Hook,
+            "running",
+        );
+        tx.send(SourceEvent::Evidence {
+            pane_id: "%1".into(),
+            evidence: vec![ev],
+            meta: None,
+        })
+        .await
+        .unwrap();
+
+        // Cancel after a short delay
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            cancel_clone.cancel();
+        });
+
+        // run() should return once the token is cancelled (even though
+        // the channel is still open because `tx` is alive).
+        let result = tokio::time::timeout(Duration::from_secs(2), orch.run()).await;
+        assert!(result.is_ok(), "orchestrator should exit within timeout after cancellation");
+
+        // The event sent before cancellation should have been processed.
+        let state = orch.get_pane_state("%1").expect("pane %1 should exist");
+        assert_eq!(state.activity.state, ActivityState::Running);
+    }
+
+    #[tokio::test]
+    async fn orchestrator_exits_on_channel_close_even_without_cancel() {
+        // Verify backward compatibility: the orchestrator still exits when the
+        // source channel is closed, even when using with_cancel and a never-
+        // cancelled token.
+        let cancel = CancellationToken::new();
+        let (tx, rx) = mpsc::channel::<SourceEvent>(64);
+        let (ntx, _nrx) = broadcast::channel::<StateNotification>(64);
+        let shared: SharedState = Arc::new(RwLock::new(DaemonState::default()));
+        let mut orch = Orchestrator::with_cancel(rx, ntx, shared, vec![], cancel);
+
+        // Drop the sender to close the channel.
+        drop(tx);
+
+        let result = tokio::time::timeout(Duration::from_secs(2), orch.run()).await;
+        assert!(result.is_ok(), "orchestrator should exit when channel is closed");
     }
 }

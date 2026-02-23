@@ -9,6 +9,7 @@ use agtmux_core::types::{PaneMeta, RawPane};
 use agtmux_tmux::TmuxBackend;
 use chrono::Utc;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 /// Periodically captures tmux pane output and runs TOML-loaded
 /// `EvidenceBuilder`s against each pane to produce `SourceEvent`s.
@@ -19,6 +20,8 @@ pub struct PollerSource {
     interval: Duration,
     /// Tracks known pane IDs for topology-change detection.
     known_panes: HashSet<String>,
+    /// Cancellation token for graceful shutdown.
+    cancel: CancellationToken,
 }
 
 impl PollerSource {
@@ -28,22 +31,41 @@ impl PollerSource {
         tx: mpsc::Sender<SourceEvent>,
         interval: Duration,
     ) -> Self {
+        Self::with_cancel(backend, builders, tx, interval, CancellationToken::new())
+    }
+
+    /// Create a poller source with an explicit cancellation token for graceful shutdown.
+    pub fn with_cancel(
+        backend: Arc<TmuxBackend>,
+        builders: Vec<Box<dyn EvidenceBuilder>>,
+        tx: mpsc::Sender<SourceEvent>,
+        interval: Duration,
+        cancel: CancellationToken,
+    ) -> Self {
         Self {
             backend,
             builders,
             tx,
             interval,
             known_panes: HashSet::new(),
+            cancel,
         }
     }
 
-    /// Run the polling loop. Blocks until cancelled.
+    /// Run the polling loop. Blocks until cancelled via token or forever.
     pub async fn run(&mut self) {
         let mut interval = tokio::time::interval(self.interval);
         loop {
-            interval.tick().await;
-            if let Err(e) = self.poll_once().await {
-                tracing::warn!("poller error: {e}");
+            tokio::select! {
+                _ = interval.tick() => {
+                    if let Err(e) = self.poll_once().await {
+                        tracing::warn!("poller error: {e}");
+                    }
+                }
+                _ = self.cancel.cancelled() => {
+                    tracing::info!("poller: cancellation requested, shutting down");
+                    break;
+                }
             }
         }
     }

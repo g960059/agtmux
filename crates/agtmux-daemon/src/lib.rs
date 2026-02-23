@@ -7,5 +7,6 @@ pub mod recorder;
 pub mod server;
 pub mod sources;
 pub mod status;
+pub mod store;
 pub mod tmux_status;
 pub mod tui;

@@ -10,6 +10,7 @@ use serde::Deserialize;
 use tokio::io::AsyncBufReadExt;
 use tokio::net::UnixListener;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 /// JSON payload sent by Claude Code / agent hooks.
 ///
@@ -32,11 +33,22 @@ pub struct HookEvent {
 pub struct HookSource {
     tx: mpsc::Sender<SourceEvent>,
     socket_path: PathBuf,
+    /// Cancellation token for graceful shutdown.
+    cancel: CancellationToken,
 }
 
 impl HookSource {
     pub fn new(tx: mpsc::Sender<SourceEvent>, socket_path: PathBuf) -> Self {
-        Self { tx, socket_path }
+        Self::with_cancel(tx, socket_path, CancellationToken::new())
+    }
+
+    /// Create a hook source with an explicit cancellation token for graceful shutdown.
+    pub fn with_cancel(
+        tx: mpsc::Sender<SourceEvent>,
+        socket_path: PathBuf,
+        cancel: CancellationToken,
+    ) -> Self {
+        Self { tx, socket_path, cancel }
     }
 
     /// Listen for hook events on a Unix stream socket.
@@ -51,44 +63,54 @@ impl HookSource {
         tracing::info!(path = %self.socket_path.display(), "hook source listening");
 
         loop {
-            match listener.accept().await {
-                Ok((stream, _addr)) => {
-                    let tx = self.tx.clone();
+            tokio::select! {
+                result = listener.accept() => {
+                    match result {
+                        Ok((stream, _addr)) => {
+                            let tx = self.tx.clone();
 
-                    tokio::spawn(async move {
-                        let reader = tokio::io::BufReader::new(stream);
-                        let mut lines = reader.lines();
+                            tokio::spawn(async move {
+                                let reader = tokio::io::BufReader::new(stream);
+                                let mut lines = reader.lines();
 
-                        while let Ok(Some(line)) = lines.next_line().await {
-                            let line = line.trim().to_string();
-                            if line.is_empty() {
-                                continue;
-                            }
+                                while let Ok(Some(line)) = lines.next_line().await {
+                                    let line = line.trim().to_string();
+                                    if line.is_empty() {
+                                        continue;
+                                    }
 
-                            match serde_json::from_str::<HookEvent>(&line) {
-                                Ok(hook) => {
-                                    let event = hook_to_source_event(&hook);
-                                    if let Err(e) = tx.send(event).await {
-                                        tracing::warn!(
-                                            pane_id = %hook.pane_id,
-                                            "failed to send hook event: {e}"
-                                        );
-                                        break;
+                                    match serde_json::from_str::<HookEvent>(&line) {
+                                        Ok(hook) => {
+                                            let event = hook_to_source_event(&hook);
+                                            if let Err(e) = tx.send(event).await {
+                                                tracing::warn!(
+                                                    pane_id = %hook.pane_id,
+                                                    "failed to send hook event: {e}"
+                                                );
+                                                break;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!("failed to parse hook JSON: {e}, line: {line}");
+                                        }
                                     }
                                 }
-                                Err(e) => {
-                                    tracing::warn!("failed to parse hook JSON: {e}, line: {line}");
-                                }
-                            }
+                            });
                         }
-                    });
+                        Err(e) => {
+                            tracing::warn!("hook accept error: {e}");
+                            continue;
+                        }
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!("hook accept error: {e}");
-                    continue;
+                _ = self.cancel.cancelled() => {
+                    tracing::info!("hook source: cancellation requested, shutting down");
+                    break;
                 }
             }
         }
+
+        Ok(())
     }
 }
 

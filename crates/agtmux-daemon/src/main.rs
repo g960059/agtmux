@@ -1,25 +1,28 @@
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agtmux_core::adapt::loader::{builtin_adapters, load_adapters_from_dir, merge_adapters};
 use agtmux_tmux::TmuxBackend;
 use clap::{Parser, Subcommand};
 use tokio::sync::{broadcast, mpsc};
+use tokio_util::sync::CancellationToken;
 
 use agtmux_daemon::client::DaemonClient;
-use agtmux_daemon::orchestrator::Orchestrator;
+use agtmux_daemon::orchestrator::{Orchestrator, PaneState};
 use agtmux_daemon::recorder::Recorder;
-use agtmux_daemon::server::{DaemonServer, DaemonState, SharedState};
+use agtmux_daemon::server::{DaemonServer, DaemonState, PaneInfo, SharedState};
 use agtmux_daemon::sources::hook::HookSource;
 use agtmux_daemon::sources::poller::PollerSource;
 use agtmux_daemon::status::format_status;
+use agtmux_daemon::store::Store;
 use agtmux_daemon::tmux_status::format_tmux_status;
 
 /// Default directory for runtime sockets.
 const DEFAULT_SOCKET_DIR: &str = "/tmp/agtmux";
 const DEFAULT_DAEMON_SOCKET: &str = "/tmp/agtmux/agtmuxd.sock";
 const DEFAULT_HOOK_SOCKET: &str = "/tmp/agtmux/hook.sock";
+const DEFAULT_DB_PATH: &str = "/tmp/agtmux.db";
 
 #[derive(Parser)]
 #[command(name = "agtmux", about = "AI agent terminal multiplexer monitor")]
@@ -51,6 +54,10 @@ enum Commands {
         /// Directory containing custom provider TOML files (overrides builtins)
         #[arg(long)]
         config_dir: Option<String>,
+
+        /// SQLite database path for state persistence across restarts
+        #[arg(long, default_value = DEFAULT_DB_PATH)]
+        db_path: String,
     },
     /// Show pane status (one-shot)
     Status {
@@ -97,23 +104,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         // Default to daemon when no subcommand is given.
         None | Some(Commands::Daemon { .. }) => {
-            let (socket, hook_socket, poll_interval_ms, record, config_dir) = match cli.command {
-                Some(Commands::Daemon {
-                    socket,
-                    hook_socket,
-                    poll_interval_ms,
-                    record,
-                    config_dir,
-                }) => (socket, hook_socket, poll_interval_ms, record, config_dir),
-                _ => (
-                    DEFAULT_DAEMON_SOCKET.to_string(),
-                    DEFAULT_HOOK_SOCKET.to_string(),
-                    500,
-                    None,
-                    None,
-                ),
-            };
-            run_daemon(socket, hook_socket, poll_interval_ms, record, config_dir).await?;
+            let (socket, hook_socket, poll_interval_ms, record, config_dir, db_path) =
+                match cli.command {
+                    Some(Commands::Daemon {
+                        socket,
+                        hook_socket,
+                        poll_interval_ms,
+                        record,
+                        config_dir,
+                        db_path,
+                    }) => (socket, hook_socket, poll_interval_ms, record, config_dir, db_path),
+                    _ => (
+                        DEFAULT_DAEMON_SOCKET.to_string(),
+                        DEFAULT_HOOK_SOCKET.to_string(),
+                        500,
+                        None,
+                        None,
+                        DEFAULT_DB_PATH.to_string(),
+                    ),
+                };
+            run_daemon(socket, hook_socket, poll_interval_ms, record, config_dir, db_path).await?;
         }
         Some(Commands::Status { socket }) => {
             run_status(&socket).await?;
@@ -141,6 +151,7 @@ async fn run_daemon(
     poll_interval_ms: u64,
     record: Option<String>,
     config_dir: Option<String>,
+    db_path: String,
 ) -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(
         socket = %socket,
@@ -148,6 +159,7 @@ async fn run_daemon(
         poll_interval_ms = poll_interval_ms,
         record = ?record,
         config_dir = ?config_dir,
+        db_path = %db_path,
         "starting agtmux daemon"
     );
 
@@ -196,42 +208,85 @@ async fn run_daemon(
 
     let (detectors, builders): (Vec<_>, Vec<_>) = adapters.into_iter().unzip();
 
-    let mut poller = PollerSource::new(
+    // ---------------------------------------------------------------
+    // Create the shared CancellationToken for graceful shutdown
+    // ---------------------------------------------------------------
+    let cancel = CancellationToken::new();
+
+    let mut poller = PollerSource::with_cancel(
         backend,
         builders,
         source_tx.clone(),
         Duration::from_millis(poll_interval_ms),
+        cancel.clone(),
     );
 
     // ---------------------------------------------------------------
     // 4. Create HookSource
     // ---------------------------------------------------------------
-    let hook_source = HookSource::new(source_tx.clone(), PathBuf::from(&hook_socket));
+    let hook_source = HookSource::with_cancel(
+        source_tx.clone(),
+        PathBuf::from(&hook_socket),
+        cancel.clone(),
+    );
 
     // ---------------------------------------------------------------
-    // 5. Create shared state (orchestrator writes, server reads)
+    // 5. Open SQLite store and load persisted state
+    // ---------------------------------------------------------------
+    let store = Store::open(std::path::Path::new(&db_path))?;
+    let persisted_states = store.load_all_pane_states().unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "failed to load persisted state, starting fresh");
+        Vec::new()
+    });
+
+    let initial_panes: Vec<PaneInfo> = persisted_states.iter().map(PaneInfo::from).collect();
+    tracing::info!(
+        count = persisted_states.len(),
+        "loaded persisted pane states from SQLite"
+    );
+
+    let store = Arc::new(Mutex::new(store));
+
+    // ---------------------------------------------------------------
+    // 6. Create shared state (orchestrator writes, server reads)
     // ---------------------------------------------------------------
     let shared_state: SharedState =
-        std::sync::Arc::new(tokio::sync::RwLock::new(DaemonState::default()));
+        std::sync::Arc::new(tokio::sync::RwLock::new(DaemonState {
+            panes: initial_panes,
+        }));
 
     // ---------------------------------------------------------------
-    // 6. Create Orchestrator (with shared_state so it can write pane info)
+    // 7. Create Orchestrator (with shared_state so it can write pane info)
     // ---------------------------------------------------------------
-    let mut orchestrator =
-        Orchestrator::new(source_rx, notify_tx.clone(), shared_state.clone(), detectors);
+    let mut orchestrator = Orchestrator::with_cancel(
+        source_rx,
+        notify_tx.clone(),
+        shared_state.clone(),
+        detectors,
+        cancel.clone(),
+    );
 
     // ---------------------------------------------------------------
-    // 7. Create DaemonServer (reads shared_state for list_panes API)
+    // 8. Create DaemonServer (reads shared_state for list_panes API)
     // ---------------------------------------------------------------
-    let server = DaemonServer::new(PathBuf::from(&socket), shared_state, notify_tx.clone());
+    let server = DaemonServer::with_cancel(
+        PathBuf::from(&socket),
+        shared_state.clone(),
+        notify_tx.clone(),
+        cancel.clone(),
+    );
 
     // ---------------------------------------------------------------
-    // 8. Optionally create the JSONL recorder
+    // 9. Optionally create the JSONL recorder
     // ---------------------------------------------------------------
     let mut recorder = match record {
         Some(ref path) => {
             let recorder_rx = notify_tx.subscribe();
-            let r = Recorder::new(std::path::Path::new(path), recorder_rx)?;
+            let r = Recorder::with_cancel(
+                std::path::Path::new(path),
+                recorder_rx,
+                cancel.clone(),
+            )?;
             tracing::info!(path = %path, "JSONL recorder enabled");
             Some(r)
         }
@@ -239,41 +294,58 @@ async fn run_daemon(
     };
 
     // ---------------------------------------------------------------
-    // 9. Spawn all tasks, wait for shutdown
+    // 10. Spawn all tasks, wait for Ctrl+C then cancel
     // ---------------------------------------------------------------
     tracing::info!("all components created, starting event loops");
 
-    tokio::select! {
-        _ = orchestrator.run() => {
-            tracing::warn!("orchestrator exited unexpectedly");
+    let save_store = Arc::clone(&store);
+    let save_shared = shared_state.clone();
+    let save_cancel = cancel.clone();
+
+    let orch_handle = tokio::spawn(async move { orchestrator.run().await });
+    let poller_handle = tokio::spawn(async move { poller.run().await });
+    let hook_handle = tokio::spawn(async move { hook_source.run().await });
+    let server_handle = tokio::spawn(async move { server.run().await });
+    let recorder_handle = tokio::spawn(async move {
+        if let Some(ref mut r) = recorder {
+            r.run().await;
+        } else {
+            // No recorder configured; park this task until cancelled.
+            std::future::pending::<()>().await;
         }
-        _ = poller.run() => {
-            tracing::warn!("poller exited unexpectedly");
-        }
-        result = hook_source.run() => {
-            match result {
-                Ok(()) => tracing::warn!("hook source exited unexpectedly"),
-                Err(e) => tracing::warn!("hook source error: {e}"),
+    });
+    let save_handle = tokio::spawn(async move {
+        periodic_save(save_store, save_shared, Duration::from_secs(5), save_cancel).await
+    });
+
+    // Wait for Ctrl+C, then trigger graceful shutdown via the token.
+    tokio::signal::ctrl_c().await.ok();
+    tracing::info!("received ctrl-c, initiating graceful shutdown");
+    cancel.cancel();
+
+    // Give tasks up to 3 seconds to finish draining.
+    let shutdown_timeout = Duration::from_secs(3);
+    let _ = tokio::time::timeout(shutdown_timeout, async {
+        let _ = orch_handle.await;
+        let _ = poller_handle.await;
+        let _ = hook_handle.await;
+        let _ = server_handle.await;
+        let _ = recorder_handle.await;
+        let _ = save_handle.await;
+    })
+    .await;
+
+    // Final save before shutdown.
+    {
+        let state = shared_state.read().await;
+        let st = store.lock().unwrap();
+        for pane in &state.panes {
+            if let Err(e) = st.save_pane_state(&PaneState::from(pane)) {
+                tracing::warn!(pane_id = %pane.pane_id, error = %e, "failed to save pane on shutdown");
             }
-        }
-        result = server.run() => {
-            match result {
-                Ok(()) => tracing::warn!("server exited unexpectedly"),
-                Err(e) => tracing::warn!("server error: {e}"),
-            }
-        }
-        _ = async {
-            match recorder.as_mut() {
-                Some(r) => r.run().await,
-                None => std::future::pending().await,
-            }
-        } => {
-            tracing::warn!("recorder exited unexpectedly");
-        }
-        _ = tokio::signal::ctrl_c() => {
-            tracing::info!("received ctrl-c, shutting down");
         }
     }
+    tracing::info!("final state persisted to SQLite");
 
     // Cleanup: remove socket files.
     for path in [&socket, &hook_socket] {
@@ -285,8 +357,35 @@ async fn run_daemon(
         }
     }
 
-    tracing::info!("agtmux daemon stopped");
+    tracing::info!("agtmux daemon shutdown complete");
     Ok(())
+}
+
+/// Periodically persist shared state to the SQLite store until cancelled.
+async fn periodic_save(
+    store: Arc<Mutex<Store>>,
+    shared: SharedState,
+    interval: Duration,
+    cancel: CancellationToken,
+) {
+    let mut ticker = tokio::time::interval(interval);
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {
+                let state = shared.read().await;
+                let st = store.lock().unwrap();
+                for pane in &state.panes {
+                    if let Err(e) = st.save_pane_state(&PaneState::from(pane)) {
+                        tracing::warn!(pane_id = %pane.pane_id, error = %e, "periodic save failed");
+                    }
+                }
+            }
+            _ = cancel.cancelled() => {
+                tracing::info!("periodic save: cancellation requested, shutting down");
+                break;
+            }
+        }
+    }
 }
 
 /// Connect to the daemon, fetch pane list, and print a formatted status overview.
