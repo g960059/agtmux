@@ -10,6 +10,7 @@ use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
+use crate::serde_helpers::{parse_enum, serde_variant_name};
 use crate::server::{PaneInfo, SharedState};
 
 /// Minimum confidence threshold for provider detection.
@@ -58,20 +59,6 @@ pub struct Orchestrator {
     cancel: CancellationToken,
 }
 
-/// Serialize an enum variant to its serde snake_case string representation.
-fn serde_variant_name<T: Serialize>(value: &T) -> String {
-    // serde_json serializes a unit enum variant as a JSON string, e.g. `"waiting_input"`.
-    // We strip the surrounding quotes to get the raw string.
-    let json = serde_json::to_string(value).unwrap_or_default();
-    json.trim_matches('"').to_string()
-}
-
-/// Parse a serde snake_case string back into an enum variant.
-fn parse_enum<T: serde::de::DeserializeOwned>(s: &str) -> Option<T> {
-    let json = format!("\"{}\"", s);
-    serde_json::from_str(&json).ok()
-}
-
 impl From<&PaneState> for PaneInfo {
     fn from(ps: &PaneState) -> Self {
         PaneInfo {
@@ -94,6 +81,10 @@ impl From<&PaneState> for PaneInfo {
     }
 }
 
+/// Reverse conversion for persistence recovery. Lossy: `reason_code` and
+/// `last_event_type` are set to empty strings, and PaneMeta fields
+/// (session_name, window_id, pane_title, current_cmd) are not carried.
+/// These fields will be repopulated by the next evidence cycle.
 impl From<&PaneInfo> for PaneState {
     fn from(pi: &PaneInfo) -> Self {
         let provider: Option<Provider> = pi.provider.as_deref().and_then(parse_enum);

@@ -306,12 +306,13 @@ async fn run_daemon(
     let poller_handle = tokio::spawn(async move { poller.run().await });
     let hook_handle = tokio::spawn(async move { hook_source.run().await });
     let server_handle = tokio::spawn(async move { server.run().await });
+    let recorder_cancel = cancel.clone();
     let recorder_handle = tokio::spawn(async move {
         if let Some(ref mut r) = recorder {
             r.run().await;
         } else {
             // No recorder configured; park this task until cancelled.
-            std::future::pending::<()>().await;
+            recorder_cancel.cancelled().await;
         }
     });
     let save_handle = tokio::spawn(async move {
@@ -324,16 +325,9 @@ async fn run_daemon(
     cancel.cancel();
 
     // Give tasks up to 3 seconds to finish draining.
-    let shutdown_timeout = Duration::from_secs(3);
-    let _ = tokio::time::timeout(shutdown_timeout, async {
-        let _ = orch_handle.await;
-        let _ = poller_handle.await;
-        let _ = hook_handle.await;
-        let _ = server_handle.await;
-        let _ = recorder_handle.await;
-        let _ = save_handle.await;
-    })
-    .await;
+    let _ = tokio::time::timeout(Duration::from_secs(3), async {
+        let _ = tokio::join!(orch_handle, poller_handle, hook_handle, server_handle, recorder_handle, save_handle);
+    }).await;
 
     // Final save before shutdown.
     {
@@ -373,6 +367,8 @@ async fn periodic_save(
         tokio::select! {
             _ = ticker.tick() => {
                 let state = shared.read().await;
+                // SAFETY: MutexGuard is never held across an .await point.
+                // The shared.read().await completes before we lock the store.
                 let st = store.lock().unwrap();
                 for pane in &state.panes {
                     if let Err(e) = st.save_pane_state(&PaneState::from(pane)) {

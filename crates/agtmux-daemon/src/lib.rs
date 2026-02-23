@@ -4,6 +4,7 @@ pub mod display;
 pub mod label;
 pub mod orchestrator;
 pub mod recorder;
+pub mod serde_helpers;
 pub mod server;
 pub mod sources;
 pub mod status;

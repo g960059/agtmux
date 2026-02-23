@@ -9,19 +9,7 @@ use agtmux_core::engine::ResolvedActivity;
 use agtmux_core::types::{AttentionResult, AttentionState, Provider};
 
 use crate::orchestrator::PaneState;
-
-/// Serialize an enum variant to its serde snake_case string representation.
-/// Mirrors the helper in orchestrator.rs.
-fn serde_variant_name<T: serde::Serialize>(value: &T) -> String {
-    let json = serde_json::to_string(value).unwrap_or_default();
-    json.trim_matches('"').to_string()
-}
-
-/// Parse a serde snake_case string back into an enum variant.
-fn parse_enum<T: serde::de::DeserializeOwned>(s: &str) -> Option<T> {
-    let json = format!("\"{}\"", s);
-    serde_json::from_str(&json).ok()
-}
+use crate::serde_helpers::{parse_enum, serde_variant_name};
 
 /// SQLite-backed persistence store for pane states.
 pub struct Store {

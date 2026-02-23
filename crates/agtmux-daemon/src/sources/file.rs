@@ -1,4 +1,3 @@
-use std::io::BufRead;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -9,6 +8,7 @@ use agtmux_core::types::{
 use chrono::Utc;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 /// Configuration for a single directory watch.
 #[derive(Debug, Clone)]
@@ -44,11 +44,21 @@ impl FileWatchConfig {
 pub struct FileSource {
     tx: mpsc::Sender<SourceEvent>,
     watch_dirs: Vec<FileWatchConfig>,
+    cancel: CancellationToken,
 }
 
 impl FileSource {
     pub fn new(tx: mpsc::Sender<SourceEvent>, watch_dirs: Vec<FileWatchConfig>) -> Self {
-        Self { tx, watch_dirs }
+        Self { tx, watch_dirs, cancel: CancellationToken::new() }
+    }
+
+    /// Create a `FileSource` with an explicit cancellation token for graceful shutdown.
+    pub fn with_cancel(
+        tx: mpsc::Sender<SourceEvent>,
+        watch_dirs: Vec<FileWatchConfig>,
+        cancel: CancellationToken,
+    ) -> Self {
+        Self { tx, watch_dirs, cancel }
     }
 
     /// Start watching configured directories. Blocks until cancelled.
@@ -89,14 +99,26 @@ impl FileSource {
             }
         }
 
-        // Process events from the watcher.
-        while let Some(event_result) = notify_rx.recv().await {
-            match event_result {
-                Ok(event) => {
-                    self.handle_notify_event(&event).await;
+        // Process events from the watcher, racing against cancellation.
+        loop {
+            tokio::select! {
+                event_result = notify_rx.recv() => {
+                    match event_result {
+                        Some(Ok(event)) => {
+                            self.handle_notify_event(&event).await;
+                        }
+                        Some(Err(e)) => {
+                            tracing::warn!("file source: watcher error: {e}");
+                        }
+                        None => {
+                            tracing::info!("file source: notify channel closed, shutting down");
+                            break;
+                        }
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!("file source: watcher error: {e}");
+                _ = self.cancel.cancelled() => {
+                    tracing::info!("file source: cancellation requested, shutting down");
+                    break;
                 }
             }
         }
@@ -123,7 +145,7 @@ impl FileSource {
 
                 // Read the file and derive activity from its content.
                 match read_last_line(path) {
-                    Ok(Some(last_line)) => {
+                    Some(last_line) => {
                         let activity = parse_session_line(&last_line, config.provider);
                         let evidence = build_file_evidence(
                             config.provider,
@@ -145,14 +167,8 @@ impl FileSource {
                             );
                         }
                     }
-                    Ok(None) => {
-                        tracing::debug!(path = %path.display(), "file source: file is empty");
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            path = %path.display(),
-                            "file source: failed to read file: {e}"
-                        );
+                    None => {
+                        tracing::debug!(path = %path.display(), "file source: file is empty or unreadable");
                     }
                 }
             }
@@ -195,28 +211,21 @@ fn matches_any_pattern(path: &std::path::Path, patterns: &[String]) -> bool {
 }
 
 /// Read the last non-empty line of a file.
-fn read_last_line(
-    path: &std::path::Path,
-) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
-    let file = std::fs::File::open(path)?;
-    let metadata = file.metadata()?;
-
-    if metadata.len() == 0 {
-        return Ok(None);
+///
+/// Uses a seek-based approach that reads only the trailing 4 KiB of the file,
+/// making it O(1) rather than O(n) for large files.
+fn read_last_line(path: &std::path::Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let file_len = f.metadata().ok()?.len();
+    if file_len == 0 {
+        return None;
     }
-
-    let reader = std::io::BufReader::new(file);
-    let mut last_line: Option<String> = None;
-
-    for line in reader.lines() {
-        let line = line?;
-        let trimmed = line.trim().to_string();
-        if !trimmed.is_empty() {
-            last_line = Some(trimmed);
-        }
-    }
-
-    Ok(last_line)
+    let read_size = std::cmp::min(file_len, 4096);
+    f.seek(SeekFrom::End(-(read_size as i64))).ok()?;
+    let mut buf = String::new();
+    f.read_to_string(&mut buf).ok()?;
+    buf.lines().filter(|l| !l.is_empty()).last().map(|s| s.to_string())
 }
 
 /// Parse a session file line to determine the current activity state.
@@ -634,7 +643,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = read_last_line(&file_path).unwrap();
+        let result = read_last_line(&file_path);
         assert_eq!(
             result,
             Some(r#"{"type":"tool_use","tool":"Bash"}"#.to_string())
@@ -653,7 +662,7 @@ mod tests {
 
         std::fs::write(&file_path, "").unwrap();
 
-        let result = read_last_line(&file_path).unwrap();
+        let result = read_last_line(&file_path);
         assert!(result.is_none());
 
         let _ = std::fs::remove_file(&file_path);
@@ -663,6 +672,6 @@ mod tests {
     #[test]
     fn read_last_line_nonexistent_file() {
         let result = read_last_line(std::path::Path::new("/nonexistent/path/file.jsonl"));
-        assert!(result.is_err());
+        assert!(result.is_none());
     }
 }
