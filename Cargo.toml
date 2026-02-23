@@ -5,6 +5,9 @@ members = [
     "crates/agtmux-tmux",
     "crates/agtmux-daemon",
 ]
+exclude = [
+    "desktop/src-tauri",
+]
 
 [workspace.package]
 version = "0.1.0"
