@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -11,6 +12,9 @@ use crate::orchestrator::StateNotification;
 use crate::server::{
     compute_summary_counts, notification_to_push, JsonRpcError, JsonRpcNotification,
     JsonRpcRequest, JsonRpcResponse, SharedState, SubscribeParams,
+};
+use crate::terminal_output::{
+    encode_output_frame, resize_pane, send_keys, OutputBroadcaster,
 };
 
 // ---------------------------------------------------------------------------
@@ -63,13 +67,15 @@ const DEFAULT_MAX_CONNECTIONS: usize = 64;
 /// WebSocket server exposing the same JSON-RPC 2.0 protocol as `DaemonServer`.
 ///
 /// Transports newline-delimited JSON-RPC messages over WebSocket text frames
-/// rather than Unix stream sockets.
+/// rather than Unix stream sockets. Terminal output is streamed as binary
+/// frames for xterm.js consumption.
 pub struct WsServer {
     addr: SocketAddr,
     state: SharedState,
     notify_tx: broadcast::Sender<StateNotification>,
     cancel: CancellationToken,
     max_connections: usize,
+    output_broadcaster: Arc<OutputBroadcaster>,
 }
 
 impl WsServer {
@@ -79,12 +85,31 @@ impl WsServer {
         notify_tx: broadcast::Sender<StateNotification>,
         cancel: CancellationToken,
     ) -> Self {
+        let (broadcaster, _rx) = OutputBroadcaster::new();
         Self {
             addr,
             state,
             notify_tx,
             cancel,
             max_connections: DEFAULT_MAX_CONNECTIONS,
+            output_broadcaster: Arc::new(broadcaster),
+        }
+    }
+
+    pub fn with_output_broadcaster(
+        addr: SocketAddr,
+        state: SharedState,
+        notify_tx: broadcast::Sender<StateNotification>,
+        cancel: CancellationToken,
+        output_broadcaster: Arc<OutputBroadcaster>,
+    ) -> Self {
+        Self {
+            addr,
+            state,
+            notify_tx,
+            cancel,
+            max_connections: DEFAULT_MAX_CONNECTIONS,
+            output_broadcaster,
         }
     }
 
@@ -137,11 +162,12 @@ impl WsServer {
                             let state = Arc::clone(&self.state);
                             let notify_rx = self.notify_tx.subscribe();
                             let cancel = self.cancel.clone();
+                            let broadcaster = Arc::clone(&self.output_broadcaster);
                             tokio::spawn(async move {
                                 let _permit = permit;
                                 match tokio_tungstenite::accept_hdr_async(stream, validate_origin).await {
                                     Ok(ws_stream) => {
-                                        if let Err(e) = handle_ws_client(ws_stream, state, notify_rx, cancel).await {
+                                        if let Err(e) = handle_ws_client(ws_stream, state, notify_rx, cancel, broadcaster).await {
                                             tracing::debug!(peer = %peer, error = %e, "ws client handler finished with error");
                                         }
                                     }
@@ -176,6 +202,7 @@ async fn handle_ws_client(
     state: SharedState,
     mut notify_rx: broadcast::Receiver<StateNotification>,
     cancel: CancellationToken,
+    broadcaster: Arc<OutputBroadcaster>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (mut ws_tx, mut ws_rx) = ws_stream.split();
 
@@ -183,6 +210,8 @@ async fn handle_ws_client(
 
     let mut subscribed_events: Vec<String> = Vec::new();
     let mut subscribed_summary = false;
+    let mut subscribed_panes: HashSet<String> = HashSet::new();
+    let mut output_rx = broadcaster.subscribe_receiver();
 
     loop {
         tokio::select! {
@@ -192,10 +221,12 @@ async fn handle_ws_client(
                     Some(Ok(m)) => m,
                     Some(Err(e)) => {
                         tracing::debug!(error = %e, "ws read error, dropping client");
+                        broadcaster.unsubscribe_all(&subscribed_panes).await;
                         return Err(e.into());
                     }
                     None => {
                         tracing::debug!("ws client disconnected (stream ended)");
+                        broadcaster.unsubscribe_all(&subscribed_panes).await;
                         return Ok(());
                     }
                 };
@@ -204,6 +235,7 @@ async fn handle_ws_client(
                     Message::Text(t) => t,
                     Message::Close(_) => {
                         tracing::debug!("ws client sent close frame");
+                        broadcaster.unsubscribe_all(&subscribed_panes).await;
                         return Ok(());
                     }
                     Message::Ping(data) => {
@@ -286,6 +318,165 @@ async fn handle_ws_client(
                         ws_tx.send(Message::Text(serde_json::to_string(&notif)?)).await?;
                     }
 
+                    "subscribe_output" => {
+                        let pane_id = req.params.get("pane_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+
+                        if pane_id.is_empty() {
+                            let resp = JsonRpcResponse {
+                                jsonrpc: "2.0".into(),
+                                id: req.id,
+                                result: None,
+                                error: Some(JsonRpcError {
+                                    code: -32602,
+                                    message: "missing required param: pane_id".into(),
+                                }),
+                            };
+                            ws_tx.send(Message::Text(serde_json::to_string(&resp)?)).await?;
+                        } else {
+                            broadcaster.subscribe_pane(&pane_id).await;
+                            subscribed_panes.insert(pane_id.clone());
+                            tracing::debug!(pane_id = %pane_id, "ws client subscribed to output");
+
+                            let resp = JsonRpcResponse {
+                                jsonrpc: "2.0".into(),
+                                id: req.id,
+                                result: Some(serde_json::json!({ "subscribed": true, "pane_id": pane_id })),
+                                error: None,
+                            };
+                            ws_tx.send(Message::Text(serde_json::to_string(&resp)?)).await?;
+                        }
+                    }
+
+                    "unsubscribe_output" => {
+                        let pane_id = req.params.get("pane_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+
+                        if pane_id.is_empty() {
+                            let resp = JsonRpcResponse {
+                                jsonrpc: "2.0".into(),
+                                id: req.id,
+                                result: None,
+                                error: Some(JsonRpcError {
+                                    code: -32602,
+                                    message: "missing required param: pane_id".into(),
+                                }),
+                            };
+                            ws_tx.send(Message::Text(serde_json::to_string(&resp)?)).await?;
+                        } else {
+                            broadcaster.unsubscribe_pane(&pane_id).await;
+                            subscribed_panes.remove(&pane_id);
+                            tracing::debug!(pane_id = %pane_id, "ws client unsubscribed from output");
+
+                            let resp = JsonRpcResponse {
+                                jsonrpc: "2.0".into(),
+                                id: req.id,
+                                result: Some(serde_json::json!({ "unsubscribed": true, "pane_id": pane_id })),
+                                error: None,
+                            };
+                            ws_tx.send(Message::Text(serde_json::to_string(&resp)?)).await?;
+                        }
+                    }
+
+                    "write_input" => {
+                        let pane_id = req.params.get("pane_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let data = req.params.get("data")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+
+                        if pane_id.is_empty() {
+                            let resp = JsonRpcResponse {
+                                jsonrpc: "2.0".into(),
+                                id: req.id,
+                                result: None,
+                                error: Some(JsonRpcError {
+                                    code: -32602,
+                                    message: "missing required param: pane_id".into(),
+                                }),
+                            };
+                            ws_tx.send(Message::Text(serde_json::to_string(&resp)?)).await?;
+                        } else {
+                            match send_keys(pane_id, data).await {
+                                Ok(()) => {
+                                    let resp = JsonRpcResponse {
+                                        jsonrpc: "2.0".into(),
+                                        id: req.id,
+                                        result: Some(serde_json::json!({ "ok": true })),
+                                        error: None,
+                                    };
+                                    ws_tx.send(Message::Text(serde_json::to_string(&resp)?)).await?;
+                                }
+                                Err(e) => {
+                                    let resp = JsonRpcResponse {
+                                        jsonrpc: "2.0".into(),
+                                        id: req.id,
+                                        result: None,
+                                        error: Some(JsonRpcError {
+                                            code: -32000,
+                                            message: e,
+                                        }),
+                                    };
+                                    ws_tx.send(Message::Text(serde_json::to_string(&resp)?)).await?;
+                                }
+                            }
+                        }
+                    }
+
+                    "resize_pane" => {
+                        let pane_id = req.params.get("pane_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let cols = req.params.get("cols")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0) as u16;
+                        let rows = req.params.get("rows")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0) as u16;
+
+                        if pane_id.is_empty() || cols == 0 || rows == 0 {
+                            let resp = JsonRpcResponse {
+                                jsonrpc: "2.0".into(),
+                                id: req.id,
+                                result: None,
+                                error: Some(JsonRpcError {
+                                    code: -32602,
+                                    message: "missing required params: pane_id, cols, rows".into(),
+                                }),
+                            };
+                            ws_tx.send(Message::Text(serde_json::to_string(&resp)?)).await?;
+                        } else {
+                            match resize_pane(pane_id, cols, rows).await {
+                                Ok(()) => {
+                                    let resp = JsonRpcResponse {
+                                        jsonrpc: "2.0".into(),
+                                        id: req.id,
+                                        result: Some(serde_json::json!({ "ok": true })),
+                                        error: None,
+                                    };
+                                    ws_tx.send(Message::Text(serde_json::to_string(&resp)?)).await?;
+                                }
+                                Err(e) => {
+                                    let resp = JsonRpcResponse {
+                                        jsonrpc: "2.0".into(),
+                                        id: req.id,
+                                        result: None,
+                                        error: Some(JsonRpcError {
+                                            code: -32000,
+                                            message: e,
+                                        }),
+                                    };
+                                    ws_tx.send(Message::Text(serde_json::to_string(&resp)?)).await?;
+                                }
+                            }
+                        }
+                    }
+
                     _ => {
                         let resp = JsonRpcResponse {
                             jsonrpc: "2.0".into(),
@@ -301,6 +492,24 @@ async fn handle_ws_client(
                 }
             }
 
+            // --- terminal output from PaneTap ---
+            output = output_rx.recv() => {
+                let output = match output {
+                    Ok(o) => o,
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!(skipped, "ws client output lagged");
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        continue;
+                    }
+                };
+                if subscribed_panes.contains(&output.pane_id) {
+                    let frame = encode_output_frame(&output.pane_id, &output.data);
+                    ws_tx.send(Message::Binary(frame)).await?;
+                }
+            }
+
             // --- push notification from orchestrator ---
             notification = notify_rx.recv() => {
                 let notification = match notification {
@@ -311,6 +520,7 @@ async fn handle_ws_client(
                     }
                     Err(broadcast::error::RecvError::Closed) => {
                         tracing::debug!("ws notification channel closed, dropping client");
+                        broadcaster.unsubscribe_all(&subscribed_panes).await;
                         return Ok(());
                     }
                 };
@@ -337,6 +547,7 @@ async fn handle_ws_client(
             // --- cancellation ---
             _ = cancel.cancelled() => {
                 tracing::debug!("ws client handler: cancellation requested");
+                broadcaster.unsubscribe_all(&subscribed_panes).await;
                 let _ = ws_tx.send(Message::Close(None)).await;
                 return Ok(());
             }
@@ -997,5 +1208,143 @@ mod tests {
         .await;
         assert_eq!(resp3["id"], 3);
         assert_eq!(resp3["result"]["subscribed"], true);
+    }
+
+    // -----------------------------------------------------------------------
+    // Terminal output streaming tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn subscribe_output_returns_ack() {
+        let (notify_tx, _) = broadcast::channel(16);
+        let server = start_test_server(vec![], notify_tx, None).await;
+
+        let mut ws = server.connect().await;
+        let resp = send_rpc(
+            &mut ws,
+            10,
+            "subscribe_output",
+            serde_json::json!({"pane_id": "%1"}),
+        )
+        .await;
+
+        assert_eq!(resp["id"], 10);
+        assert_eq!(resp["result"]["subscribed"], true);
+        assert_eq!(resp["result"]["pane_id"], "%1");
+    }
+
+    #[tokio::test]
+    async fn subscribe_output_missing_pane_id_returns_error() {
+        let (notify_tx, _) = broadcast::channel(16);
+        let server = start_test_server(vec![], notify_tx, None).await;
+
+        let mut ws = server.connect().await;
+        let resp = send_rpc(
+            &mut ws,
+            11,
+            "subscribe_output",
+            serde_json::json!({}),
+        )
+        .await;
+
+        assert_eq!(resp["id"], 11);
+        assert_eq!(resp["error"]["code"], -32602);
+        assert!(resp["error"]["message"].as_str().unwrap().contains("pane_id"));
+    }
+
+    #[tokio::test]
+    async fn unsubscribe_output_returns_ack() {
+        let (notify_tx, _) = broadcast::channel(16);
+        let server = start_test_server(vec![], notify_tx, None).await;
+
+        let mut ws = server.connect().await;
+
+        // Subscribe first, then unsubscribe.
+        send_rpc(
+            &mut ws,
+            10,
+            "subscribe_output",
+            serde_json::json!({"pane_id": "%1"}),
+        )
+        .await;
+
+        let resp = send_rpc(
+            &mut ws,
+            11,
+            "unsubscribe_output",
+            serde_json::json!({"pane_id": "%1"}),
+        )
+        .await;
+
+        assert_eq!(resp["id"], 11);
+        assert_eq!(resp["result"]["unsubscribed"], true);
+        assert_eq!(resp["result"]["pane_id"], "%1");
+    }
+
+    #[tokio::test]
+    async fn unsubscribe_output_missing_pane_id_returns_error() {
+        let (notify_tx, _) = broadcast::channel(16);
+        let server = start_test_server(vec![], notify_tx, None).await;
+
+        let mut ws = server.connect().await;
+        let resp = send_rpc(
+            &mut ws,
+            12,
+            "unsubscribe_output",
+            serde_json::json!({}),
+        )
+        .await;
+
+        assert_eq!(resp["id"], 12);
+        assert_eq!(resp["error"]["code"], -32602);
+    }
+
+    #[tokio::test]
+    async fn write_input_missing_pane_id_returns_error() {
+        let (notify_tx, _) = broadcast::channel(16);
+        let server = start_test_server(vec![], notify_tx, None).await;
+
+        let mut ws = server.connect().await;
+        let resp = send_rpc(
+            &mut ws,
+            20,
+            "write_input",
+            serde_json::json!({"data": "ls\n"}),
+        )
+        .await;
+
+        assert_eq!(resp["id"], 20);
+        assert_eq!(resp["error"]["code"], -32602);
+        assert!(resp["error"]["message"].as_str().unwrap().contains("pane_id"));
+    }
+
+    #[tokio::test]
+    async fn resize_pane_missing_params_returns_error() {
+        let (notify_tx, _) = broadcast::channel(16);
+        let server = start_test_server(vec![], notify_tx, None).await;
+
+        let mut ws = server.connect().await;
+
+        // Missing all params.
+        let resp = send_rpc(
+            &mut ws,
+            30,
+            "resize_pane",
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(resp["id"], 30);
+        assert_eq!(resp["error"]["code"], -32602);
+
+        // Missing cols/rows.
+        let resp2 = send_rpc(
+            &mut ws,
+            31,
+            "resize_pane",
+            serde_json::json!({"pane_id": "%1"}),
+        )
+        .await;
+        assert_eq!(resp2["id"], 31);
+        assert_eq!(resp2["error"]["code"], -32602);
     }
 }

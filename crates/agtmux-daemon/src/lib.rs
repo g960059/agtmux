@@ -9,6 +9,7 @@ pub mod server;
 pub mod sources;
 pub mod status;
 pub mod store;
+pub mod terminal_output;
 pub mod tmux_status;
 pub mod tui;
 pub mod ws_server;
