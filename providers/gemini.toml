@@ -1,0 +1,17 @@
+[detection]
+agent_type = "gemini"
+cmd_tokens = ["gemini"]
+
+[[signals]]
+pattern = ["running", "in_progress"]
+activity = "running"
+weight = 0.78
+confidence = 0.80
+ttl_secs = 90
+
+[[signals]]
+pattern = ["idle", "completed", "done"]
+activity = "idle"
+weight = 0.78
+confidence = 0.80
+ttl_secs = 90

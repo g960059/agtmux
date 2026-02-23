@@ -1,0 +1,10 @@
+{
+  "name": "claude_no_signal",
+  "description": "No evidence at all → Unknown",
+  "evidence": [],
+  "now": "2026-02-22T10:00:01Z",
+  "expected": {
+    "activity_state": "unknown",
+    "confidence_min": 0.0
+  }
+}

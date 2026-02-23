@@ -1,0 +1,86 @@
+{
+  "name": "claude_full_work_cycle",
+  "description": "Claude Code: idle → running → approval → running → idle",
+  "steps": [
+    {
+      "timestamp": "2026-02-22T10:00:00Z",
+      "new_evidence": [
+        {
+          "provider": "claude",
+          "kind": {"type": "HookEvent", "value": "SessionStart"},
+          "signal": "idle",
+          "weight": 0.88,
+          "confidence": 0.88,
+          "ttl": 90.0,
+          "source": "hook",
+          "reason_code": "session_start"
+        }
+      ],
+      "expected_activity": "idle"
+    },
+    {
+      "timestamp": "2026-02-22T10:00:05Z",
+      "new_evidence": [
+        {
+          "provider": "claude",
+          "kind": {"type": "HookEvent", "value": "PreToolUse"},
+          "signal": "running",
+          "weight": 0.90,
+          "confidence": 0.86,
+          "ttl": 90.0,
+          "source": "hook",
+          "reason_code": "pretooluse"
+        }
+      ],
+      "expected_activity": "running"
+    },
+    {
+      "timestamp": "2026-02-22T10:00:30Z",
+      "new_evidence": [
+        {
+          "provider": "claude",
+          "kind": {"type": "HookEvent", "value": "Notification"},
+          "signal": "waiting_approval",
+          "weight": 0.95,
+          "confidence": 0.92,
+          "ttl": 180.0,
+          "source": "hook",
+          "reason_code": "needs-approval"
+        }
+      ],
+      "expected_activity": "waiting_approval"
+    },
+    {
+      "timestamp": "2026-02-22T10:01:00Z",
+      "new_evidence": [
+        {
+          "provider": "claude",
+          "kind": {"type": "HookEvent", "value": "PostToolUse"},
+          "signal": "running",
+          "weight": 0.90,
+          "confidence": 0.86,
+          "ttl": 90.0,
+          "source": "hook",
+          "reason_code": "running"
+        }
+      ],
+      "expected_activity": "running"
+    },
+    {
+      "timestamp": "2026-02-22T10:02:00Z",
+      "new_evidence": [
+        {
+          "provider": "claude",
+          "kind": {"type": "HookEvent", "value": "Stop"},
+          "signal": "idle",
+          "weight": 0.88,
+          "confidence": 0.88,
+          "ttl": 90.0,
+          "source": "hook",
+          "reason_code": "stop"
+        }
+      ],
+      "expected_activity": "idle"
+    }
+  ]
+}

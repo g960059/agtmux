@@ -1,0 +1,22 @@
+{
+  "name": "claude_poller_idle",
+  "description": "Poller detects Idle — above min_score, accepted",
+  "evidence": [
+    {
+      "provider": "claude",
+      "kind": {"type": "PollerMatch", "value": "idle"},
+      "signal": "idle",
+      "weight": 0.88,
+      "confidence": 0.88,
+      "timestamp": "2026-02-22T10:00:00Z",
+      "ttl": 90.0,
+      "source": "poller",
+      "reason_code": "idle"
+    }
+  ],
+  "now": "2026-02-22T10:00:01Z",
+  "expected": {
+    "activity_state": "idle",
+    "confidence_min": 0.35
+  }
+}

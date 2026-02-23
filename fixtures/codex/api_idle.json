@@ -1,0 +1,22 @@
+{
+  "name": "codex_api_idle",
+  "description": "Codex API notification signals Idle (turn/completed)",
+  "evidence": [
+    {
+      "provider": "codex",
+      "kind": {"type": "ApiNotification", "value": "turn/completed"},
+      "signal": "idle",
+      "weight": 0.88,
+      "confidence": 0.86,
+      "timestamp": "2026-02-22T10:00:00Z",
+      "ttl": 90.0,
+      "source": "api",
+      "reason_code": "idle"
+    }
+  ],
+  "now": "2026-02-22T10:00:01Z",
+  "expected": {
+    "activity_state": "idle",
+    "confidence_min": 0.7
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "name": "competing_evidence",
+  "description": "Hook says Running + Poller says Idle → Running wins (higher precedence + hook bonus)",
+  "evidence": [
+    {
+      "provider": "claude",
+      "kind": {"type": "HookEvent", "value": "pretooluse"},
+      "signal": "running",
+      "weight": 0.90,
+      "confidence": 0.86,
+      "timestamp": "2026-02-22T10:00:00Z",
+      "ttl": 90.0,
+      "source": "hook",
+      "reason_code": "running"
+    },
+    {
+      "provider": "claude",
+      "kind": {"type": "PollerMatch", "value": "idle"},
+      "signal": "idle",
+      "weight": 0.88,
+      "confidence": 0.88,
+      "timestamp": "2026-02-22T10:00:00Z",
+      "ttl": 90.0,
+      "source": "poller",
+      "reason_code": "idle"
+    }
+  ],
+  "now": "2026-02-22T10:00:01Z",
+  "expected": {
+    "activity_state": "running",
+    "confidence_min": 0.8
+  }
+}

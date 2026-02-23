@@ -1,0 +1,22 @@
+{
+  "name": "codex_notify_running",
+  "description": "Codex notify hook signals Running",
+  "evidence": [
+    {
+      "provider": "codex",
+      "kind": {"type": "HookEvent", "value": "turn-complete"},
+      "signal": "running",
+      "weight": 0.92,
+      "confidence": 0.88,
+      "timestamp": "2026-02-22T10:00:00Z",
+      "ttl": 90.0,
+      "source": "hook",
+      "reason_code": "running"
+    }
+  ],
+  "now": "2026-02-22T10:00:01Z",
+  "expected": {
+    "activity_state": "running",
+    "confidence_min": 0.8
+  }
+}

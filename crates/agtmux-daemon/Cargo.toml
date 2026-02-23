@@ -1,0 +1,28 @@
+[package]
+name = "agtmux-daemon"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "agtmux_daemon"
+path = "src/lib.rs"
+
+[[bin]]
+name = "agtmux"
+path = "src/main.rs"
+
+[dependencies]
+agtmux-core = { path = "../agtmux-core" }
+agtmux-tmux = { path = "../agtmux-tmux" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+ratatui = "0.29"
+crossterm = "0.28"
+
+[dev-dependencies]
+tokio = { workspace = true }

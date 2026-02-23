@@ -1,0 +1,86 @@
+{
+  "name": "codex_approval_flow",
+  "description": "Codex: idle → running → approval → running → idle",
+  "steps": [
+    {
+      "timestamp": "2026-02-22T10:00:00Z",
+      "new_evidence": [
+        {
+          "provider": "codex",
+          "kind": {"type": "ApiNotification", "value": "turn/completed"},
+          "signal": "idle",
+          "weight": 0.88,
+          "confidence": 0.86,
+          "ttl": 90.0,
+          "source": "api",
+          "reason_code": "idle"
+        }
+      ],
+      "expected_activity": "idle"
+    },
+    {
+      "timestamp": "2026-02-22T10:00:05Z",
+      "new_evidence": [
+        {
+          "provider": "codex",
+          "kind": {"type": "ApiNotification", "value": "turn/started"},
+          "signal": "running",
+          "weight": 0.92,
+          "confidence": 0.88,
+          "ttl": 90.0,
+          "source": "api",
+          "reason_code": "running"
+        }
+      ],
+      "expected_activity": "running"
+    },
+    {
+      "timestamp": "2026-02-22T10:00:20Z",
+      "new_evidence": [
+        {
+          "provider": "codex",
+          "kind": {"type": "ApiNotification", "value": "item/commandExecution/requestApproval"},
+          "signal": "waiting_approval",
+          "weight": 0.97,
+          "confidence": 0.95,
+          "ttl": 180.0,
+          "source": "api",
+          "reason_code": "approval-requested"
+        }
+      ],
+      "expected_activity": "waiting_approval"
+    },
+    {
+      "timestamp": "2026-02-22T10:00:40Z",
+      "new_evidence": [
+        {
+          "provider": "codex",
+          "kind": {"type": "ApiNotification", "value": "turn/started"},
+          "signal": "running",
+          "weight": 0.92,
+          "confidence": 0.88,
+          "ttl": 90.0,
+          "source": "api",
+          "reason_code": "running"
+        }
+      ],
+      "expected_activity": "running"
+    },
+    {
+      "timestamp": "2026-02-22T10:01:00Z",
+      "new_evidence": [
+        {
+          "provider": "codex",
+          "kind": {"type": "ApiNotification", "value": "turn/completed"},
+          "signal": "idle",
+          "weight": 0.88,
+          "confidence": 0.86,
+          "ttl": 90.0,
+          "source": "api",
+          "reason_code": "idle"
+        }
+      ],
+      "expected_activity": "idle"
+    }
+  ]
+}

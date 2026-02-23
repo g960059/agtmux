@@ -1,0 +1,22 @@
+{
+  "name": "copilot_poller_running",
+  "description": "Copilot poller detects Running — poller-only, below running_enter_score",
+  "evidence": [
+    {
+      "provider": "copilot",
+      "kind": {"type": "PollerMatch", "value": "running"},
+      "signal": "running",
+      "weight": 0.74,
+      "confidence": 0.80,
+      "timestamp": "2026-02-22T10:00:00Z",
+      "ttl": 90.0,
+      "source": "poller",
+      "reason_code": "running"
+    }
+  ],
+  "now": "2026-02-22T10:00:01Z",
+  "expected": {
+    "activity_state": "unknown",
+    "confidence_min": 0.0
+  }
+}

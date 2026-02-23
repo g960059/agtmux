@@ -1,0 +1,54 @@
+{
+  "name": "poller_only",
+  "description": "No hook/API, poller-only state detection. Running won't pass threshold but WaitingApproval will.",
+  "steps": [
+    {
+      "timestamp": "2026-02-22T10:00:00Z",
+      "new_evidence": [
+        {
+          "provider": "claude",
+          "kind": {"type": "PollerMatch", "value": "idle"},
+          "signal": "idle",
+          "weight": 0.88,
+          "confidence": 0.88,
+          "ttl": 90.0,
+          "source": "poller",
+          "reason_code": "idle"
+        }
+      ],
+      "expected_activity": "idle"
+    },
+    {
+      "timestamp": "2026-02-22T10:00:05Z",
+      "new_evidence": [
+        {
+          "provider": "claude",
+          "kind": {"type": "PollerMatch", "value": "running"},
+          "signal": "running",
+          "weight": 0.90,
+          "confidence": 0.86,
+          "ttl": 90.0,
+          "source": "poller",
+          "reason_code": "running"
+        }
+      ],
+      "expected_activity": "unknown"
+    },
+    {
+      "timestamp": "2026-02-22T10:00:30Z",
+      "new_evidence": [
+        {
+          "provider": "claude",
+          "kind": {"type": "PollerMatch", "value": "approval"},
+          "signal": "waiting_approval",
+          "weight": 0.95,
+          "confidence": 0.92,
+          "ttl": 180.0,
+          "source": "poller",
+          "reason_code": "approval"
+        }
+      ],
+      "expected_activity": "waiting_approval"
+    }
+  ]
+}

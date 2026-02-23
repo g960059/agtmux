@@ -1,0 +1,10 @@
+{
+  "name": "empty_evidence",
+  "description": "Zero evidence → Unknown with zero confidence",
+  "evidence": [],
+  "now": "2026-02-22T10:00:01Z",
+  "expected": {
+    "activity_state": "unknown",
+    "confidence_min": 0.0
+  }
+}

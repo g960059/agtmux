@@ -1,0 +1,22 @@
+{
+  "name": "claude_hook_approval",
+  "description": "Claude hook event signals WaitingApproval",
+  "evidence": [
+    {
+      "provider": "claude",
+      "kind": {"type": "HookEvent", "value": "needs-approval"},
+      "signal": "waiting_approval",
+      "weight": 0.95,
+      "confidence": 0.92,
+      "timestamp": "2026-02-22T10:00:00Z",
+      "ttl": 180.0,
+      "source": "hook",
+      "reason_code": "needs-approval"
+    }
+  ],
+  "now": "2026-02-22T10:00:01Z",
+  "expected": {
+    "activity_state": "waiting_approval",
+    "confidence_min": 0.9
+  }
+}

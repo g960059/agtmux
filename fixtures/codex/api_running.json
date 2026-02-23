@@ -1,0 +1,22 @@
+{
+  "name": "codex_api_running",
+  "description": "Codex API notification signals Running (turn/started)",
+  "evidence": [
+    {
+      "provider": "codex",
+      "kind": {"type": "ApiNotification", "value": "turn/started"},
+      "signal": "running",
+      "weight": 0.92,
+      "confidence": 0.88,
+      "timestamp": "2026-02-22T10:00:00Z",
+      "ttl": 90.0,
+      "source": "api",
+      "reason_code": "running"
+    }
+  ],
+  "now": "2026-02-22T10:00:01Z",
+  "expected": {
+    "activity_state": "running",
+    "confidence_min": 0.8
+  }
+}

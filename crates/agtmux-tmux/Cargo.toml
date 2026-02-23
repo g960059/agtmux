@@ -1,0 +1,12 @@
+[package]
+name = "agtmux-tmux"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+agtmux-core = { path = "../agtmux-core" }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+bytes = { workspace = true }
+libc = "0.2"

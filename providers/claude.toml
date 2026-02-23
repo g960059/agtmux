@@ -1,0 +1,38 @@
+[detection]
+agent_type = "claude"
+cmd_tokens = ["claude", "claude-code", "cc"]
+
+[[signals]]
+pattern = ["approval", "waiting_approval", "needs_approval", "permission"]
+activity = "waiting_approval"
+weight = 0.95
+confidence = 0.92
+ttl_secs = 180
+
+[[signals]]
+pattern = ["waiting_input", "input_required", "await_user", "prompt"]
+activity = "waiting_input"
+weight = 0.90
+confidence = 0.88
+ttl_secs = 180
+
+[[signals]]
+pattern = ["error", "failed", "panic", "exception"]
+activity = "error"
+weight = 1.00
+confidence = 0.95
+ttl_secs = 180
+
+[[signals]]
+pattern = ["working", "running", "in_progress", "streaming", "task_started", "agent_turn_started", "pretooluse"]
+activity = "running"
+weight = 0.90
+confidence = 0.86
+ttl_secs = 90
+
+[[signals]]
+pattern = ["idle", "completed", "done", "stop", "session_end"]
+activity = "idle"
+weight = 0.88
+confidence = 0.88
+ttl_secs = 90

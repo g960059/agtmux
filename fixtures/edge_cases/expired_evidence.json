@@ -1,0 +1,22 @@
+{
+  "name": "expired_evidence",
+  "description": "All evidence is TTL-expired → Unknown",
+  "evidence": [
+    {
+      "provider": "claude",
+      "kind": {"type": "HookEvent", "value": "running"},
+      "signal": "running",
+      "weight": 0.90,
+      "confidence": 0.86,
+      "timestamp": "2026-02-22T10:00:00Z",
+      "ttl": 90.0,
+      "source": "hook",
+      "reason_code": "running"
+    }
+  ],
+  "now": "2026-02-22T10:05:00Z",
+  "expected": {
+    "activity_state": "unknown",
+    "confidence_min": 0.0
+  }
+}

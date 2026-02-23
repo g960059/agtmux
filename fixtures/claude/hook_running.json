@@ -1,0 +1,22 @@
+{
+  "name": "claude_hook_running",
+  "description": "Claude hook event signals Running (PreToolUse)",
+  "evidence": [
+    {
+      "provider": "claude",
+      "kind": {"type": "HookEvent", "value": "PreToolUse"},
+      "signal": "running",
+      "weight": 0.90,
+      "confidence": 0.86,
+      "timestamp": "2026-02-22T10:00:00Z",
+      "ttl": 90.0,
+      "source": "hook",
+      "reason_code": "pretooluse"
+    }
+  ],
+  "now": "2026-02-22T10:00:01Z",
+  "expected": {
+    "activity_state": "running",
+    "confidence_min": 0.8
+  }
+}

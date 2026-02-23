@@ -1,0 +1,54 @@
+{
+  "name": "claude_error_recovery",
+  "description": "Claude Code: running → error → idle recovery",
+  "steps": [
+    {
+      "timestamp": "2026-02-22T10:00:00Z",
+      "new_evidence": [
+        {
+          "provider": "claude",
+          "kind": {"type": "HookEvent", "value": "PreToolUse"},
+          "signal": "running",
+          "weight": 0.90,
+          "confidence": 0.86,
+          "ttl": 90.0,
+          "source": "hook",
+          "reason_code": "running"
+        }
+      ],
+      "expected_activity": "running"
+    },
+    {
+      "timestamp": "2026-02-22T10:00:10Z",
+      "new_evidence": [
+        {
+          "provider": "claude",
+          "kind": {"type": "HookEvent", "value": "error"},
+          "signal": "error",
+          "weight": 1.00,
+          "confidence": 0.95,
+          "ttl": 180.0,
+          "source": "hook",
+          "reason_code": "error"
+        }
+      ],
+      "expected_activity": "error"
+    },
+    {
+      "timestamp": "2026-02-22T10:04:00Z",
+      "new_evidence": [
+        {
+          "provider": "claude",
+          "kind": {"type": "HookEvent", "value": "SessionStart"},
+          "signal": "idle",
+          "weight": 0.88,
+          "confidence": 0.88,
+          "ttl": 90.0,
+          "source": "hook",
+          "reason_code": "session_start"
+        }
+      ],
+      "expected_activity": "idle"
+    }
+  ]
+}

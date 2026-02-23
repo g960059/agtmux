@@ -1,0 +1,17 @@
+[package]
+name = "agtmux-core"
+version.workspace = true
+edition.workspace = true
+
+# Pure library — no tokio, no rusqlite, no async.
+# Only serde, chrono, toml allowed.
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = "1"

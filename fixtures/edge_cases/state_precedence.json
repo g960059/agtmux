@@ -1,0 +1,33 @@
+{
+  "name": "state_precedence",
+  "description": "Error + Running evidence → Error wins (highest precedence)",
+  "evidence": [
+    {
+      "provider": "claude",
+      "kind": {"type": "HookEvent", "value": "running"},
+      "signal": "running",
+      "weight": 0.90,
+      "confidence": 0.86,
+      "timestamp": "2026-02-22T10:00:00Z",
+      "ttl": 90.0,
+      "source": "hook",
+      "reason_code": "running"
+    },
+    {
+      "provider": "claude",
+      "kind": {"type": "HookEvent", "value": "error"},
+      "signal": "error",
+      "weight": 1.00,
+      "confidence": 0.95,
+      "timestamp": "2026-02-22T10:00:00Z",
+      "ttl": 180.0,
+      "source": "hook",
+      "reason_code": "error"
+    }
+  ],
+  "now": "2026-02-22T10:00:01Z",
+  "expected": {
+    "activity_state": "error",
+    "confidence_min": 0.95
+  }
+}

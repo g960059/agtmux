@@ -1,0 +1,22 @@
+{
+  "name": "claude_poller_false_positive",
+  "description": "Poller thinks Running but weak source suppresses below threshold → Unknown",
+  "evidence": [
+    {
+      "provider": "claude",
+      "kind": {"type": "PollerMatch", "value": "running"},
+      "signal": "running",
+      "weight": 0.78,
+      "confidence": 0.80,
+      "timestamp": "2026-02-22T10:00:00Z",
+      "ttl": 90.0,
+      "source": "poller",
+      "reason_code": "running"
+    }
+  ],
+  "now": "2026-02-22T10:00:01Z",
+  "expected": {
+    "activity_state": "unknown",
+    "confidence_min": 0.0
+  }
+}

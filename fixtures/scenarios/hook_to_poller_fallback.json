@@ -1,0 +1,38 @@
+{
+  "name": "hook_to_poller_fallback",
+  "description": "Hook evidence expires, falls back to poller-only (lower confidence)",
+  "steps": [
+    {
+      "timestamp": "2026-02-22T10:00:00Z",
+      "new_evidence": [
+        {
+          "provider": "claude",
+          "kind": {"type": "HookEvent", "value": "PreToolUse"},
+          "signal": "running",
+          "weight": 0.90,
+          "confidence": 0.86,
+          "ttl": 90.0,
+          "source": "hook",
+          "reason_code": "running"
+        }
+      ],
+      "expected_activity": "running"
+    },
+    {
+      "timestamp": "2026-02-22T10:02:00Z",
+      "new_evidence": [
+        {
+          "provider": "claude",
+          "kind": {"type": "PollerMatch", "value": "idle"},
+          "signal": "idle",
+          "weight": 0.88,
+          "confidence": 0.88,
+          "ttl": 90.0,
+          "source": "poller",
+          "reason_code": "idle"
+        }
+      ],
+      "expected_activity": "idle"
+    }
+  ]
+}

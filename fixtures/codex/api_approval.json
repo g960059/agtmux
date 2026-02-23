@@ -1,0 +1,22 @@
+{
+  "name": "codex_api_approval",
+  "description": "Codex API notification signals WaitingApproval",
+  "evidence": [
+    {
+      "provider": "codex",
+      "kind": {"type": "ApiNotification", "value": "item/commandExecution/requestApproval"},
+      "signal": "waiting_approval",
+      "weight": 0.97,
+      "confidence": 0.95,
+      "timestamp": "2026-02-22T10:00:00Z",
+      "ttl": 180.0,
+      "source": "api",
+      "reason_code": "approval-requested"
+    }
+  ],
+  "now": "2026-02-22T10:00:01Z",
+  "expected": {
+    "activity_state": "waiting_approval",
+    "confidence_min": 0.9
+  }
+}
