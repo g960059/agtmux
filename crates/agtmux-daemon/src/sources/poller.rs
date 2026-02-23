@@ -117,6 +117,7 @@ impl PollerSource {
                 let event = SourceEvent::Evidence {
                     pane_id: pane_id.clone(),
                     evidence: all_evidence,
+                    meta: Some(meta),
                 };
                 if let Err(e) = self.tx.send(event).await {
                     tracing::warn!(pane_id = %pane_id, "failed to send Evidence event: {e}");

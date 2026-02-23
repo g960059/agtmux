@@ -194,10 +194,7 @@ async fn run_daemon(
         }
     };
 
-    let builders: Vec<_> = adapters
-        .into_iter()
-        .map(|(_detector, builder)| builder)
-        .collect();
+    let (detectors, builders): (Vec<_>, Vec<_>) = adapters.into_iter().unzip();
 
     let mut poller = PollerSource::new(
         backend,
@@ -221,7 +218,7 @@ async fn run_daemon(
     // 6. Create Orchestrator (with shared_state so it can write pane info)
     // ---------------------------------------------------------------
     let mut orchestrator =
-        Orchestrator::new(source_rx, notify_tx.clone(), shared_state.clone());
+        Orchestrator::new(source_rx, notify_tx.clone(), shared_state.clone(), detectors);
 
     // ---------------------------------------------------------------
     // 7. Create DaemonServer (reads shared_state for list_panes API)

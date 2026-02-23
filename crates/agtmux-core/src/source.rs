@@ -1,4 +1,4 @@
-use crate::types::{Evidence, SourceType};
+use crate::types::{Evidence, PaneMeta, SourceType};
 use chrono::{DateTime, Utc};
 
 /// Marker trait for state sources.
@@ -18,10 +18,13 @@ pub enum SourceEvent {
         payload: String,
         timestamp: DateTime<Utc>,
     },
-    /// Pre-built evidence (from pollers that do their own matching)
+    /// Pre-built evidence (from pollers that do their own matching).
+    /// Optionally carries the `PaneMeta` snapshot that was used to produce
+    /// the evidence, so the orchestrator can run provider detection.
     Evidence {
         pane_id: String,
         evidence: Vec<Evidence>,
+        meta: Option<PaneMeta>,
     },
     /// Topology change from the backend
     TopologyChange(TopologyEvent),

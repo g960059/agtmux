@@ -151,6 +151,7 @@ fn hook_to_source_event(hook: &HookEvent) -> SourceEvent {
     SourceEvent::Evidence {
         pane_id: hook.pane_id.clone(),
         evidence: vec![evidence],
+        meta: None,
     }
 }
 

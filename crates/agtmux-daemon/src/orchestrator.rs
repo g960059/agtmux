@@ -1,3 +1,4 @@
+use agtmux_core::adapt::ProviderDetector;
 use agtmux_core::attn::derive_attention_state;
 use agtmux_core::engine::{Engine, EngineConfig, ResolvedActivity};
 use agtmux_core::source::{SourceEvent, TopologyEvent};
@@ -9,6 +10,10 @@ use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info};
 
 use crate::server::{PaneInfo, SharedState};
+
+/// Minimum confidence threshold for provider detection.
+/// Detectors returning a confidence below this value are ignored.
+const PROVIDER_DETECTION_THRESHOLD: f64 = 0.5;
 
 /// State tracked per pane.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,8 +38,13 @@ pub enum StateNotification {
 
 pub struct Orchestrator {
     engine: Engine,
+    /// Provider detectors loaded from TOML definitions.
+    detectors: Vec<Box<dyn ProviderDetector>>,
     /// Per-pane evidence window. Key = pane_id.
     evidence_windows: HashMap<String, Vec<Evidence>>,
+    /// Cached PaneMeta per pane, populated from evidence context.
+    /// Used as input to ProviderDetector::detect().
+    pane_metas: HashMap<String, PaneMeta>,
     /// Current resolved state per pane.
     pane_states: HashMap<String, PaneState>,
     /// Receives events from all sources.
@@ -80,10 +90,17 @@ impl Orchestrator {
         source_rx: mpsc::Receiver<SourceEvent>,
         notify_tx: broadcast::Sender<StateNotification>,
         shared_state: SharedState,
+        detectors: Vec<Box<dyn ProviderDetector>>,
     ) -> Self {
+        info!(
+            detector_count = detectors.len(),
+            "orchestrator: loaded provider detectors"
+        );
         Self {
             engine: Engine::new(EngineConfig::default()),
+            detectors,
             evidence_windows: HashMap::new(),
+            pane_metas: HashMap::new(),
             pane_states: HashMap::new(),
             source_rx,
             notify_tx,
@@ -102,8 +119,15 @@ impl Orchestrator {
 
     fn handle_event(&mut self, event: SourceEvent) {
         match event {
-            SourceEvent::Evidence { pane_id, evidence } => {
+            SourceEvent::Evidence {
+                pane_id,
+                evidence,
+                meta,
+            } => {
                 debug!(pane_id = %pane_id, count = evidence.len(), "ingesting evidence");
+                if let Some(m) = meta {
+                    self.update_pane_meta(&pane_id, m);
+                }
                 self.ingest_evidence(&pane_id, evidence);
                 self.evaluate_pane(&pane_id);
             }
@@ -138,9 +162,28 @@ impl Orchestrator {
         }
     }
 
+    /// Remove expired evidence from a pane's window.
+    /// Evidence is expired when `now > evidence.timestamp + evidence.ttl`.
+    fn expire_evidence(&mut self, pane_id: &str, now: DateTime<Utc>) {
+        if let Some(window) = self.evidence_windows.get_mut(pane_id) {
+            window.retain(|ev| {
+                let ttl_ms = ev.ttl.as_millis() as i64;
+                if ttl_ms <= 0 {
+                    // Zero TTL means no expiration from this filter; the engine
+                    // will apply the default TTL itself.
+                    return true;
+                }
+                let age = now.signed_duration_since(ev.timestamp);
+                age.num_milliseconds() <= ttl_ms
+            });
+        }
+    }
+
     /// Re-evaluate a pane's state and broadcast if changed.
     fn evaluate_pane(&mut self, pane_id: &str) {
         let now = Utc::now();
+        self.expire_evidence(pane_id, now);
+
         let window = match self.evidence_windows.get(pane_id) {
             Some(w) => w,
             None => return,
@@ -161,10 +204,12 @@ impl Orchestrator {
             now,
         );
 
+        let (detected_provider, detected_confidence) = self.detect_provider(pane_id);
+
         let new_state = PaneState {
             pane_id: pane_id.to_string(),
-            provider: self.detect_provider(pane_id),
-            provider_confidence: 0.0, // TODO: track from detection in Phase 2
+            provider: detected_provider,
+            provider_confidence: detected_confidence,
             activity: resolved.clone(),
             attention,
             last_event_type,
@@ -195,11 +240,46 @@ impl Orchestrator {
         self.sync_shared_state();
     }
 
-    fn detect_provider(&self, _pane_id: &str) -> Option<Provider> {
-        // Provider detection will be wired in Phase 2 when PaneMeta tracking is
-        // added to Orchestrator and ProviderDetector instances are loaded here.
-        // For now, return None — callers can still infer provider from evidence.
-        None
+    /// Run all registered ProviderDetectors against the cached PaneMeta for this
+    /// pane. Returns the provider with the highest confidence above the threshold,
+    /// or `(None, 0.0)` if no detector matches.
+    fn detect_provider(&self, pane_id: &str) -> (Option<Provider>, f64) {
+        let meta = match self.pane_metas.get(pane_id) {
+            Some(m) => m,
+            None => return (None, 0.0),
+        };
+
+        let mut best_provider: Option<Provider> = None;
+        let mut best_confidence: f64 = 0.0;
+
+        for detector in &self.detectors {
+            if let Some(confidence) = detector.detect(meta) {
+                if confidence > best_confidence {
+                    best_confidence = confidence;
+                    best_provider = Some(detector.id());
+                }
+            }
+        }
+
+        if best_confidence >= PROVIDER_DETECTION_THRESHOLD {
+            debug!(
+                pane_id = %pane_id,
+                provider = ?best_provider,
+                confidence = best_confidence,
+                "provider detected"
+            );
+            (best_provider, best_confidence)
+        } else {
+            (None, 0.0)
+        }
+    }
+
+    /// Update the cached PaneMeta for a pane. Called when evidence arrives,
+    /// since the poller already extracts metadata from the terminal backend.
+    /// We infer metadata from evidence context: the provider field tells us
+    /// what builder produced it, and the reason_code carries raw state info.
+    pub fn update_pane_meta(&mut self, pane_id: &str, meta: PaneMeta) {
+        self.pane_metas.insert(pane_id.to_string(), meta);
     }
 
     /// Synchronize the SharedState with current pane_states so the server's
@@ -223,6 +303,20 @@ impl Orchestrator {
         match event {
             TopologyEvent::PaneAdded { ref pane_id } => {
                 info!(pane_id = %pane_id, "pane added");
+                // Initialize an empty PaneMeta; it will be populated by the
+                // poller on the next poll cycle via update_pane_meta().
+                self.pane_metas.entry(pane_id.clone()).or_insert_with(|| {
+                    PaneMeta {
+                        pane_id: pane_id.clone(),
+                        agent_type: String::new(),
+                        current_cmd: String::new(),
+                        pane_title: String::new(),
+                        session_label: String::new(),
+                        raw_state: String::new(),
+                        raw_reason_code: String::new(),
+                        last_event_type: String::new(),
+                    }
+                });
                 let _ = self.notify_tx.send(StateNotification::PaneAdded {
                     pane_id: pane_id.clone(),
                 });
@@ -231,6 +325,7 @@ impl Orchestrator {
                 info!(pane_id = %pane_id, "pane removed");
                 self.evidence_windows.remove(pane_id);
                 self.pane_states.remove(pane_id);
+                self.pane_metas.remove(pane_id);
                 let _ = self.notify_tx.send(StateNotification::PaneRemoved {
                     pane_id: pane_id.clone(),
                 });
@@ -268,7 +363,7 @@ mod tests {
         let (source_tx, source_rx) = mpsc::channel(64);
         let (notify_tx, notify_rx) = broadcast::channel(64);
         let shared_state: SharedState = Arc::new(RwLock::new(DaemonState::default()));
-        let orch = Orchestrator::new(source_rx, notify_tx, shared_state.clone());
+        let orch = Orchestrator::new(source_rx, notify_tx, shared_state.clone(), vec![]);
         (source_tx, notify_rx, orch, shared_state)
     }
 
@@ -609,7 +704,7 @@ mod tests {
         let (tx, rx) = mpsc::channel::<SourceEvent>(64);
         let (ntx, _nrx) = broadcast::channel::<StateNotification>(64);
         let shared: SharedState = Arc::new(RwLock::new(DaemonState::default()));
-        let mut orch = Orchestrator::new(rx, ntx, shared.clone());
+        let mut orch = Orchestrator::new(rx, ntx, shared.clone(), vec![]);
 
         // Send events, then close channel
         let ev = make_evidence(
@@ -623,6 +718,7 @@ mod tests {
         tx.send(SourceEvent::Evidence {
             pane_id: "%1".into(),
             evidence: vec![ev],
+            meta: None,
         })
         .await
         .unwrap();
@@ -812,7 +908,7 @@ mod tests {
         let (tx, rx) = mpsc::channel::<SourceEvent>(64);
         let (ntx, _nrx) = broadcast::channel::<StateNotification>(64);
         let shared: SharedState = Arc::new(RwLock::new(DaemonState::default()));
-        let mut orch = Orchestrator::new(rx, ntx, shared.clone());
+        let mut orch = Orchestrator::new(rx, ntx, shared.clone(), vec![]);
 
         let ev = make_evidence(
             Provider::Claude,
@@ -825,6 +921,7 @@ mod tests {
         tx.send(SourceEvent::Evidence {
             pane_id: "%1".into(),
             evidence: vec![ev],
+            meta: None,
         })
         .await
         .unwrap();
@@ -837,5 +934,505 @@ mod tests {
         assert_eq!(state.panes.len(), 1);
         assert_eq!(state.panes[0].pane_id, "%1");
         assert_eq!(state.panes[0].activity_state, "running");
+    }
+
+    // -----------------------------------------------------------------------
+    // Evidence TTL enforcement tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn expire_evidence_filters_expired_entries() {
+        let (_tx, _rx, mut orch, _shared) = create_orchestrator();
+
+        // Create evidence that is already expired (timestamp 200s ago, TTL 90s)
+        let mut ev_expired = make_evidence(
+            Provider::Claude,
+            ActivityState::Running,
+            0.9,
+            0.9,
+            SourceType::Hook,
+            "running",
+        );
+        ev_expired.timestamp = Utc::now() - chrono::Duration::seconds(200);
+        ev_expired.ttl = Duration::from_secs(90);
+
+        // Create evidence that is still valid (timestamp now, TTL 90s)
+        let ev_valid = make_evidence(
+            Provider::Codex,
+            ActivityState::Idle,
+            0.8,
+            0.8,
+            SourceType::Poller,
+            "idle",
+        );
+
+        orch.evidence_windows
+            .insert("%1".to_string(), vec![ev_expired, ev_valid]);
+
+        orch.expire_evidence("%1", Utc::now());
+
+        let window = orch.evidence_windows.get("%1").unwrap();
+        assert_eq!(window.len(), 1, "expired evidence should be removed");
+        assert_eq!(
+            window[0].signal,
+            ActivityState::Idle,
+            "only the valid evidence should remain"
+        );
+    }
+
+    #[test]
+    fn expired_evidence_filtered_before_evaluation() {
+        let (_tx, _rx, mut orch, _shared) = create_orchestrator();
+
+        // Create evidence that is already expired
+        let mut ev = make_evidence(
+            Provider::Claude,
+            ActivityState::Running,
+            0.9,
+            0.9,
+            SourceType::Hook,
+            "running",
+        );
+        ev.timestamp = Utc::now() - chrono::Duration::seconds(200);
+        ev.ttl = Duration::from_secs(90);
+
+        // Add a valid evidence so pane state gets created
+        let ev_valid = make_evidence(
+            Provider::Claude,
+            ActivityState::WaitingInput,
+            0.95,
+            0.95,
+            SourceType::Hook,
+            "waiting",
+        );
+
+        orch.ingest_evidence("%1", vec![ev, ev_valid]);
+
+        // Before evaluate_pane, the window has 2 entries (different sources needed
+        // for both to remain, but they share provider+source so supersede applies).
+        // Let's use different sources to keep both.
+        orch.evidence_windows.clear();
+        let mut ev_expired = make_evidence(
+            Provider::Claude,
+            ActivityState::Running,
+            0.9,
+            0.9,
+            SourceType::Hook,
+            "running",
+        );
+        ev_expired.timestamp = Utc::now() - chrono::Duration::seconds(200);
+        ev_expired.ttl = Duration::from_secs(90);
+
+        let ev_valid2 = make_evidence(
+            Provider::Codex,
+            ActivityState::WaitingInput,
+            0.95,
+            0.95,
+            SourceType::Api,
+            "waiting",
+        );
+        orch.evidence_windows
+            .insert("%1".to_string(), vec![ev_expired, ev_valid2]);
+
+        orch.evaluate_pane("%1");
+
+        // After evaluation, expired evidence should have been removed
+        let window = orch.evidence_windows.get("%1").unwrap();
+        assert_eq!(
+            window.len(),
+            1,
+            "expired evidence should be removed during evaluation"
+        );
+
+        // The resolved state should be based only on the valid evidence
+        let state = orch.get_pane_state("%1").unwrap();
+        assert_eq!(
+            state.activity.state,
+            ActivityState::WaitingInput,
+            "state should reflect only non-expired evidence"
+        );
+    }
+
+    #[test]
+    fn pane_with_only_expired_evidence_resolves_to_unknown() {
+        let (_tx, _rx, mut orch, _shared) = create_orchestrator();
+
+        // Create evidence that is already expired
+        let mut ev = make_evidence(
+            Provider::Claude,
+            ActivityState::Running,
+            0.9,
+            0.9,
+            SourceType::Hook,
+            "running",
+        );
+        ev.timestamp = Utc::now() - chrono::Duration::seconds(200);
+        ev.ttl = Duration::from_secs(90);
+
+        orch.evidence_windows
+            .insert("%1".to_string(), vec![ev]);
+
+        orch.evaluate_pane("%1");
+
+        // With all evidence expired, the engine receives an empty slice
+        // and should resolve to Unknown
+        let state = orch.get_pane_state("%1").unwrap();
+        assert_eq!(
+            state.activity.state,
+            ActivityState::Unknown,
+            "pane with only expired evidence should resolve to Unknown"
+        );
+        assert_eq!(state.activity.confidence, 0.0);
+    }
+
+    #[test]
+    fn evidence_window_cleaned_on_pane_removed() {
+        let (_tx, _rx, mut orch, _shared) = create_orchestrator();
+
+        // Populate evidence for two panes
+        let ev1 = make_evidence(
+            Provider::Claude,
+            ActivityState::Running,
+            0.9,
+            0.9,
+            SourceType::Hook,
+            "running",
+        );
+        let ev2 = make_evidence(
+            Provider::Codex,
+            ActivityState::Idle,
+            0.8,
+            0.8,
+            SourceType::Poller,
+            "idle",
+        );
+        orch.ingest_evidence("%1", vec![ev1]);
+        orch.ingest_evidence("%2", vec![ev2]);
+        orch.evaluate_pane("%1");
+        orch.evaluate_pane("%2");
+
+        assert!(orch.evidence_windows.contains_key("%1"));
+        assert!(orch.evidence_windows.contains_key("%2"));
+        assert!(orch.pane_states.contains_key("%1"));
+        assert!(orch.pane_states.contains_key("%2"));
+
+        // Remove pane %1
+        orch.handle_topology(TopologyEvent::PaneRemoved {
+            pane_id: "%1".into(),
+        });
+
+        // %1 should be cleaned up, %2 should remain
+        assert!(
+            !orch.evidence_windows.contains_key("%1"),
+            "evidence window should be removed for removed pane"
+        );
+        assert!(
+            !orch.pane_states.contains_key("%1"),
+            "pane state should be removed for removed pane"
+        );
+        assert!(
+            orch.evidence_windows.contains_key("%2"),
+            "other panes should not be affected"
+        );
+        assert!(
+            orch.pane_states.contains_key("%2"),
+            "other pane states should not be affected"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Provider detection tests
+    // -----------------------------------------------------------------------
+
+    /// A test-only ProviderDetector that returns a fixed confidence for any
+    /// PaneMeta whose `current_cmd` contains the given token.
+    struct MockDetector {
+        provider: Provider,
+        cmd_token: String,
+        confidence: f64,
+    }
+
+    impl MockDetector {
+        fn new(provider: Provider, cmd_token: &str, confidence: f64) -> Self {
+            Self {
+                provider,
+                cmd_token: cmd_token.to_string(),
+                confidence,
+            }
+        }
+    }
+
+    impl ProviderDetector for MockDetector {
+        fn id(&self) -> Provider {
+            self.provider
+        }
+
+        fn detect(&self, meta: &PaneMeta) -> Option<f64> {
+            if meta.current_cmd.contains(&self.cmd_token) {
+                Some(self.confidence)
+            } else {
+                None
+            }
+        }
+    }
+
+    /// Helper to create an orchestrator with specific detectors.
+    fn create_orchestrator_with_detectors(
+        detectors: Vec<Box<dyn ProviderDetector>>,
+    ) -> (
+        mpsc::Sender<SourceEvent>,
+        broadcast::Receiver<StateNotification>,
+        Orchestrator,
+        SharedState,
+    ) {
+        let (source_tx, source_rx) = mpsc::channel(64);
+        let (notify_tx, notify_rx) = broadcast::channel(64);
+        let shared_state: SharedState = Arc::new(RwLock::new(DaemonState::default()));
+        let orch = Orchestrator::new(source_rx, notify_tx, shared_state.clone(), detectors);
+        (source_tx, notify_rx, orch, shared_state)
+    }
+
+    #[test]
+    fn detect_provider_returns_correct_provider_when_detector_matches() {
+        let detectors: Vec<Box<dyn ProviderDetector>> = vec![
+            Box::new(MockDetector::new(Provider::Claude, "claude", 0.9)),
+        ];
+        let (_tx, _rx, mut orch, _shared) = create_orchestrator_with_detectors(detectors);
+
+        // Set up PaneMeta for the pane with current_cmd containing "claude"
+        orch.update_pane_meta(
+            "%1",
+            PaneMeta {
+                pane_id: "%1".into(),
+                agent_type: String::new(),
+                current_cmd: "claude".into(),
+                pane_title: String::new(),
+                session_label: String::new(),
+                raw_state: String::new(),
+                raw_reason_code: String::new(),
+                last_event_type: String::new(),
+            },
+        );
+
+        let (provider, confidence) = orch.detect_provider("%1");
+        assert_eq!(provider, Some(Provider::Claude));
+        assert!((confidence - 0.9).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn detect_provider_returns_none_when_no_detector_matches() {
+        let detectors: Vec<Box<dyn ProviderDetector>> = vec![
+            Box::new(MockDetector::new(Provider::Claude, "claude", 0.9)),
+            Box::new(MockDetector::new(Provider::Codex, "codex", 0.85)),
+        ];
+        let (_tx, _rx, mut orch, _shared) = create_orchestrator_with_detectors(detectors);
+
+        // Set up PaneMeta with a command that matches no detector
+        orch.update_pane_meta(
+            "%1",
+            PaneMeta {
+                pane_id: "%1".into(),
+                agent_type: String::new(),
+                current_cmd: "bash".into(),
+                pane_title: String::new(),
+                session_label: String::new(),
+                raw_state: String::new(),
+                raw_reason_code: String::new(),
+                last_event_type: String::new(),
+            },
+        );
+
+        let (provider, confidence) = orch.detect_provider("%1");
+        assert_eq!(provider, None);
+        assert!((confidence - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn detect_provider_returns_none_when_no_meta_exists() {
+        let detectors: Vec<Box<dyn ProviderDetector>> = vec![
+            Box::new(MockDetector::new(Provider::Claude, "claude", 0.9)),
+        ];
+        let (_tx, _rx, orch, _shared) = create_orchestrator_with_detectors(detectors);
+
+        // No PaneMeta registered for this pane
+        let (provider, confidence) = orch.detect_provider("%unknown");
+        assert_eq!(provider, None);
+        assert!((confidence - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn detect_provider_highest_confidence_wins_among_multiple_detectors() {
+        let detectors: Vec<Box<dyn ProviderDetector>> = vec![
+            Box::new(MockDetector::new(Provider::Claude, "agent", 0.7)),
+            Box::new(MockDetector::new(Provider::Codex, "agent", 0.95)),
+            Box::new(MockDetector::new(Provider::Gemini, "agent", 0.6)),
+        ];
+        let (_tx, _rx, mut orch, _shared) = create_orchestrator_with_detectors(detectors);
+
+        // All three detectors match (current_cmd contains "agent"), but Codex
+        // has the highest confidence.
+        orch.update_pane_meta(
+            "%1",
+            PaneMeta {
+                pane_id: "%1".into(),
+                agent_type: String::new(),
+                current_cmd: "agent".into(),
+                pane_title: String::new(),
+                session_label: String::new(),
+                raw_state: String::new(),
+                raw_reason_code: String::new(),
+                last_event_type: String::new(),
+            },
+        );
+
+        let (provider, confidence) = orch.detect_provider("%1");
+        assert_eq!(provider, Some(Provider::Codex));
+        assert!((confidence - 0.95).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn detect_provider_below_threshold_returns_none() {
+        // Detector returns 0.4 which is below the 0.5 threshold
+        let detectors: Vec<Box<dyn ProviderDetector>> = vec![
+            Box::new(MockDetector::new(Provider::Claude, "claude", 0.4)),
+        ];
+        let (_tx, _rx, mut orch, _shared) = create_orchestrator_with_detectors(detectors);
+
+        orch.update_pane_meta(
+            "%1",
+            PaneMeta {
+                pane_id: "%1".into(),
+                agent_type: String::new(),
+                current_cmd: "claude".into(),
+                pane_title: String::new(),
+                session_label: String::new(),
+                raw_state: String::new(),
+                raw_reason_code: String::new(),
+                last_event_type: String::new(),
+            },
+        );
+
+        let (provider, confidence) = orch.detect_provider("%1");
+        assert_eq!(provider, None, "confidence 0.4 is below threshold 0.5");
+        assert!((confidence - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn detect_provider_at_threshold_returns_match() {
+        // Detector returns exactly 0.5 which equals the threshold
+        let detectors: Vec<Box<dyn ProviderDetector>> = vec![
+            Box::new(MockDetector::new(Provider::Claude, "claude", 0.5)),
+        ];
+        let (_tx, _rx, mut orch, _shared) = create_orchestrator_with_detectors(detectors);
+
+        orch.update_pane_meta(
+            "%1",
+            PaneMeta {
+                pane_id: "%1".into(),
+                agent_type: String::new(),
+                current_cmd: "claude".into(),
+                pane_title: String::new(),
+                session_label: String::new(),
+                raw_state: String::new(),
+                raw_reason_code: String::new(),
+                last_event_type: String::new(),
+            },
+        );
+
+        let (provider, confidence) = orch.detect_provider("%1");
+        assert_eq!(
+            provider,
+            Some(Provider::Claude),
+            "confidence exactly at threshold should match"
+        );
+        assert!((confidence - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn evaluate_pane_populates_provider_from_detection() {
+        let detectors: Vec<Box<dyn ProviderDetector>> = vec![
+            Box::new(MockDetector::new(Provider::Claude, "claude", 0.86)),
+        ];
+        let (_tx, _rx, mut orch, _shared) = create_orchestrator_with_detectors(detectors);
+
+        // Set up PaneMeta
+        orch.update_pane_meta(
+            "%1",
+            PaneMeta {
+                pane_id: "%1".into(),
+                agent_type: String::new(),
+                current_cmd: "claude".into(),
+                pane_title: String::new(),
+                session_label: String::new(),
+                raw_state: String::new(),
+                raw_reason_code: String::new(),
+                last_event_type: String::new(),
+            },
+        );
+
+        // Ingest evidence and evaluate
+        let ev = make_evidence(
+            Provider::Claude,
+            ActivityState::Running,
+            0.9,
+            0.9,
+            SourceType::Hook,
+            "running",
+        );
+        orch.ingest_evidence("%1", vec![ev]);
+        orch.evaluate_pane("%1");
+
+        let state = orch.get_pane_state("%1").expect("pane state should exist");
+        assert_eq!(state.provider, Some(Provider::Claude));
+        assert!((state.provider_confidence - 0.86).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn pane_meta_cleaned_on_pane_removed() {
+        let (_tx, _rx, mut orch, _shared) = create_orchestrator();
+
+        // Set up PaneMeta
+        orch.update_pane_meta(
+            "%1",
+            PaneMeta {
+                pane_id: "%1".into(),
+                agent_type: String::new(),
+                current_cmd: "claude".into(),
+                pane_title: String::new(),
+                session_label: String::new(),
+                raw_state: String::new(),
+                raw_reason_code: String::new(),
+                last_event_type: String::new(),
+            },
+        );
+        assert!(orch.pane_metas.contains_key("%1"));
+
+        // Remove the pane
+        orch.handle_topology(TopologyEvent::PaneRemoved {
+            pane_id: "%1".into(),
+        });
+
+        assert!(
+            !orch.pane_metas.contains_key("%1"),
+            "pane_metas should be cleaned up on pane removal"
+        );
+    }
+
+    #[test]
+    fn topology_pane_added_initializes_empty_meta() {
+        let (_tx, _rx, mut orch, _shared) = create_orchestrator();
+
+        orch.handle_topology(TopologyEvent::PaneAdded {
+            pane_id: "%5".into(),
+        });
+
+        assert!(
+            orch.pane_metas.contains_key("%5"),
+            "PaneAdded should initialize an empty PaneMeta"
+        );
+        let meta = &orch.pane_metas["%5"];
+        assert_eq!(meta.pane_id, "%5");
+        assert_eq!(meta.current_cmd, "");
+        assert_eq!(meta.pane_title, "");
     }
 }
