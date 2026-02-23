@@ -1,0 +1,13 @@
+# GitHub Copilot CLI provider definition
+# Signal→Evidence mapping for state estimation
+# Copilot currently supports poller only (no hooks, no API, no file monitoring)
+
+[detection]
+agent_type = "copilot"
+cmd_tokens = ["copilot"]
+
+[[signals]]
+pattern = ["running"]
+activity = "Running"
+weight = 0.74
+confidence = 0.80

@@ -1,0 +1,13 @@
+# Gemini CLI provider definition
+# Signal→Evidence mapping for state estimation
+# Gemini currently supports poller only (no hooks, no API, no file monitoring)
+
+[detection]
+agent_type = "gemini"
+cmd_tokens = ["gemini"]
+
+[[signals]]
+pattern = ["running"]
+activity = "Running"
+weight = 0.78
+confidence = 0.80

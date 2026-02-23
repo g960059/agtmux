@@ -1,0 +1,72 @@
+# Claude Code provider definition
+# Signal→Evidence mapping for state estimation
+
+[detection]
+agent_type = "claude"
+cmd_tokens = ["claude"]
+
+# --- Hook Events ---
+
+[[signals]]
+pattern = ["approval", "waiting_approval", "needs_approval", "permission"]
+activity = "WaitingApproval"
+weight = 0.95
+confidence = 0.92
+
+[[signals]]
+pattern = ["waiting_input", "input_required", "await_user", "prompt"]
+activity = "WaitingInput"
+weight = 0.90
+confidence = 0.88
+
+[[signals]]
+pattern = ["error", "failed", "panic", "exception"]
+activity = "Error"
+weight = 1.00
+confidence = 0.95
+
+[[signals]]
+pattern = ["working", "running", "in_progress", "streaming", "task_started", "agent_turn_started", "pretooluse"]
+activity = "Running"
+weight = 0.90
+confidence = 0.86
+
+[[signals]]
+pattern = ["idle", "completed", "done", "stop", "wrapper_exit", "session_end"]
+activity = "Idle"
+weight = 0.88
+confidence = 0.88
+
+# --- Hook Event Mappings ---
+
+[[hook_events]]
+event = "PreToolUse"
+activity = "Running"
+
+[[hook_events]]
+event = "PostToolUse"
+activity = "Running"
+
+[[hook_events]]
+event = "Notification(permission_prompt)"
+activity = "WaitingApproval"
+
+[[hook_events]]
+event = "Notification(idle_prompt)"
+activity = "WaitingInput"
+
+[[hook_events]]
+event = "Stop"
+activity = "Idle"
+
+[[hook_events]]
+event = "SessionStart"
+activity = "Idle"
+
+[[hook_events]]
+event = "SessionEnd"
+activity = "Idle"
+
+[[hook_events]]
+event = "SubagentStart"
+activity = "Running"

@@ -1,65 +1,97 @@
-# AGENTS.md
+# AGTMUX v3
 
-このリポジトリは AGTMUX v2 の再始動用です。実装・設計の判断は `docs/v2` を正本にします。
+Rust daemon + CLI tools で terminal 上の AI agent 状態を推定・表示する。
 
-## 1. 最初に読む順番（必須）
+## 設計文書
 
-1. `docs/v2/00-index.md`
-2. `docs/v2/10-product-charter.md`
-3. `docs/v2/20-unified-design.md`
-4. `docs/v2/30-detailed-design.md`
-5. `docs/v2/40-execution-plan.md`
+`docs/v3/README.md` を読み、作業中の Phase に必要なファイルだけ読む。
 
-`docs/v2/references/*` は必要時のみ参照。
+## 不変条件
 
-## 2. 絶対に守る不変条件
+1. State engine accuracy が MVP gate — 不正確ならリリースしない
+2. Core logic (state engine, adapters, attention) は特定の terminal backend に依存しない
+3. data plane と control plane を分離する
 
-1. `selected pane = stream-only`
-2. active path で snapshot と stream を混在させない
-3. local echo をしない
-4. cursor/IME/scroll を app 側で推定しない
-5. data plane と control plane を分離する
-6. `wezterm-gui fork` 一本（thin integration は採用しない）
-7. fork改造範囲は `docs/v2/specs/74-fork-surface-map.md` に従う
+## Design Principles
 
-## 3. 変更管理ルール
+1. **Backend-agnostic core** — `TerminalBackend` trait で terminal 環境を抽象化
+2. **Trait-based composition** — provider capabilities を細粒度 trait で表現
+3. **Type-safe enums** — `SourceType`, `ActivityState`, `Provider` 等は enum (string convention を使わない)
+4. **Library-first** — `agtmux-core` は IO 実装を含まない再利用可能な library
 
-変更は次の3分類で扱う。
+## Architecture Overview
 
-1. `Patch`: 挙動不変の修正
-2. `Policy`: UX/運用ルール変更
-3. `Constitutional`: 不変条件に触る変更
+```
+agtmux-core (library, no I/O)
+├── types/     ActivityState, Evidence, Provider, PaneMeta, SourceType
+├── engine/    Engine::resolve(&[Evidence]) → ResolvedActivity
+├── adapt/     trait ProviderDetector, trait EvidenceBuilder, trait EventNormalizer
+├── attn/      derive_attention_state() → AttentionResult
+├── backend.rs trait TerminalBackend
+└── source.rs  trait StateSource, SourceEvent enum
 
-`Policy` 以上の変更では、実装前に docs を更新し、影響範囲と受け入れ条件を明記する。
+agtmux-tmux (TerminalBackend impl for tmux)
+├── control_mode.rs, pipe_pane.rs, observer.rs, executor.rs
 
-## 4. ドキュメント正本
+agtmux-daemon (binary: daemon + CLI)
+├── orchestrator.rs  Sources → mpsc → Engine → broadcast → Clients
+├── server.rs        Unix socket + WebSocket (JSON-RPC 2.0)
+├── store.rs         SQLite persistence
+├── sources/         StateSource impls (hook, api, file, poller)
+├── tui.rs, status.rs, tmux_status.rs
+```
 
-1. 仕様方針: `docs/v2/20-unified-design.md`
-2. Data Model / protocol: `docs/v2/30-detailed-design.md`
-3. 実装順序 / gate: `docs/v2/40-execution-plan.md`
-4. 教訓 / 再発防止: `docs/v2/50-poc-learnings.md`
-5. wire/gate/bootstrap: `docs/v2/specs/*`
-6. 意思決定: `docs/v2/adr/*`
-7. fork境界: `docs/v2/specs/74-fork-surface-map.md`
+## Core Design Decisions
 
-過去資料は `docs/v2/references/*` に隔離し、通常作業では読まない。
+1. **Engine は Evidence のみ受け取る** — PaneMeta を知らない pure scorer
+2. **Orchestrator が PaneMeta → Evidence 変換を担当** — detectors + builders 経由
+3. **TOML 宣言的 provider 定義** — `providers/*.toml` で signal→evidence mapping を定義
+4. **Async pipeline** — `tokio::select!` + mpsc/broadcast channels
 
-## 5. 実装時の最小コンテキスト方針
+## Key Traits
 
-1. まず必読5ファイルのみ読む
-2. 追加資料を読む場合は「読む理由」を1行で残す
-3. 無関係ファイルの探索を避ける
+```rust
+// agtmux-core/src/backend.rs
+pub trait TerminalBackend: Send + Sync {
+    fn list_panes(&self) -> Result<Vec<RawPane>>;
+    fn capture_pane(&self, pane_id: &str) -> Result<String>;
+    fn select_pane(&self, pane_id: &str) -> Result<()>;
+}
 
-## 6. PR/変更前チェック
+// agtmux-core/src/adapt/mod.rs
+pub trait ProviderDetector: Send + Sync {
+    fn id(&self) -> Provider;
+    fn detect(&self, meta: &PaneMeta) -> Option<f64>;
+}
 
-1. 不変条件を破っていない
-2. 変更内容に応じた docs 更新を行った
-3. 受け入れ条件（AC）を定義した
-4. rollback 手順を定義した
-5. `docs/v2/00-index.md` の導線を壊していない
+pub trait EvidenceBuilder: Send + Sync {
+    fn provider(&self) -> Provider;
+    fn build_evidence(&self, meta: &PaneMeta, now: DateTime<Utc>) -> Vec<Evidence>;
+}
 
-## 7. ファイル配置ルール
+pub trait EventNormalizer: Send + Sync {
+    fn provider(&self) -> Provider;
+    fn normalize(&self, signal: &RawSignal) -> Option<NormalizedState>;
+}
+```
 
-1. 新規設計文書は `docs/v2` 配下に追加する
-2. 番号付き命名を維持する（`60-` 以降を使用）
-3. 実験メモや比較資料は `docs/v2/references` に置く
+## 依存ルール
+
+- **agtmux-core**: tokio/rusqlite/async 禁止。pure library。serde, chrono, toml のみ許可
+- **agtmux-tmux**: core のみに依存 + tokio
+- **agtmux-daemon**: 全 crate に依存。binary crate
+- **サイクル禁止**
+
+## ファイル配置
+
+- 設計文書: `docs/v3/`
+- Rust ソース: `crates/`
+- Provider 定義: `providers/`
+- テスト fixture: `fixtures/`
+
+## テスト戦略
+
+- **Layer 1**: Unit fixtures (`fixtures/*.json`) — Engine に Evidence を渡して出力を検証
+- **Layer 2**: Replay scenarios (`fixtures/scenarios/`) — 時系列 state transition
+- **Layer 3**: proptest — 不変条件 (empty→Unknown, expired→Unknown, Error always wins, score ∈ [0,1])
+- **Layer 4**: Live validation (Phase 3+) — `agtmux daemon --record` + `agtmux label` + `agtmux accuracy`
