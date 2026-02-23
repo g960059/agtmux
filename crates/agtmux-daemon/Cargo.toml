@@ -33,3 +33,4 @@ http = "1"
 
 [dev-dependencies]
 tokio = { workspace = true }
+tempfile = "3"

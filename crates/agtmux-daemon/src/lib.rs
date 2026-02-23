@@ -1,8 +1,10 @@
 pub mod accuracy;
+pub mod auto_label;
 pub mod client;
 pub mod display;
 pub mod label;
 pub mod orchestrator;
+pub mod preflight;
 pub mod recorder;
 pub mod serde_helpers;
 pub mod server;

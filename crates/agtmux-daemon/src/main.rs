@@ -94,6 +94,25 @@ enum Commands {
         /// Path to the labeled JSONL file
         file: String,
     },
+    /// Automatically label a daemon recording using expected-labels JSONL
+    AutoLabel {
+        /// Path to the daemon recording JSONL
+        recording: String,
+        /// Path to the expected-labels JSONL
+        expected: String,
+        /// Timestamp matching window in seconds
+        #[arg(long, default_value_t = 5)]
+        window_sec: u64,
+        /// Output path
+        #[arg(long)]
+        output: Option<String>,
+    },
+    /// Run preflight checks for live testing
+    Preflight {
+        /// Also check that real AI CLIs are available
+        #[arg(long, default_value_t = false)]
+        real: bool,
+    },
 }
 
 #[tokio::main]
@@ -147,7 +166,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             agtmux_daemon::label::run_label(std::path::Path::new(&file))?;
         }
         Some(Commands::Accuracy { file }) => {
-            agtmux_daemon::accuracy::run_accuracy(std::path::Path::new(&file))?;
+            let passed = agtmux_daemon::accuracy::run_accuracy(std::path::Path::new(&file))?;
+            if !passed {
+                std::process::exit(1);
+            }
+        }
+        Some(Commands::AutoLabel {
+            recording,
+            expected,
+            window_sec,
+            output,
+        }) => {
+            let output_path = output.unwrap_or_else(|| {
+                let p = std::path::Path::new(&recording);
+                let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("recording");
+                let parent = p.parent().unwrap_or_else(|| std::path::Path::new("."));
+                parent.join(format!("{}.labeled.jsonl", stem)).to_string_lossy().into_owned()
+            });
+            let report = agtmux_daemon::auto_label::run_auto_label(
+                std::path::Path::new(&recording),
+                std::path::Path::new(&expected),
+                chrono::Duration::seconds(window_sec as i64),
+                std::path::Path::new(&output_path),
+            )?;
+            println!(
+                "Auto-labeled: {} total, {} labeled, {} unlabeled -> {}",
+                report.total_events, report.labeled_events, report.unlabeled_events, output_path
+            );
+        }
+        Some(Commands::Preflight { real }) => {
+            std::process::exit(agtmux_daemon::preflight::run_preflight(real));
         }
     }
 

@@ -127,25 +127,73 @@ struct GateCheck {
     name: &'static str,
     threshold: f64,
     actual: f64,
-    higher_is_better: bool,
+    skipped: bool,
 }
 
 impl GateCheck {
     fn passed(&self) -> bool {
-        if self.higher_is_better {
-            self.actual >= self.threshold
-        } else {
-            self.actual <= self.threshold
-        }
+        self.skipped || self.actual >= self.threshold
     }
 
     fn label(&self) -> &'static str {
-        if self.passed() {
+        if self.skipped {
+            "SKIP"
+        } else if self.passed() {
             "PASS"
         } else {
             "FAIL"
         }
     }
+}
+
+/// Check dev-level quality gates. Returns `true` if all gates pass (or are
+/// skipped due to zero support).
+pub fn check_dev_gates(report: &AccuracyReport) -> bool {
+    let running = report.per_class.get("running");
+    let waiting_input = report.per_class.get("waiting_input");
+    let waiting_approval = report.per_class.get("waiting_approval");
+
+    let gates = vec![
+        GateCheck {
+            name: "weighted_f1 >= 0.88",
+            threshold: 0.88,
+            actual: report.weighted_f1,
+            skipped: false,
+        },
+        GateCheck {
+            name: "running_precision >= 0.92",
+            threshold: 0.92,
+            actual: running.map(|m| m.precision()).unwrap_or(0.0),
+            skipped: running.map(|m| m.support() == 0).unwrap_or(true),
+        },
+        GateCheck {
+            name: "waiting_input_recall >= 0.75",
+            threshold: 0.75,
+            actual: waiting_input.map(|m| m.recall()).unwrap_or(0.0),
+            skipped: waiting_input.map(|m| m.support() == 0).unwrap_or(true),
+        },
+        GateCheck {
+            name: "waiting_approval_recall >= 0.70",
+            threshold: 0.70,
+            actual: waiting_approval.map(|m| m.recall()).unwrap_or(0.0),
+            skipped: waiting_approval.map(|m| m.support() == 0).unwrap_or(true),
+        },
+    ];
+
+    println!("Dev Gates:");
+    let mut all_pass = true;
+    for gate in &gates {
+        println!(
+            "  [{}] {} (actual: {:.4})",
+            gate.label(),
+            gate.name,
+            gate.actual
+        );
+        if !gate.passed() {
+            all_pass = false;
+        }
+    }
+    all_pass
 }
 
 // ---------------------------------------------------------------------------
@@ -181,131 +229,50 @@ pub fn print_report(report: &AccuracyReport) {
     println!("Total samples: {}", report.total_samples);
     println!();
 
-    // Quality gate checks
-    let running_precision = report
-        .per_class
-        .get("running")
-        .map(|m| m.precision())
-        .unwrap_or(0.0);
-    let waiting_input_recall = report
-        .per_class
-        .get("waiting_input")
-        .map(|m| m.recall())
-        .unwrap_or(0.0);
-    let waiting_approval_recall = report
-        .per_class
-        .get("waiting_approval")
-        .map(|m| m.recall())
-        .unwrap_or(0.0);
+    let running = report.per_class.get("running");
+    let waiting_input = report.per_class.get("waiting_input");
+    let waiting_approval = report.per_class.get("waiting_approval");
 
-    let dev_gates = vec![
-        GateCheck {
-            name: "activity_weighted_f1 >= 0.88",
-            threshold: 0.88,
-            actual: report.weighted_f1,
-            higher_is_better: true,
-        },
-        GateCheck {
-            name: "running_precision >= 0.92",
-            threshold: 0.92,
-            actual: running_precision,
-            higher_is_better: true,
-        },
-        GateCheck {
-            name: "waiting_input_recall >= 0.75",
-            threshold: 0.75,
-            actual: waiting_input_recall,
-            higher_is_better: true,
-        },
-        GateCheck {
-            name: "waiting_approval_recall >= 0.70",
-            threshold: 0.70,
-            actual: waiting_approval_recall,
-            higher_is_better: true,
-        },
-    ];
+    let running_precision = running.map(|m| m.precision()).unwrap_or(0.0);
+    let running_skip = running.map(|m| m.support() == 0).unwrap_or(true);
+    let wi_recall = waiting_input.map(|m| m.recall()).unwrap_or(0.0);
+    let wi_skip = waiting_input.map(|m| m.support() == 0).unwrap_or(true);
+    let wa_recall = waiting_approval.map(|m| m.recall()).unwrap_or(0.0);
+    let wa_skip = waiting_approval.map(|m| m.support() == 0).unwrap_or(true);
 
-    let beta_gates = vec![
-        GateCheck {
-            name: "activity_weighted_f1 >= 0.92",
-            threshold: 0.92,
-            actual: report.weighted_f1,
-            higher_is_better: true,
-        },
-        GateCheck {
-            name: "running_precision >= 0.95",
-            threshold: 0.95,
-            actual: running_precision,
-            higher_is_better: true,
-        },
-        GateCheck {
-            name: "waiting_input_recall >= 0.85",
-            threshold: 0.85,
-            actual: waiting_input_recall,
-            higher_is_better: true,
-        },
-        GateCheck {
-            name: "waiting_approval_recall >= 0.82",
-            threshold: 0.82,
-            actual: waiting_approval_recall,
-            higher_is_better: true,
-        },
-    ];
-
-    let release_gates = vec![
-        GateCheck {
-            name: "activity_weighted_f1 >= 0.95",
-            threshold: 0.95,
-            actual: report.weighted_f1,
-            higher_is_better: true,
-        },
-        GateCheck {
-            name: "running_precision >= 0.97",
-            threshold: 0.97,
-            actual: running_precision,
-            higher_is_better: true,
-        },
-        GateCheck {
-            name: "waiting_input_recall >= 0.90",
-            threshold: 0.90,
-            actual: waiting_input_recall,
-            higher_is_better: true,
-        },
-        GateCheck {
-            name: "waiting_approval_recall >= 0.90",
-            threshold: 0.90,
-            actual: waiting_approval_recall,
-            higher_is_better: true,
-        },
+    let tiers: &[(&str, &[(& str, f64, f64, bool)])] = &[
+        ("Dev", &[
+            ("activity_weighted_f1 >= 0.88", 0.88, report.weighted_f1, false),
+            ("running_precision >= 0.92", 0.92, running_precision, running_skip),
+            ("waiting_input_recall >= 0.75", 0.75, wi_recall, wi_skip),
+            ("waiting_approval_recall >= 0.70", 0.70, wa_recall, wa_skip),
+        ]),
+        ("Beta", &[
+            ("activity_weighted_f1 >= 0.92", 0.92, report.weighted_f1, false),
+            ("running_precision >= 0.95", 0.95, running_precision, running_skip),
+            ("waiting_input_recall >= 0.85", 0.85, wi_recall, wi_skip),
+            ("waiting_approval_recall >= 0.82", 0.82, wa_recall, wa_skip),
+        ]),
+        ("Release", &[
+            ("activity_weighted_f1 >= 0.95", 0.95, report.weighted_f1, false),
+            ("running_precision >= 0.97", 0.97, running_precision, running_skip),
+            ("waiting_input_recall >= 0.90", 0.90, wi_recall, wi_skip),
+            ("waiting_approval_recall >= 0.90", 0.90, wa_recall, wa_skip),
+        ]),
     ];
 
     println!("Quality Gates:");
-    println!("  Dev:");
-    for gate in &dev_gates {
-        println!(
-            "    [{}] {} (actual: {:.4})",
-            gate.label(),
-            gate.name,
-            gate.actual
-        );
-    }
-    println!("  Beta:");
-    for gate in &beta_gates {
-        println!(
-            "    [{}] {} (actual: {:.4})",
-            gate.label(),
-            gate.name,
-            gate.actual
-        );
-    }
-    println!("  Release:");
-    for gate in &release_gates {
-        println!(
-            "    [{}] {} (actual: {:.4})",
-            gate.label(),
-            gate.name,
-            gate.actual
-        );
+    for (tier_name, checks) in tiers {
+        println!("  {}:", tier_name);
+        for &(name, threshold, actual, skipped) in *checks {
+            let gate = GateCheck { name, threshold, actual, skipped };
+            println!(
+                "    [{}] {} (actual: {:.4})",
+                gate.label(),
+                gate.name,
+                gate.actual
+            );
+        }
     }
 }
 
@@ -330,7 +297,8 @@ pub fn extract_predicted_state(data: &serde_json::Value) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 /// Run the accuracy analysis on a labeled JSONL file.
-pub fn run_accuracy(input_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+/// Returns `true` if dev quality gates pass, `false` otherwise.
+pub fn run_accuracy(input_path: &Path) -> Result<bool, Box<dyn std::error::Error>> {
     let file = std::fs::File::open(input_path)?;
     let reader = BufReader::new(file);
 
@@ -346,14 +314,13 @@ pub fn run_accuracy(input_path: &Path) -> Result<(), Box<dyn std::error::Error>>
             format!("line {}: failed to parse JSON: {}", line_num + 1, e)
         })?;
 
-        // Only process StateChanged events that have a label.
         if event.event_type != "StateChanged" {
             continue;
         }
 
         let label = match &event.label {
             Some(l) => l.clone(),
-            None => continue, // unlabeled event, skip
+            None => continue,
         };
 
         let predicted = match extract_predicted_state(&event.data) {
@@ -372,13 +339,14 @@ pub fn run_accuracy(input_path: &Path) -> Result<(), Box<dyn std::error::Error>>
 
     if pairs.is_empty() {
         eprintln!("No labeled StateChanged events found in {:?}", input_path);
-        return Ok(());
+        return Ok(true);
     }
 
     let report = AccuracyReport::compute(&pairs);
     print_report(&report);
+    let passed = check_dev_gates(&report);
 
-    Ok(())
+    Ok(passed)
 }
 
 // ---------------------------------------------------------------------------
@@ -770,5 +738,94 @@ mod tests {
         assert_eq!(report.total_samples, 6);
         assert!((report.weighted_f1 - 1.0).abs() < 1e-9);
         assert_eq!(report.per_class.len(), 6);
+    }
+
+    // -----------------------------------------------------------------------
+    // check_dev_gates tests
+    // -----------------------------------------------------------------------
+
+    fn make_report(per_class: HashMap<String, ClassMetrics>) -> AccuracyReport {
+        let total_support: usize = per_class.values().map(|m| m.support()).sum();
+        let weighted_f1 = if total_support == 0 {
+            0.0
+        } else {
+            let sum: f64 = per_class
+                .values()
+                .map(|m| m.f1() * m.support() as f64)
+                .sum();
+            sum / total_support as f64
+        };
+        let total_samples = per_class.values().map(|m| m.true_positives + m.false_positives).sum();
+        AccuracyReport {
+            per_class,
+            total_samples,
+            weighted_f1,
+        }
+    }
+
+    #[test]
+    fn check_dev_gates_all_pass() {
+        let mut per_class = HashMap::new();
+        // running: P = 95/100 = 0.95, R = 95/100 = 0.95, F1 = 0.95
+        per_class.insert("running".to_string(), ClassMetrics {
+            true_positives: 95,
+            false_positives: 5,
+            false_negatives: 5,
+        });
+        // waiting_input: R = 80/100 = 0.80 >= 0.75
+        per_class.insert("waiting_input".to_string(), ClassMetrics {
+            true_positives: 80,
+            false_positives: 5,
+            false_negatives: 20,
+        });
+        // waiting_approval: R = 75/100 = 0.75 >= 0.70
+        per_class.insert("waiting_approval".to_string(), ClassMetrics {
+            true_positives: 75,
+            false_positives: 5,
+            false_negatives: 25,
+        });
+        let report = make_report(per_class);
+        assert!(report.weighted_f1 >= 0.88);
+        assert!(check_dev_gates(&report));
+    }
+
+    #[test]
+    fn check_dev_gates_fail_low_f1() {
+        let mut per_class = HashMap::new();
+        // Poor performance: P = 5/10 = 0.5, R = 5/15 = 0.33, F1 ~ 0.4
+        per_class.insert("running".to_string(), ClassMetrics {
+            true_positives: 5,
+            false_positives: 5,
+            false_negatives: 10,
+        });
+        per_class.insert("idle".to_string(), ClassMetrics {
+            true_positives: 3,
+            false_positives: 10,
+            false_negatives: 7,
+        });
+        let report = make_report(per_class);
+        assert!(report.weighted_f1 < 0.88);
+        assert!(!check_dev_gates(&report));
+    }
+
+    #[test]
+    fn check_dev_gates_skip_zero_support() {
+        let mut per_class = HashMap::new();
+        // running: perfect, high enough for all gates
+        per_class.insert("running".to_string(), ClassMetrics {
+            true_positives: 100,
+            false_positives: 5,
+            false_negatives: 0,
+        });
+        // waiting_input: zero support (TP + FN = 0), only FP — should be skipped
+        per_class.insert("waiting_input".to_string(), ClassMetrics {
+            true_positives: 0,
+            false_positives: 2,
+            false_negatives: 0,
+        });
+        // waiting_approval not present at all — should be skipped
+        let report = make_report(per_class);
+        assert!(report.weighted_f1 >= 0.88);
+        assert!(check_dev_gates(&report));
     }
 }
