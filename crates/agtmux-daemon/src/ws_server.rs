@@ -100,7 +100,20 @@ impl WsServer {
     pub async fn run(&self) -> std::io::Result<()> {
         let listener = TcpListener::bind(self.addr).await?;
         tracing::info!(addr = %self.addr, max_connections = self.max_connections, "ws server listening");
+        self.serve(listener).await
+    }
 
+    /// Bind to the configured address and return the actual local address.
+    /// Useful when binding to port 0 to get an OS-assigned ephemeral port.
+    pub async fn bind(&self) -> std::io::Result<(TcpListener, SocketAddr)> {
+        let listener = TcpListener::bind(self.addr).await?;
+        let local_addr = listener.local_addr()?;
+        tracing::info!(addr = %local_addr, max_connections = self.max_connections, "ws server bound");
+        Ok((listener, local_addr))
+    }
+
+    /// Run the accept loop on a pre-bound listener.
+    pub async fn serve(&self, listener: TcpListener) -> std::io::Result<()> {
         let semaphore = Arc::new(Semaphore::new(self.max_connections));
 
         loop {
@@ -116,7 +129,6 @@ impl WsServer {
                                         max = self.max_connections,
                                         "ws: connection limit reached, rejecting"
                                     );
-                                    // Drop the stream immediately to close the TCP connection.
                                     drop(stream);
                                     continue;
                                 }
@@ -126,7 +138,6 @@ impl WsServer {
                             let notify_rx = self.notify_tx.subscribe();
                             let cancel = self.cancel.clone();
                             tokio::spawn(async move {
-                                // The permit is held for the lifetime of the handler.
                                 let _permit = permit;
                                 match tokio_tungstenite::accept_hdr_async(stream, validate_origin).await {
                                     Ok(ws_stream) => {
@@ -343,6 +354,7 @@ mod tests {
     use crate::server::{DaemonState, PaneInfo};
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::time::Duration;
     use tokio::sync::{broadcast, RwLock};
 
     fn make_shared_state(panes: Vec<PaneInfo>) -> SharedState {
@@ -367,6 +379,109 @@ mod tests {
             updated_at: "2026-01-01T00:00:00Z".into(),
         }
     }
+
+    struct TestServer {
+        addr: SocketAddr,
+        cancel: CancellationToken,
+        _handle: tokio::task::JoinHandle<std::io::Result<()>>,
+    }
+
+    async fn start_test_server(
+        panes: Vec<PaneInfo>,
+        notify_tx: broadcast::Sender<StateNotification>,
+        max_connections: Option<usize>,
+    ) -> TestServer {
+        let state = make_shared_state(panes);
+        let cancel = CancellationToken::new();
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let mut server = WsServer::new(addr, state, notify_tx, cancel.clone());
+        if let Some(max) = max_connections {
+            server = server.with_max_connections(max);
+        }
+        let (listener, local_addr) = server.bind().await.unwrap();
+        let handle = tokio::spawn(async move { server.serve(listener).await });
+        TestServer {
+            addr: local_addr,
+            cancel,
+            _handle: handle,
+        }
+    }
+
+    impl TestServer {
+        fn ws_url(&self) -> String {
+            format!("ws://127.0.0.1:{}", self.addr.port())
+        }
+
+        async fn connect(&self) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
+            let (ws, _) = tokio_tungstenite::connect_async(&self.ws_url()).await.unwrap();
+            ws
+        }
+
+        async fn connect_with_origin(&self, origin: &str) -> Result<
+            tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+            tokio_tungstenite::tungstenite::Error,
+        > {
+            let req = tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(
+                &self.ws_url(),
+            )
+            .unwrap();
+            let mut req = req;
+            req.headers_mut().insert(
+                "Origin",
+                origin.parse().unwrap(),
+            );
+            let (ws, _) = tokio_tungstenite::connect_async(req).await?;
+            Ok(ws)
+        }
+    }
+
+    impl Drop for TestServer {
+        fn drop(&mut self) {
+            self.cancel.cancel();
+        }
+    }
+
+    async fn send_rpc(
+        ws: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+        id: u64,
+        method: &str,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        let req = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params,
+        });
+        ws.send(Message::Text(req.to_string())).await.unwrap();
+        let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("timeout waiting for response")
+            .expect("stream ended")
+            .expect("read error");
+        let Message::Text(text) = msg else {
+            panic!("expected text frame, got {:?}", msg);
+        };
+        serde_json::from_str(&text).unwrap()
+    }
+
+    async fn recv_notification(
+        ws: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    ) -> serde_json::Value {
+        let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("timeout waiting for notification")
+            .expect("stream ended")
+            .expect("read error");
+        let Message::Text(text) = msg else {
+            panic!("expected text frame, got {:?}", msg);
+        };
+        serde_json::from_str(&text).unwrap()
+    }
+
+    // -----------------------------------------------------------------------
+    // Unit tests (existing)
+    // -----------------------------------------------------------------------
 
     #[test]
     fn ws_server_can_be_constructed() {
@@ -393,13 +508,11 @@ mod tests {
 
     #[test]
     fn json_rpc_list_panes_request_response_parsing() {
-        // Parse a list_panes request
         let json = r#"{"jsonrpc": "2.0", "id": 1, "method": "list_panes", "params": {}}"#;
         let req: JsonRpcRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.method, "list_panes");
         assert_eq!(req.id, Some(1));
 
-        // Build the response as the handler would
         let panes = vec![sample_pane("%1", "running")];
         let resp = JsonRpcResponse {
             jsonrpc: "2.0".into(),
@@ -412,7 +525,6 @@ mod tests {
         assert!(serialized.contains("\"panes\""));
         assert!(serialized.contains("\"%1\""));
 
-        // Verify we can round-trip through JSON (as WebSocket text frames)
         let parsed: serde_json::Value = serde_json::from_str(&serialized).unwrap();
         assert_eq!(parsed["jsonrpc"], "2.0");
         assert_eq!(parsed["id"], 1);
@@ -428,7 +540,6 @@ mod tests {
         let params: SubscribeParams = serde_json::from_value(req.params).unwrap();
         assert_eq!(params.events, vec!["state"]);
 
-        // Build the acknowledgement response
         let resp = JsonRpcResponse {
             jsonrpc: "2.0".into(),
             id: req.id,
@@ -444,7 +555,6 @@ mod tests {
 
     #[test]
     fn notification_serialization_for_ws_frames() {
-        // StateChanged notification
         let notif = JsonRpcNotification {
             jsonrpc: "2.0".into(),
             method: "state_changed".into(),
@@ -455,13 +565,11 @@ mod tests {
         };
 
         let text = serde_json::to_string(&notif).unwrap();
-        // Verify it can be sent as a WebSocket text frame (valid UTF-8 string)
         assert!(!text.is_empty());
         let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(parsed["method"], "state_changed");
         assert_eq!(parsed["params"]["pane_id"], "%1");
 
-        // PaneAdded notification
         let notif2 = JsonRpcNotification {
             jsonrpc: "2.0".into(),
             method: "pane_added".into(),
@@ -471,7 +579,6 @@ mod tests {
         let parsed2: serde_json::Value = serde_json::from_str(&text2).unwrap();
         assert_eq!(parsed2["method"], "pane_added");
 
-        // Summary notification
         let mut counts = HashMap::new();
         counts.insert("running".to_string(), 2usize);
         counts.insert("idle".to_string(), 1usize);
@@ -492,22 +599,15 @@ mod tests {
         let (notify_tx, _) = broadcast::channel(16);
         let cancel = CancellationToken::new();
 
-        // Bind to port 0 so the OS assigns an ephemeral port.
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let server = WsServer::new(addr, state, notify_tx, cancel.clone());
 
-        // We need to actually bind before cancelling so the server task enters
-        // its loop. We spawn the run task and cancel shortly after.
         let handle = tokio::spawn(async move { server.run().await });
 
-        // Give it a moment to bind and enter the accept loop.
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        // Cancel the server.
+        tokio::time::sleep(Duration::from_millis(50)).await;
         cancel.cancel();
 
-        // The run() should return Ok(()) within a reasonable time.
-        let result = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
+        let result = tokio::time::timeout(Duration::from_secs(2), handle).await;
         assert!(result.is_ok(), "server should have stopped within timeout");
         let inner = result.unwrap().unwrap();
         assert!(inner.is_ok(), "server run should return Ok on cancellation");
@@ -519,15 +619,12 @@ mod tests {
             pane_id: "%1".into(),
         };
 
-        // Subscribed to topology => should produce push
         let topo = vec!["topology".to_string()];
         assert!(notification_to_push(&added, &topo).is_some());
 
-        // Not subscribed => no push
         let state_only = vec!["state".to_string()];
         assert!(notification_to_push(&added, &state_only).is_none());
 
-        // Empty subscription => no push
         let empty: Vec<String> = vec![];
         assert!(notification_to_push(&added, &empty).is_none());
     }
@@ -621,5 +718,284 @@ mod tests {
         assert!(result.is_err());
         let err_resp = result.unwrap_err();
         assert_eq!(err_resp.status(), http::StatusCode::FORBIDDEN);
+    }
+
+    // -----------------------------------------------------------------------
+    // Integration tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn list_panes_over_ws() {
+        let (notify_tx, _) = broadcast::channel(16);
+        let server = start_test_server(
+            vec![sample_pane("%1", "running"), sample_pane("%2", "idle")],
+            notify_tx,
+            None,
+        )
+        .await;
+
+        let mut ws = server.connect().await;
+        let resp = send_rpc(&mut ws, 1, "list_panes", serde_json::json!({})).await;
+
+        assert_eq!(resp["jsonrpc"], "2.0");
+        assert_eq!(resp["id"], 1);
+        let panes = resp["result"]["panes"].as_array().unwrap();
+        assert_eq!(panes.len(), 2);
+        assert_eq!(panes[0]["pane_id"], "%1");
+        assert_eq!(panes[0]["activity_state"], "running");
+        assert_eq!(panes[1]["pane_id"], "%2");
+        assert_eq!(panes[1]["activity_state"], "idle");
+    }
+
+    #[tokio::test]
+    async fn list_panes_empty_state() {
+        let (notify_tx, _) = broadcast::channel(16);
+        let server = start_test_server(vec![], notify_tx, None).await;
+
+        let mut ws = server.connect().await;
+        let resp = send_rpc(&mut ws, 42, "list_panes", serde_json::json!({})).await;
+
+        assert_eq!(resp["id"], 42);
+        let panes = resp["result"]["panes"].as_array().unwrap();
+        assert!(panes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unknown_method_returns_error() {
+        let (notify_tx, _) = broadcast::channel(16);
+        let server = start_test_server(vec![], notify_tx, None).await;
+
+        let mut ws = server.connect().await;
+        let resp = send_rpc(&mut ws, 99, "nonexistent", serde_json::json!({})).await;
+
+        assert_eq!(resp["id"], 99);
+        assert!(resp["result"].is_null());
+        assert_eq!(resp["error"]["code"], -32601);
+        assert!(resp["error"]["message"].as_str().unwrap().contains("nonexistent"));
+    }
+
+    #[tokio::test]
+    async fn subscribe_and_receive_topology_notification() {
+        let (notify_tx, _) = broadcast::channel(16);
+        let server = start_test_server(vec![], notify_tx.clone(), None).await;
+
+        let mut ws = server.connect().await;
+
+        let resp = send_rpc(
+            &mut ws,
+            1,
+            "subscribe",
+            serde_json::json!({"events": ["topology"]}),
+        )
+        .await;
+        assert_eq!(resp["result"]["subscribed"], true);
+
+        notify_tx
+            .send(StateNotification::PaneAdded {
+                pane_id: "%5".into(),
+            })
+            .unwrap();
+
+        let notif = recv_notification(&mut ws).await;
+        assert_eq!(notif["method"], "pane_added");
+        assert_eq!(notif["params"]["pane_id"], "%5");
+    }
+
+    #[tokio::test]
+    async fn subscribe_and_receive_state_notification() {
+        use crate::orchestrator::PaneState;
+        use agtmux_core::engine::ResolvedActivity;
+        use agtmux_core::types::*;
+        use chrono::Utc;
+
+        let (notify_tx, _) = broadcast::channel(16);
+        let server = start_test_server(vec![], notify_tx.clone(), None).await;
+
+        let mut ws = server.connect().await;
+
+        let resp = send_rpc(
+            &mut ws,
+            1,
+            "subscribe",
+            serde_json::json!({"events": ["state"]}),
+        )
+        .await;
+        assert_eq!(resp["result"]["subscribed"], true);
+
+        notify_tx
+            .send(StateNotification::StateChanged {
+                pane_id: "%1".into(),
+                state: PaneState {
+                    pane_id: "%1".into(),
+                    provider: Some(Provider::Claude),
+                    provider_confidence: 0.95,
+                    activity: ResolvedActivity {
+                        state: ActivityState::Running,
+                        confidence: 0.9,
+                        source: SourceType::Hook,
+                        reason_code: "running".into(),
+                    },
+                    attention: AttentionResult {
+                        state: AttentionState::None,
+                        reason: "".into(),
+                        since: None,
+                    },
+                    last_event_type: "".into(),
+                    updated_at: Utc::now(),
+                },
+            })
+            .unwrap();
+
+        let notif = recv_notification(&mut ws).await;
+        assert_eq!(notif["method"], "state_changed");
+        assert_eq!(notif["params"]["pane_id"], "%1");
+    }
+
+    #[tokio::test]
+    async fn subscribe_filters_unsubscribed_events() {
+        let (notify_tx, _) = broadcast::channel(16);
+        let server = start_test_server(vec![], notify_tx.clone(), None).await;
+
+        let mut ws = server.connect().await;
+
+        send_rpc(
+            &mut ws,
+            1,
+            "subscribe",
+            serde_json::json!({"events": ["state"]}),
+        )
+        .await;
+
+        // Topology event should not be forwarded to a state-only subscriber.
+        notify_tx
+            .send(StateNotification::PaneAdded {
+                pane_id: "%1".into(),
+            })
+            .unwrap();
+
+        // Send a follow-up list_panes to prove the connection is still alive
+        // and the topology event was silently filtered.
+        let resp = send_rpc(&mut ws, 2, "list_panes", serde_json::json!({})).await;
+        assert_eq!(resp["id"], 2);
+    }
+
+    #[tokio::test]
+    async fn subscribe_summary_sends_immediate_snapshot() {
+        let (notify_tx, _) = broadcast::channel(16);
+        let server = start_test_server(
+            vec![sample_pane("%1", "running"), sample_pane("%2", "idle")],
+            notify_tx,
+            None,
+        )
+        .await;
+
+        let mut ws = server.connect().await;
+
+        let resp = send_rpc(&mut ws, 1, "subscribe_summary", serde_json::json!({})).await;
+        assert_eq!(resp["result"]["subscribed"], true);
+
+        let notif = recv_notification(&mut ws).await;
+        assert_eq!(notif["method"], "summary");
+        assert_eq!(notif["params"]["counts"]["running"], 1);
+        assert_eq!(notif["params"]["counts"]["idle"], 1);
+    }
+
+    #[tokio::test]
+    async fn origin_localhost_accepted() {
+        let (notify_tx, _) = broadcast::channel(16);
+        let server = start_test_server(vec![], notify_tx, None).await;
+
+        let mut ws = server.connect_with_origin("http://localhost:3000").await.unwrap();
+        let resp = send_rpc(&mut ws, 1, "list_panes", serde_json::json!({})).await;
+        assert_eq!(resp["id"], 1);
+    }
+
+    #[tokio::test]
+    async fn origin_remote_rejected() {
+        let (notify_tx, _) = broadcast::channel(16);
+        let server = start_test_server(vec![], notify_tx, None).await;
+
+        let result = server.connect_with_origin("https://evil.example.com").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn connection_limit_enforced() {
+        let (notify_tx, _) = broadcast::channel(16);
+        let server = start_test_server(vec![], notify_tx, Some(2)).await;
+
+        let _ws1 = server.connect().await;
+        let _ws2 = server.connect().await;
+
+        // Third connection should be rejected. The server drops the TCP stream,
+        // so the WS handshake will fail.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let result = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio_tungstenite::connect_async(&server.ws_url()).await
+        })
+        .await;
+
+        match result {
+            Ok(Ok((mut ws, _))) => {
+                // Connection may have been accepted at TCP level before the
+                // server dropped it. Sending a message should fail.
+                let send_result = ws
+                    .send(Message::Text(
+                        r#"{"jsonrpc":"2.0","id":1,"method":"list_panes","params":{}}"#.into(),
+                    ))
+                    .await;
+                let next = ws.next().await;
+                assert!(
+                    send_result.is_err() || next.is_none() || next.unwrap().is_err(),
+                    "third connection should not be fully functional"
+                );
+            }
+            Ok(Err(_)) => {} // handshake failed — expected
+            Err(_) => {}     // timeout — server dropped connection, also fine
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_json_returns_parse_error() {
+        let (notify_tx, _) = broadcast::channel(16);
+        let server = start_test_server(vec![], notify_tx, None).await;
+
+        let mut ws = server.connect().await;
+        ws.send(Message::Text("not valid json".into())).await.unwrap();
+
+        let resp = recv_notification(&mut ws).await;
+        assert_eq!(resp["error"]["code"], -32700);
+        assert!(resp["error"]["message"].as_str().unwrap().contains("parse error"));
+    }
+
+    #[tokio::test]
+    async fn multiple_requests_on_same_connection() {
+        let (notify_tx, _) = broadcast::channel(16);
+        let server = start_test_server(
+            vec![sample_pane("%1", "running")],
+            notify_tx,
+            None,
+        )
+        .await;
+
+        let mut ws = server.connect().await;
+
+        let resp1 = send_rpc(&mut ws, 1, "list_panes", serde_json::json!({})).await;
+        assert_eq!(resp1["id"], 1);
+        assert_eq!(resp1["result"]["panes"].as_array().unwrap().len(), 1);
+
+        let resp2 = send_rpc(&mut ws, 2, "list_panes", serde_json::json!({})).await;
+        assert_eq!(resp2["id"], 2);
+        assert_eq!(resp2["result"]["panes"].as_array().unwrap().len(), 1);
+
+        let resp3 = send_rpc(
+            &mut ws,
+            3,
+            "subscribe",
+            serde_json::json!({"events": ["state", "topology"]}),
+        )
+        .await;
+        assert_eq!(resp3["id"], 3);
+        assert_eq!(resp3["result"]["subscribed"], true);
     }
 }

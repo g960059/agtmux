@@ -1,8 +1,9 @@
 pub mod loader;
 pub mod providers;
 
-use crate::types::{Evidence, PaneMeta, Provider};
+use crate::types::{Evidence, EvidenceKind, PaneMeta, Provider, SourceType};
 use chrono::{DateTime, Utc};
+use std::time::Duration;
 
 /// Detect whether a pane belongs to this provider.
 pub trait ProviderDetector: Send + Sync {
@@ -34,9 +35,32 @@ pub struct RawSignal {
 /// Normalized state output from EventNormalizer.
 #[derive(Debug, Clone)]
 pub struct NormalizedState {
+    pub provider: Provider,
     pub state: crate::types::ActivityState,
     pub reason_code: String,
-    pub confidence: String,
+    pub confidence: f64,
+}
+
+impl NormalizedState {
+    pub fn to_evidence(&self, source: SourceType, now: DateTime<Utc>) -> Evidence {
+        let kind = match source {
+            SourceType::Hook => EvidenceKind::HookEvent(self.reason_code.clone()),
+            SourceType::Api => EvidenceKind::ApiNotification(self.reason_code.clone()),
+            SourceType::File => EvidenceKind::FileChange(self.reason_code.clone()),
+            _ => EvidenceKind::PollerMatch(self.reason_code.clone()),
+        };
+        Evidence {
+            provider: self.provider,
+            kind,
+            signal: self.state,
+            weight: self.confidence,
+            confidence: self.confidence,
+            timestamp: now,
+            ttl: Duration::from_secs(120),
+            source,
+            reason_code: self.reason_code.clone(),
+        }
+    }
 }
 
 /// Detect provider by matching agent_type, current_cmd, or pane_title.
@@ -62,4 +86,54 @@ pub fn detect_by_agent_or_cmd(
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::ActivityState;
+
+    #[test]
+    fn to_evidence_hook_source_produces_hook_event_kind() {
+        let ns = NormalizedState {
+            provider: Provider::Claude,
+            state: ActivityState::Running,
+            reason_code: "hook:running".into(),
+            confidence: 0.94,
+        };
+        let ev = ns.to_evidence(SourceType::Hook, Utc::now());
+        assert_eq!(ev.provider, Provider::Claude);
+        assert_eq!(ev.signal, ActivityState::Running);
+        assert_eq!(ev.source, SourceType::Hook);
+        assert!(matches!(ev.kind, EvidenceKind::HookEvent(_)));
+        assert!((ev.confidence - 0.94).abs() < f64::EPSILON);
+        assert!((ev.weight - 0.94).abs() < f64::EPSILON);
+        assert_eq!(ev.ttl, Duration::from_secs(120));
+    }
+
+    #[test]
+    fn to_evidence_api_source_produces_api_notification_kind() {
+        let ns = NormalizedState {
+            provider: Provider::Codex,
+            state: ActivityState::WaitingApproval,
+            reason_code: "api:approval".into(),
+            confidence: 0.97,
+        };
+        let ev = ns.to_evidence(SourceType::Api, Utc::now());
+        assert_eq!(ev.source, SourceType::Api);
+        assert!(matches!(ev.kind, EvidenceKind::ApiNotification(_)));
+    }
+
+    #[test]
+    fn to_evidence_file_source_produces_file_change_kind() {
+        let ns = NormalizedState {
+            provider: Provider::Claude,
+            state: ActivityState::Idle,
+            reason_code: "file:idle".into(),
+            confidence: 0.90,
+        };
+        let ev = ns.to_evidence(SourceType::File, Utc::now());
+        assert_eq!(ev.source, SourceType::File);
+        assert!(matches!(ev.kind, EvidenceKind::FileChange(_)));
+    }
 }

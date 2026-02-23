@@ -1,4 +1,7 @@
-use crate::adapt::{detect_by_agent_or_cmd, EvidenceBuilder, ProviderDetector};
+use crate::adapt::{
+    detect_by_agent_or_cmd, EventNormalizer, EvidenceBuilder, NormalizedState, ProviderDetector,
+    RawSignal,
+};
 use crate::types::{ActivityState, Evidence, EvidenceKind, PaneMeta, Provider, SourceType};
 use chrono::{DateTime, Utc};
 use std::time::Duration;
@@ -112,5 +115,147 @@ impl EvidenceBuilder for ClaudeEvidenceBuilder {
         }
 
         evidence
+    }
+}
+
+pub struct ClaudeNormalizer;
+
+impl EventNormalizer for ClaudeNormalizer {
+    fn provider(&self) -> Provider {
+        Provider::Claude
+    }
+
+    fn normalize(&self, signal: &RawSignal) -> Option<NormalizedState> {
+        let event = signal.event_type.to_lowercase();
+        let payload = signal.payload.to_lowercase();
+
+        if event.contains("approval") || payload.contains("needs_approval") {
+            return Some(NormalizedState {
+                provider: Provider::Claude,
+                state: ActivityState::WaitingApproval,
+                reason_code: "hook:approval".into(),
+                confidence: 0.96,
+            });
+        }
+
+        if event.contains("waiting_input") || event.contains("input_required") {
+            return Some(NormalizedState {
+                provider: Provider::Claude,
+                state: ActivityState::WaitingInput,
+                reason_code: "hook:waiting_input".into(),
+                confidence: 0.94,
+            });
+        }
+
+        if event.contains("error") || event.contains("failed") {
+            return Some(NormalizedState {
+                provider: Provider::Claude,
+                state: ActivityState::Error,
+                reason_code: "hook:error".into(),
+                confidence: 0.98,
+            });
+        }
+
+        if event.contains("running")
+            || event.contains("agent_turn_started")
+            || event.contains("tool-execution")
+            || event.contains("streaming")
+        {
+            return Some(NormalizedState {
+                provider: Provider::Claude,
+                state: ActivityState::Running,
+                reason_code: "hook:running".into(),
+                confidence: 0.94,
+            });
+        }
+
+        if event.contains("idle") || event.contains("session_end") || event.contains("completed") {
+            return Some(NormalizedState {
+                provider: Provider::Claude,
+                state: ActivityState::Idle,
+                reason_code: "hook:idle".into(),
+                confidence: 0.92,
+            });
+        }
+
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_signal(event_type: &str, payload: &str) -> RawSignal {
+        RawSignal {
+            event_type: event_type.into(),
+            payload: payload.into(),
+            pane_id: "%1".into(),
+        }
+    }
+
+    #[test]
+    fn normalizes_approval_event() {
+        let n = ClaudeNormalizer;
+        let result = n.normalize(&make_signal("approval", "{}")).unwrap();
+        assert_eq!(result.state, ActivityState::WaitingApproval);
+        assert_eq!(result.provider, Provider::Claude);
+        assert!(result.confidence > 0.9);
+    }
+
+    #[test]
+    fn normalizes_waiting_input_event() {
+        let n = ClaudeNormalizer;
+        let result = n.normalize(&make_signal("waiting_input", "{}")).unwrap();
+        assert_eq!(result.state, ActivityState::WaitingInput);
+    }
+
+    #[test]
+    fn normalizes_error_event() {
+        let n = ClaudeNormalizer;
+        let result = n.normalize(&make_signal("error", "{}")).unwrap();
+        assert_eq!(result.state, ActivityState::Error);
+        assert!(result.confidence > 0.95);
+    }
+
+    #[test]
+    fn normalizes_running_event() {
+        let n = ClaudeNormalizer;
+        let result = n.normalize(&make_signal("running", "{}")).unwrap();
+        assert_eq!(result.state, ActivityState::Running);
+    }
+
+    #[test]
+    fn normalizes_tool_execution_event() {
+        let n = ClaudeNormalizer;
+        let result = n.normalize(&make_signal("tool-execution", "{}")).unwrap();
+        assert_eq!(result.state, ActivityState::Running);
+    }
+
+    #[test]
+    fn normalizes_idle_event() {
+        let n = ClaudeNormalizer;
+        let result = n.normalize(&make_signal("idle", "{}")).unwrap();
+        assert_eq!(result.state, ActivityState::Idle);
+    }
+
+    #[test]
+    fn normalizes_session_end_event() {
+        let n = ClaudeNormalizer;
+        let result = n.normalize(&make_signal("session_end", "{}")).unwrap();
+        assert_eq!(result.state, ActivityState::Idle);
+    }
+
+    #[test]
+    fn returns_none_for_unknown_event() {
+        let n = ClaudeNormalizer;
+        assert!(n.normalize(&make_signal("unknown_xyz", "{}")).is_none());
+    }
+
+    #[test]
+    fn approval_in_payload_triggers_normalization() {
+        let n = ClaudeNormalizer;
+        let result = n.normalize(&make_signal("some_event", "needs_approval")).unwrap();
+        assert_eq!(result.state, ActivityState::WaitingApproval);
     }
 }

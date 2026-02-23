@@ -1,4 +1,4 @@
-use agtmux_core::adapt::ProviderDetector;
+use agtmux_core::adapt::{EventNormalizer, ProviderDetector, RawSignal};
 use agtmux_core::attn::derive_attention_state;
 use agtmux_core::engine::{Engine, EngineConfig, ResolvedActivity};
 use agtmux_core::source::{SourceEvent, TopologyEvent};
@@ -42,6 +42,8 @@ pub struct Orchestrator {
     engine: Engine,
     /// Provider detectors loaded from TOML definitions.
     detectors: Vec<Box<dyn ProviderDetector>>,
+    /// Event normalizers for converting raw signals to evidence.
+    normalizers: Vec<Box<dyn EventNormalizer>>,
     /// Per-pane evidence window. Key = pane_id.
     evidence_windows: HashMap<String, Vec<Evidence>>,
     /// Cached PaneMeta per pane, populated from evidence context.
@@ -130,8 +132,9 @@ impl Orchestrator {
         notify_tx: broadcast::Sender<StateNotification>,
         shared_state: SharedState,
         detectors: Vec<Box<dyn ProviderDetector>>,
+        normalizers: Vec<Box<dyn EventNormalizer>>,
     ) -> Self {
-        Self::with_cancel(source_rx, notify_tx, shared_state, detectors, CancellationToken::new())
+        Self::with_cancel(source_rx, notify_tx, shared_state, detectors, normalizers, CancellationToken::new())
     }
 
     /// Create an orchestrator with an explicit cancellation token for graceful shutdown.
@@ -140,15 +143,18 @@ impl Orchestrator {
         notify_tx: broadcast::Sender<StateNotification>,
         shared_state: SharedState,
         detectors: Vec<Box<dyn ProviderDetector>>,
+        normalizers: Vec<Box<dyn EventNormalizer>>,
         cancel: CancellationToken,
     ) -> Self {
         info!(
             detector_count = detectors.len(),
-            "orchestrator: loaded provider detectors"
+            normalizer_count = normalizers.len(),
+            "orchestrator: loaded provider detectors and normalizers"
         );
         Self {
             engine: Engine::new(EngineConfig::default()),
             detectors,
+            normalizers,
             evidence_windows: HashMap::new(),
             pane_metas: HashMap::new(),
             pane_states: HashMap::new(),
@@ -199,14 +205,15 @@ impl Orchestrator {
             SourceEvent::RawSignal {
                 pane_id,
                 event_type,
-                ..
+                source,
+                payload,
+                timestamp,
             } => {
-                // Store event_type for attention derivation.
-                // Full EventNormalizer pipeline will be wired in Phase 2.
                 debug!(pane_id = %pane_id, event_type = %event_type, "raw signal received");
                 if let Some(state) = self.pane_states.get_mut(&pane_id) {
-                    state.last_event_type = event_type;
+                    state.last_event_type = event_type.clone();
                 }
+                self.normalize_raw_signal(&pane_id, &event_type, source, &payload, timestamp);
             }
             SourceEvent::TopologyChange(topo) => {
                 self.handle_topology(topo);
@@ -224,6 +231,43 @@ impl Orchestrator {
             // Supersede: remove old evidence from same provider+source
             window.retain(|old| !(old.provider == ev.provider && old.source == ev.source));
             window.push(ev);
+        }
+    }
+
+    /// Pass a raw signal through all registered normalizers.
+    /// Each normalizer that produces a NormalizedState generates Evidence that is
+    /// ingested and triggers re-evaluation.
+    fn normalize_raw_signal(
+        &mut self,
+        pane_id: &str,
+        event_type: &str,
+        source: SourceType,
+        payload: &str,
+        timestamp: DateTime<Utc>,
+    ) {
+        let signal = RawSignal {
+            event_type: event_type.to_string(),
+            payload: payload.to_string(),
+            pane_id: pane_id.to_string(),
+        };
+
+        let mut evidence = Vec::new();
+        for normalizer in &self.normalizers {
+            if let Some(normalized) = normalizer.normalize(&signal) {
+                debug!(
+                    pane_id = %pane_id,
+                    provider = ?normalized.provider,
+                    state = ?normalized.state,
+                    confidence = normalized.confidence,
+                    "normalizer produced state"
+                );
+                evidence.push(normalized.to_evidence(source, timestamp));
+            }
+        }
+
+        if !evidence.is_empty() {
+            self.ingest_evidence(pane_id, evidence);
+            self.evaluate_pane(pane_id);
         }
     }
 
@@ -428,7 +472,7 @@ mod tests {
         let (source_tx, source_rx) = mpsc::channel(64);
         let (notify_tx, notify_rx) = broadcast::channel(64);
         let shared_state: SharedState = Arc::new(RwLock::new(DaemonState::default()));
-        let orch = Orchestrator::new(source_rx, notify_tx, shared_state.clone(), vec![]);
+        let orch = Orchestrator::new(source_rx, notify_tx, shared_state.clone(), vec![], vec![]);
         (source_tx, notify_rx, orch, shared_state)
     }
 
@@ -769,7 +813,7 @@ mod tests {
         let (tx, rx) = mpsc::channel::<SourceEvent>(64);
         let (ntx, _nrx) = broadcast::channel::<StateNotification>(64);
         let shared: SharedState = Arc::new(RwLock::new(DaemonState::default()));
-        let mut orch = Orchestrator::new(rx, ntx, shared.clone(), vec![]);
+        let mut orch = Orchestrator::new(rx, ntx, shared.clone(), vec![], vec![]);
 
         // Send events, then close channel
         let ev = make_evidence(
@@ -973,7 +1017,7 @@ mod tests {
         let (tx, rx) = mpsc::channel::<SourceEvent>(64);
         let (ntx, _nrx) = broadcast::channel::<StateNotification>(64);
         let shared: SharedState = Arc::new(RwLock::new(DaemonState::default()));
-        let mut orch = Orchestrator::new(rx, ntx, shared.clone(), vec![]);
+        let mut orch = Orchestrator::new(rx, ntx, shared.clone(), vec![], vec![]);
 
         let ev = make_evidence(
             Provider::Claude,
@@ -1253,7 +1297,7 @@ mod tests {
         let (source_tx, source_rx) = mpsc::channel(64);
         let (notify_tx, notify_rx) = broadcast::channel(64);
         let shared_state: SharedState = Arc::new(RwLock::new(DaemonState::default()));
-        let orch = Orchestrator::new(source_rx, notify_tx, shared_state.clone(), detectors);
+        let orch = Orchestrator::new(source_rx, notify_tx, shared_state.clone(), detectors, vec![]);
         (source_tx, notify_rx, orch, shared_state)
     }
 
@@ -1513,7 +1557,7 @@ mod tests {
         let (tx, rx) = mpsc::channel::<SourceEvent>(64);
         let (ntx, _nrx) = broadcast::channel::<StateNotification>(64);
         let shared: SharedState = Arc::new(RwLock::new(DaemonState::default()));
-        let mut orch = Orchestrator::with_cancel(rx, ntx, shared.clone(), vec![], cancel.clone());
+        let mut orch = Orchestrator::with_cancel(rx, ntx, shared.clone(), vec![], vec![], cancel.clone());
 
         // Send an event before cancellation
         let ev = make_evidence(
@@ -1558,12 +1602,390 @@ mod tests {
         let (tx, rx) = mpsc::channel::<SourceEvent>(64);
         let (ntx, _nrx) = broadcast::channel::<StateNotification>(64);
         let shared: SharedState = Arc::new(RwLock::new(DaemonState::default()));
-        let mut orch = Orchestrator::with_cancel(rx, ntx, shared, vec![], cancel);
+        let mut orch = Orchestrator::with_cancel(rx, ntx, shared, vec![], vec![], cancel);
 
         // Drop the sender to close the channel.
         drop(tx);
 
         let result = tokio::time::timeout(Duration::from_secs(2), orch.run()).await;
         assert!(result.is_ok(), "orchestrator should exit when channel is closed");
+    }
+
+    // -----------------------------------------------------------------------
+    // EventNormalizer pipeline tests
+    // -----------------------------------------------------------------------
+
+    use agtmux_core::adapt::{EventNormalizer, NormalizedState, RawSignal as AdaptRawSignal};
+
+    struct MockNormalizer {
+        provider: Provider,
+        match_event: String,
+        output_state: ActivityState,
+        output_confidence: f64,
+    }
+
+    impl EventNormalizer for MockNormalizer {
+        fn provider(&self) -> Provider {
+            self.provider
+        }
+
+        fn normalize(&self, signal: &AdaptRawSignal) -> Option<NormalizedState> {
+            if signal.event_type.contains(&self.match_event) {
+                Some(NormalizedState {
+                    provider: self.provider,
+                    state: self.output_state,
+                    reason_code: format!("mock:{}", self.match_event),
+                    confidence: self.output_confidence,
+                })
+            } else {
+                None
+            }
+        }
+    }
+
+    fn create_orchestrator_with_normalizers(
+        normalizers: Vec<Box<dyn EventNormalizer>>,
+    ) -> (
+        mpsc::Sender<SourceEvent>,
+        broadcast::Receiver<StateNotification>,
+        Orchestrator,
+        SharedState,
+    ) {
+        let (source_tx, source_rx) = mpsc::channel(64);
+        let (notify_tx, notify_rx) = broadcast::channel(64);
+        let shared_state: SharedState = Arc::new(RwLock::new(DaemonState::default()));
+        let orch = Orchestrator::new(source_rx, notify_tx, shared_state.clone(), vec![], normalizers);
+        (source_tx, notify_rx, orch, shared_state)
+    }
+
+    #[test]
+    fn raw_signal_through_normalizer_creates_evidence_and_state() {
+        let normalizers: Vec<Box<dyn EventNormalizer>> = vec![
+            Box::new(MockNormalizer {
+                provider: Provider::Claude,
+                match_event: "approval".into(),
+                output_state: ActivityState::WaitingApproval,
+                output_confidence: 0.96,
+            }),
+        ];
+        let (_tx, _rx, mut orch, _shared) = create_orchestrator_with_normalizers(normalizers);
+
+        orch.handle_event(SourceEvent::RawSignal {
+            pane_id: "%1".into(),
+            event_type: "approval".into(),
+            source: SourceType::Hook,
+            payload: "{}".into(),
+            timestamp: Utc::now(),
+        });
+
+        let state = orch.get_pane_state("%1").expect("pane state should exist after normalization");
+        assert_eq!(state.activity.state, ActivityState::WaitingApproval);
+        assert!(state.activity.confidence > 0.0);
+    }
+
+    #[test]
+    fn raw_signal_no_matching_normalizer_does_not_create_evidence() {
+        let normalizers: Vec<Box<dyn EventNormalizer>> = vec![
+            Box::new(MockNormalizer {
+                provider: Provider::Claude,
+                match_event: "approval".into(),
+                output_state: ActivityState::WaitingApproval,
+                output_confidence: 0.96,
+            }),
+        ];
+        let (_tx, _rx, mut orch, _shared) = create_orchestrator_with_normalizers(normalizers);
+
+        orch.handle_event(SourceEvent::RawSignal {
+            pane_id: "%1".into(),
+            event_type: "something-unrelated".into(),
+            source: SourceType::Hook,
+            payload: "{}".into(),
+            timestamp: Utc::now(),
+        });
+
+        assert!(
+            orch.get_pane_state("%1").is_none(),
+            "no state should be created when no normalizer matches"
+        );
+        assert!(
+            orch.evidence_windows.get("%1").is_none(),
+            "no evidence window should be created when no normalizer matches"
+        );
+    }
+
+    #[test]
+    fn multiple_normalizers_all_produce_evidence() {
+        let normalizers: Vec<Box<dyn EventNormalizer>> = vec![
+            Box::new(MockNormalizer {
+                provider: Provider::Claude,
+                match_event: "error".into(),
+                output_state: ActivityState::Error,
+                output_confidence: 0.98,
+            }),
+            Box::new(MockNormalizer {
+                provider: Provider::Codex,
+                match_event: "error".into(),
+                output_state: ActivityState::Error,
+                output_confidence: 0.97,
+            }),
+        ];
+        let (_tx, _rx, mut orch, _shared) = create_orchestrator_with_normalizers(normalizers);
+
+        orch.handle_event(SourceEvent::RawSignal {
+            pane_id: "%1".into(),
+            event_type: "error".into(),
+            source: SourceType::Hook,
+            payload: "{}".into(),
+            timestamp: Utc::now(),
+        });
+
+        let window = orch.evidence_windows.get("%1").expect("evidence window should exist");
+        assert_eq!(window.len(), 2, "both normalizers should produce evidence");
+        assert!(window.iter().any(|e| e.provider == Provider::Claude));
+        assert!(window.iter().any(|e| e.provider == Provider::Codex));
+    }
+
+    #[test]
+    fn normalizer_evidence_has_correct_source_and_kind() {
+        let normalizers: Vec<Box<dyn EventNormalizer>> = vec![
+            Box::new(MockNormalizer {
+                provider: Provider::Claude,
+                match_event: "running".into(),
+                output_state: ActivityState::Running,
+                output_confidence: 0.94,
+            }),
+        ];
+        let (_tx, _rx, mut orch, _shared) = create_orchestrator_with_normalizers(normalizers);
+
+        orch.handle_event(SourceEvent::RawSignal {
+            pane_id: "%1".into(),
+            event_type: "running".into(),
+            source: SourceType::Hook,
+            payload: "{}".into(),
+            timestamp: Utc::now(),
+        });
+
+        let window = orch.evidence_windows.get("%1").unwrap();
+        assert_eq!(window.len(), 1);
+        let ev = &window[0];
+        assert_eq!(ev.source, SourceType::Hook);
+        assert!(matches!(ev.kind, EvidenceKind::HookEvent(_)));
+        assert_eq!(ev.signal, ActivityState::Running);
+        assert!((ev.confidence - 0.94).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn normalizer_evidence_from_api_source_gets_api_kind() {
+        let normalizers: Vec<Box<dyn EventNormalizer>> = vec![
+            Box::new(MockNormalizer {
+                provider: Provider::Codex,
+                match_event: "idle".into(),
+                output_state: ActivityState::Idle,
+                output_confidence: 0.92,
+            }),
+        ];
+        let (_tx, _rx, mut orch, _shared) = create_orchestrator_with_normalizers(normalizers);
+
+        orch.handle_event(SourceEvent::RawSignal {
+            pane_id: "%1".into(),
+            event_type: "idle".into(),
+            source: SourceType::Api,
+            payload: "{}".into(),
+            timestamp: Utc::now(),
+        });
+
+        let window = orch.evidence_windows.get("%1").unwrap();
+        assert_eq!(window.len(), 1);
+        assert_eq!(window[0].source, SourceType::Api);
+        assert!(matches!(window[0].kind, EvidenceKind::ApiNotification(_)));
+    }
+
+    #[test]
+    fn normalizer_evidence_supersedes_previous_from_same_provider_source() {
+        let normalizers: Vec<Box<dyn EventNormalizer>> = vec![
+            Box::new(MockNormalizer {
+                provider: Provider::Claude,
+                match_event: "running".into(),
+                output_state: ActivityState::Running,
+                output_confidence: 0.94,
+            }),
+        ];
+        let (_tx, _rx, mut orch, _shared) = create_orchestrator_with_normalizers(normalizers);
+
+        // First signal: running
+        orch.handle_event(SourceEvent::RawSignal {
+            pane_id: "%1".into(),
+            event_type: "running".into(),
+            source: SourceType::Hook,
+            payload: "{}".into(),
+            timestamp: Utc::now(),
+        });
+        assert_eq!(orch.evidence_windows["%1"].len(), 1);
+        assert_eq!(orch.evidence_windows["%1"][0].signal, ActivityState::Running);
+
+        // Replace the normalizer to produce different state on same provider+source
+        // (In practice, same normalizer with different event_type)
+        // Since we can't replace normalizers, we re-send. The new evidence from same
+        // (provider=Claude, source=Hook) supersedes the old one.
+        orch.handle_event(SourceEvent::RawSignal {
+            pane_id: "%1".into(),
+            event_type: "running".into(),
+            source: SourceType::Hook,
+            payload: "{}".into(),
+            timestamp: Utc::now(),
+        });
+        assert_eq!(
+            orch.evidence_windows["%1"].len(),
+            1,
+            "evidence from same provider+source should be superseded"
+        );
+    }
+
+    #[test]
+    fn normalizer_triggers_state_change_broadcast() {
+        let normalizers: Vec<Box<dyn EventNormalizer>> = vec![
+            Box::new(MockNormalizer {
+                provider: Provider::Claude,
+                match_event: "error".into(),
+                output_state: ActivityState::Error,
+                output_confidence: 0.98,
+            }),
+        ];
+        let (_tx, mut rx, mut orch, _shared) = create_orchestrator_with_normalizers(normalizers);
+
+        orch.handle_event(SourceEvent::RawSignal {
+            pane_id: "%1".into(),
+            event_type: "error".into(),
+            source: SourceType::Hook,
+            payload: "{}".into(),
+            timestamp: Utc::now(),
+        });
+
+        let notif = rx.try_recv().expect("should broadcast state change from normalizer");
+        match notif {
+            StateNotification::StateChanged { pane_id, state } => {
+                assert_eq!(pane_id, "%1");
+                assert_eq!(state.activity.state, ActivityState::Error);
+            }
+            other => panic!("unexpected notification: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn raw_signal_still_updates_last_event_type_with_normalizers() {
+        let normalizers: Vec<Box<dyn EventNormalizer>> = vec![
+            Box::new(MockNormalizer {
+                provider: Provider::Claude,
+                match_event: "tool-execution".into(),
+                output_state: ActivityState::Running,
+                output_confidence: 0.94,
+            }),
+        ];
+        let (_tx, _rx, mut orch, _shared) = create_orchestrator_with_normalizers(normalizers);
+
+        // First create pane state via evidence so last_event_type can be set
+        let ev = make_evidence(
+            Provider::Claude,
+            ActivityState::Running,
+            0.9,
+            0.9,
+            SourceType::Poller,
+            "running",
+        );
+        orch.ingest_evidence("%1", vec![ev]);
+        orch.evaluate_pane("%1");
+
+        orch.handle_event(SourceEvent::RawSignal {
+            pane_id: "%1".into(),
+            event_type: "tool-execution".into(),
+            source: SourceType::Hook,
+            payload: "{}".into(),
+            timestamp: Utc::now(),
+        });
+
+        let state = orch.get_pane_state("%1").unwrap();
+        assert_eq!(state.last_event_type, "tool-execution");
+    }
+
+    #[tokio::test]
+    async fn run_loop_processes_raw_signal_with_normalizers() {
+        let normalizers: Vec<Box<dyn EventNormalizer>> = vec![
+            Box::new(MockNormalizer {
+                provider: Provider::Claude,
+                match_event: "running".into(),
+                output_state: ActivityState::Running,
+                output_confidence: 0.94,
+            }),
+        ];
+        let (tx, rx) = mpsc::channel::<SourceEvent>(64);
+        let (ntx, _nrx) = broadcast::channel::<StateNotification>(64);
+        let shared: SharedState = Arc::new(RwLock::new(DaemonState::default()));
+        let mut orch = Orchestrator::new(rx, ntx, shared.clone(), vec![], normalizers);
+
+        tx.send(SourceEvent::RawSignal {
+            pane_id: "%1".into(),
+            event_type: "running".into(),
+            source: SourceType::Hook,
+            payload: "{}".into(),
+            timestamp: Utc::now(),
+        })
+        .await
+        .unwrap();
+
+        drop(tx);
+        orch.run().await;
+
+        let state = orch.get_pane_state("%1").expect("pane state should exist");
+        assert_eq!(state.activity.state, ActivityState::Running);
+
+        let read_state = shared.read().await;
+        assert_eq!(read_state.panes.len(), 1);
+        assert_eq!(read_state.panes[0].activity_state, "running");
+    }
+
+    #[test]
+    fn normalizer_confidence_higher_than_poller() {
+        let normalizers: Vec<Box<dyn EventNormalizer>> = vec![
+            Box::new(MockNormalizer {
+                provider: Provider::Claude,
+                match_event: "running".into(),
+                output_state: ActivityState::Running,
+                output_confidence: 0.94,
+            }),
+        ];
+        let (_tx, _rx, mut orch, _shared) = create_orchestrator_with_normalizers(normalizers);
+
+        // First add poller evidence with lower confidence
+        let poller_ev = make_evidence(
+            Provider::Claude,
+            ActivityState::Idle,
+            0.88,
+            0.88,
+            SourceType::Poller,
+            "idle",
+        );
+        orch.ingest_evidence("%1", vec![poller_ev]);
+
+        // Then send a raw signal that the normalizer will convert to higher-confidence evidence
+        orch.handle_event(SourceEvent::RawSignal {
+            pane_id: "%1".into(),
+            event_type: "running".into(),
+            source: SourceType::Hook,
+            payload: "{}".into(),
+            timestamp: Utc::now(),
+        });
+
+        let window = orch.evidence_windows.get("%1").unwrap();
+        assert_eq!(window.len(), 2, "both poller and normalizer evidence should coexist");
+
+        // The normalizer evidence (from Hook) should have higher confidence
+        let hook_ev = window.iter().find(|e| e.source == SourceType::Hook).unwrap();
+        let poller_ev = window.iter().find(|e| e.source == SourceType::Poller).unwrap();
+        assert!(
+            hook_ev.confidence > poller_ev.confidence,
+            "normalized evidence ({}) should have higher confidence than poller evidence ({})",
+            hook_ev.confidence,
+            poller_ev.confidence,
+        );
     }
 }

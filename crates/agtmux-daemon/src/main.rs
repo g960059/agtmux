@@ -2,7 +2,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use agtmux_core::adapt::loader::{builtin_adapters, load_adapters_from_dir, merge_adapters};
+use agtmux_core::adapt::loader::{
+    builtin_adapters, builtin_normalizers, load_adapters_from_dir, merge_adapters,
+};
 use agtmux_tmux::TmuxBackend;
 use clap::{Parser, Subcommand};
 use tokio::sync::{broadcast, mpsc};
@@ -267,11 +269,13 @@ async fn run_daemon(
     // ---------------------------------------------------------------
     // 7. Create Orchestrator (with shared_state so it can write pane info)
     // ---------------------------------------------------------------
+    let normalizers = builtin_normalizers();
     let mut orchestrator = Orchestrator::with_cancel(
         source_rx,
         notify_tx.clone(),
         shared_state.clone(),
         detectors,
+        normalizers,
         cancel.clone(),
     );
 

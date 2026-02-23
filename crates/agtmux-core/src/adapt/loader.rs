@@ -4,7 +4,9 @@ use serde::Deserialize;
 use std::path::Path;
 use std::time::Duration;
 
-use super::{detect_by_agent_or_cmd, EvidenceBuilder, ProviderDetector};
+use super::providers::claude::ClaudeNormalizer;
+use super::providers::codex::CodexNormalizer;
+use super::{detect_by_agent_or_cmd, EventNormalizer, EvidenceBuilder, ProviderDetector};
 
 /// Error type for provider loader operations.
 #[derive(Debug)]
@@ -273,6 +275,15 @@ pub fn builtin_adapters() -> Vec<(Box<dyn ProviderDetector>, Box<dyn EvidenceBui
                 .unwrap_or_else(|e| panic!("failed to load builtin provider TOML: {e}"))
         })
         .collect()
+}
+
+/// Create the built-in EventNormalizer instances.
+/// Per the provider trait matrix, only Claude (hooks) and Codex (API) have normalizers.
+pub fn builtin_normalizers() -> Vec<Box<dyn EventNormalizer>> {
+    vec![
+        Box::new(ClaudeNormalizer),
+        Box::new(CodexNormalizer),
+    ]
 }
 
 #[cfg(test)]
