@@ -11,3 +11,4 @@ pub mod status;
 pub mod store;
 pub mod tmux_status;
 pub mod tui;
+pub mod ws_server;

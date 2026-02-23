@@ -12,6 +12,7 @@ use agtmux_daemon::client::DaemonClient;
 use agtmux_daemon::orchestrator::{Orchestrator, PaneState};
 use agtmux_daemon::recorder::Recorder;
 use agtmux_daemon::server::{DaemonServer, DaemonState, PaneInfo, SharedState};
+use agtmux_daemon::ws_server::WsServer;
 use agtmux_daemon::sources::hook::HookSource;
 use agtmux_daemon::sources::poller::PollerSource;
 use agtmux_daemon::status::format_status;
@@ -58,6 +59,10 @@ enum Commands {
         /// SQLite database path for state persistence across restarts
         #[arg(long, default_value = DEFAULT_DB_PATH)]
         db_path: String,
+
+        /// WebSocket listen address for browser/Tauri clients
+        #[arg(long, default_value = "127.0.0.1:9780")]
+        ws_addr: String,
     },
     /// Show pane status (one-shot)
     Status {
@@ -104,7 +109,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         // Default to daemon when no subcommand is given.
         None | Some(Commands::Daemon { .. }) => {
-            let (socket, hook_socket, poll_interval_ms, record, config_dir, db_path) =
+            let (socket, hook_socket, poll_interval_ms, record, config_dir, db_path, ws_addr) =
                 match cli.command {
                     Some(Commands::Daemon {
                         socket,
@@ -113,7 +118,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         record,
                         config_dir,
                         db_path,
-                    }) => (socket, hook_socket, poll_interval_ms, record, config_dir, db_path),
+                        ws_addr,
+                    }) => (socket, hook_socket, poll_interval_ms, record, config_dir, db_path, ws_addr),
                     _ => (
                         DEFAULT_DAEMON_SOCKET.to_string(),
                         DEFAULT_HOOK_SOCKET.to_string(),
@@ -121,9 +127,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         None,
                         None,
                         DEFAULT_DB_PATH.to_string(),
+                        "127.0.0.1:9780".to_string(),
                     ),
                 };
-            run_daemon(socket, hook_socket, poll_interval_ms, record, config_dir, db_path).await?;
+            run_daemon(socket, hook_socket, poll_interval_ms, record, config_dir, db_path, ws_addr).await?;
         }
         Some(Commands::Status { socket }) => {
             run_status(&socket).await?;
@@ -152,6 +159,7 @@ async fn run_daemon(
     record: Option<String>,
     config_dir: Option<String>,
     db_path: String,
+    ws_addr: String,
 ) -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(
         socket = %socket,
@@ -160,6 +168,7 @@ async fn run_daemon(
         record = ?record,
         config_dir = ?config_dir,
         db_path = %db_path,
+        ws_addr = %ws_addr,
         "starting agtmux daemon"
     );
 
@@ -277,6 +286,17 @@ async fn run_daemon(
     );
 
     // ---------------------------------------------------------------
+    // 8b. Create WsServer (WebSocket, same protocol as Unix socket)
+    // ---------------------------------------------------------------
+    let ws_addr: std::net::SocketAddr = ws_addr.parse()?;
+    let ws_server = WsServer::new(
+        ws_addr,
+        shared_state.clone(),
+        notify_tx.clone(),
+        cancel.clone(),
+    );
+
+    // ---------------------------------------------------------------
     // 9. Optionally create the JSONL recorder
     // ---------------------------------------------------------------
     let mut recorder = match record {
@@ -306,6 +326,7 @@ async fn run_daemon(
     let poller_handle = tokio::spawn(async move { poller.run().await });
     let hook_handle = tokio::spawn(async move { hook_source.run().await });
     let server_handle = tokio::spawn(async move { server.run().await });
+    let ws_handle = tokio::spawn(async move { ws_server.run().await });
     let recorder_cancel = cancel.clone();
     let recorder_handle = tokio::spawn(async move {
         if let Some(ref mut r) = recorder {
@@ -326,7 +347,7 @@ async fn run_daemon(
 
     // Give tasks up to 3 seconds to finish draining.
     let _ = tokio::time::timeout(Duration::from_secs(3), async {
-        let _ = tokio::join!(orch_handle, poller_handle, hook_handle, server_handle, recorder_handle, save_handle);
+        let _ = tokio::join!(orch_handle, poller_handle, hook_handle, server_handle, ws_handle, recorder_handle, save_handle);
     }).await;
 
     // Final save before shutdown.
