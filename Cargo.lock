@@ -25,6 +25,7 @@ dependencies = [
  "crossterm",
  "futures-util",
  "glob",
+ "http",
  "notify",
  "ratatui",
  "rusqlite",

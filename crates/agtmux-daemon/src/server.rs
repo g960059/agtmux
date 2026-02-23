@@ -89,9 +89,9 @@ pub struct JsonRpcNotification {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-struct SubscribeParams {
+pub struct SubscribeParams {
     #[serde(default)]
-    events: Vec<String>,
+    pub events: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -358,7 +358,7 @@ async fn handle_client(
 
 /// Map a `StateNotification` to a JSON-RPC push if the client is subscribed
 /// to the relevant event kind.
-fn notification_to_push(
+pub fn notification_to_push(
     notification: &StateNotification,
     subscribed_events: &[String],
 ) -> Option<JsonRpcNotification> {
@@ -422,7 +422,7 @@ async fn write_json<T: Serialize>(
 }
 
 /// Compute aggregated counts from the current state, grouped by `activity_state`.
-async fn compute_summary_counts(state: &SharedState) -> HashMap<String, usize> {
+pub async fn compute_summary_counts(state: &SharedState) -> HashMap<String, usize> {
     let s = state.read().await;
     let mut counts: HashMap<String, usize> = HashMap::new();
     for pane in &s.panes {

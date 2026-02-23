@@ -14,6 +14,7 @@ use tokio_util::sync::CancellationToken;
 pub struct ApiSource {
     tx: mpsc::Sender<SourceEvent>,
     url: String,
+    pane_id: String,
     cancel: CancellationToken,
 }
 
@@ -21,15 +22,27 @@ impl ApiSource {
     pub fn new(
         tx: mpsc::Sender<SourceEvent>,
         url: String,
+        pane_id: String,
         cancel: CancellationToken,
     ) -> Self {
-        Self { tx, url, cancel }
+        Self { tx, url, pane_id, cancel }
     }
 
     /// Connect to the Codex app-server WebSocket and listen for status
-    /// messages. Automatically retries on disconnection (3 s between attempts).
+    /// messages. Automatically retries on disconnection with exponential
+    /// backoff (3s, 6s, 12s, 24s, 48s, capped at 60s). Resets backoff on
+    /// successful connection. After 10 consecutive failures, logs at debug
+    /// level instead of warn.
+    ///
     /// Blocks until cancelled via the `CancellationToken`.
     pub async fn run(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        const INITIAL_BACKOFF_SECS: u64 = 3;
+        const MAX_BACKOFF_SECS: u64 = 60;
+        const DEBUG_LOG_THRESHOLD: u32 = 10;
+
+        let mut backoff_secs = INITIAL_BACKOFF_SECS;
+        let mut consecutive_failures: u32 = 0;
+
         loop {
             tokio::select! {
                 _ = self.cancel.cancelled() => {
@@ -40,9 +53,20 @@ impl ApiSource {
                     match result {
                         Ok(()) => {
                             tracing::info!("api source: connection closed cleanly");
+                            // Reset backoff on successful connection.
+                            backoff_secs = INITIAL_BACKOFF_SECS;
+                            consecutive_failures = 0;
                         }
                         Err(e) => {
-                            tracing::warn!("api source: connection error: {e}");
+                            consecutive_failures = consecutive_failures.saturating_add(1);
+                            if consecutive_failures >= DEBUG_LOG_THRESHOLD {
+                                tracing::debug!(
+                                    consecutive_failures,
+                                    "api source: connection error: {e}"
+                                );
+                            } else {
+                                tracing::warn!("api source: connection error: {e}");
+                            }
                         }
                     }
                 }
@@ -54,10 +78,18 @@ impl ApiSource {
                     tracing::info!("api source: cancellation during retry backoff");
                     return Ok(());
                 }
-                _ = tokio::time::sleep(Duration::from_secs(3)) => {
-                    tracing::info!(url = %self.url, "api source: reconnecting...");
+                _ = tokio::time::sleep(Duration::from_secs(backoff_secs)) => {
+                    tracing::info!(
+                        url = %self.url,
+                        backoff_secs,
+                        consecutive_failures,
+                        "api source: reconnecting..."
+                    );
                 }
             }
+
+            // Exponential backoff: double the delay, capped at MAX_BACKOFF_SECS.
+            backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF_SECS);
         }
     }
 
@@ -78,9 +110,9 @@ impl ApiSource {
                         Some(Ok(message)) => {
                             if let tokio_tungstenite::tungstenite::Message::Text(text) = message {
                                 if let Some(state) = parse_codex_message(&text) {
-                                    let evidence = build_api_evidence(state, "codex");
+                                    let evidence = build_api_evidence(state, &self.pane_id);
                                     let event = SourceEvent::Evidence {
-                                        pane_id: "codex".to_string(),
+                                        pane_id: self.pane_id.clone(),
                                         evidence,
                                         meta: None,
                                     };
@@ -144,6 +176,8 @@ pub fn build_api_evidence(state: ActivityState, pane_id: &str) -> Vec<Evidence> 
         ActivityState::Error => (0.90, 0.85),
         ActivityState::WaitingInput => (0.90, 0.85),
         ActivityState::Unknown => (0.50, 0.50),
+        // non_exhaustive: new variants added to ActivityState will hit this arm.
+        // Use low confidence so the engine does not over-trust an unrecognized state.
         _ => (0.50, 0.50),
     };
 

@@ -1,31 +1,64 @@
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Semaphore};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 
 use crate::orchestrator::StateNotification;
 use crate::server::{
-    JsonRpcError, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, SharedState,
+    compute_summary_counts, notification_to_push, JsonRpcError, JsonRpcNotification,
+    JsonRpcRequest, JsonRpcResponse, SharedState, SubscribeParams,
 };
 
 // ---------------------------------------------------------------------------
-// Subscribe params (mirrors server.rs)
+// Origin validation
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, serde::Deserialize)]
-struct SubscribeParams {
-    #[serde(default)]
-    events: Vec<String>,
+/// Validate the `Origin` header on an incoming WebSocket upgrade request.
+///
+/// Allowed origins:
+/// - `tauri://localhost` (Tauri desktop app)
+/// - `http://localhost:*` or `http://127.0.0.1:*` (local dev)
+/// - `null` (file:// contexts)
+/// - Absent origin header (non-browser clients like curl, native apps)
+///
+/// All other origins are rejected with HTTP 403.
+fn validate_origin(
+    req: &tokio_tungstenite::tungstenite::handshake::server::Request,
+    resp: tokio_tungstenite::tungstenite::handshake::server::Response,
+) -> Result<
+    tokio_tungstenite::tungstenite::handshake::server::Response,
+    tokio_tungstenite::tungstenite::handshake::server::ErrorResponse,
+> {
+    if let Some(origin) = req.headers().get("origin") {
+        let origin_str = origin.to_str().unwrap_or("");
+        if origin_str == "null"
+            || origin_str.starts_with("tauri://")
+            || origin_str.starts_with("http://localhost")
+            || origin_str.starts_with("http://127.0.0.1")
+        {
+            return Ok(resp);
+        }
+        tracing::warn!(origin = %origin_str, "ws: rejected connection from disallowed origin");
+        let err_resp = http::Response::builder()
+            .status(http::StatusCode::FORBIDDEN)
+            .body(Some("Origin not allowed".into()))
+            .expect("building error response");
+        return Err(err_resp);
+    }
+    // No origin header = non-browser client (curl, native app), allow.
+    Ok(resp)
 }
 
 // ---------------------------------------------------------------------------
 // WsServer
 // ---------------------------------------------------------------------------
+
+/// Default maximum number of concurrent WebSocket connections.
+const DEFAULT_MAX_CONNECTIONS: usize = 64;
 
 /// WebSocket server exposing the same JSON-RPC 2.0 protocol as `DaemonServer`.
 ///
@@ -36,6 +69,7 @@ pub struct WsServer {
     state: SharedState,
     notify_tx: broadcast::Sender<StateNotification>,
     cancel: CancellationToken,
+    max_connections: usize,
 }
 
 impl WsServer {
@@ -50,26 +84,51 @@ impl WsServer {
             state,
             notify_tx,
             cancel,
+            max_connections: DEFAULT_MAX_CONNECTIONS,
         }
+    }
+
+    /// Set the maximum number of concurrent WebSocket connections.
+    #[allow(dead_code)]
+    pub fn with_max_connections(mut self, max: usize) -> Self {
+        self.max_connections = max;
+        self
     }
 
     /// Run the WebSocket server: bind TCP, accept connections, and spawn
     /// per-client handlers until the cancellation token fires.
     pub async fn run(&self) -> std::io::Result<()> {
         let listener = TcpListener::bind(self.addr).await?;
-        tracing::info!(addr = %self.addr, "ws server listening");
+        tracing::info!(addr = %self.addr, max_connections = self.max_connections, "ws server listening");
+
+        let semaphore = Arc::new(Semaphore::new(self.max_connections));
 
         loop {
             tokio::select! {
                 result = listener.accept() => {
                     match result {
                         Ok((stream, peer)) => {
+                            let permit = match semaphore.clone().try_acquire_owned() {
+                                Ok(permit) => permit,
+                                Err(_) => {
+                                    tracing::warn!(
+                                        peer = %peer,
+                                        max = self.max_connections,
+                                        "ws: connection limit reached, rejecting"
+                                    );
+                                    // Drop the stream immediately to close the TCP connection.
+                                    drop(stream);
+                                    continue;
+                                }
+                            };
                             tracing::debug!(peer = %peer, "ws: TCP connection accepted");
                             let state = Arc::clone(&self.state);
                             let notify_rx = self.notify_tx.subscribe();
                             let cancel = self.cancel.clone();
                             tokio::spawn(async move {
-                                match tokio_tungstenite::accept_async(stream).await {
+                                // The permit is held for the lifetime of the handler.
+                                let _permit = permit;
+                                match tokio_tungstenite::accept_hdr_async(stream, validate_origin).await {
                                     Ok(ws_stream) => {
                                         if let Err(e) = handle_ws_client(ws_stream, state, notify_rx, cancel).await {
                                             tracing::debug!(peer = %peer, error = %e, "ws client handler finished with error");
@@ -275,70 +334,6 @@ async fn handle_ws_client(
 }
 
 // ---------------------------------------------------------------------------
-// Notification mapping (mirrors server.rs logic)
-// ---------------------------------------------------------------------------
-
-fn notification_to_push(
-    notification: &StateNotification,
-    subscribed_events: &[String],
-) -> Option<JsonRpcNotification> {
-    match notification {
-        StateNotification::StateChanged {
-            pane_id,
-            state: pane_state,
-        } => {
-            if subscribed_events.iter().any(|e| e == "state") {
-                Some(JsonRpcNotification {
-                    jsonrpc: "2.0".into(),
-                    method: "state_changed".into(),
-                    params: serde_json::json!({
-                        "pane_id": pane_id,
-                        "state": pane_state,
-                    }),
-                })
-            } else {
-                None
-            }
-        }
-        StateNotification::PaneAdded { pane_id } => {
-            if subscribed_events.iter().any(|e| e == "topology") {
-                Some(JsonRpcNotification {
-                    jsonrpc: "2.0".into(),
-                    method: "pane_added".into(),
-                    params: serde_json::json!({ "pane_id": pane_id }),
-                })
-            } else {
-                None
-            }
-        }
-        StateNotification::PaneRemoved { pane_id } => {
-            if subscribed_events.iter().any(|e| e == "topology") {
-                Some(JsonRpcNotification {
-                    jsonrpc: "2.0".into(),
-                    method: "pane_removed".into(),
-                    params: serde_json::json!({ "pane_id": pane_id }),
-                })
-            } else {
-                None
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-async fn compute_summary_counts(state: &SharedState) -> HashMap<String, usize> {
-    let s = state.read().await;
-    let mut counts: HashMap<String, usize> = HashMap::new();
-    for pane in &s.panes {
-        *counts.entry(pane.activity_state.clone()).or_insert(0) += 1;
-    }
-    counts
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -346,6 +341,7 @@ async fn compute_summary_counts(state: &SharedState) -> HashMap<String, usize> {
 mod tests {
     use super::*;
     use crate::server::{DaemonState, PaneInfo};
+    use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::sync::{broadcast, RwLock};
 
@@ -381,6 +377,18 @@ mod tests {
 
         let server = WsServer::new(addr, state, notify_tx, cancel);
         assert_eq!(server.addr, addr);
+        assert_eq!(server.max_connections, DEFAULT_MAX_CONNECTIONS);
+    }
+
+    #[test]
+    fn ws_server_custom_max_connections() {
+        let state = make_shared_state(vec![]);
+        let (notify_tx, _) = broadcast::channel(16);
+        let cancel = CancellationToken::new();
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+
+        let server = WsServer::new(addr, state, notify_tx, cancel).with_max_connections(128);
+        assert_eq!(server.max_connections, 128);
     }
 
     #[test]
@@ -535,5 +543,83 @@ mod tests {
         assert_eq!(counts.get("running"), Some(&2));
         assert_eq!(counts.get("idle"), Some(&1));
         assert_eq!(counts.len(), 2);
+    }
+
+    #[test]
+    fn validate_origin_allows_tauri() {
+        let req = http::Request::builder()
+            .header("origin", "tauri://localhost")
+            .body(())
+            .unwrap();
+        let resp = http::Response::builder()
+            .status(http::StatusCode::SWITCHING_PROTOCOLS)
+            .body(())
+            .unwrap();
+        assert!(validate_origin(&req, resp).is_ok());
+    }
+
+    #[test]
+    fn validate_origin_allows_localhost() {
+        let req = http::Request::builder()
+            .header("origin", "http://localhost:3000")
+            .body(())
+            .unwrap();
+        let resp = http::Response::builder()
+            .status(http::StatusCode::SWITCHING_PROTOCOLS)
+            .body(())
+            .unwrap();
+        assert!(validate_origin(&req, resp).is_ok());
+    }
+
+    #[test]
+    fn validate_origin_allows_127_0_0_1() {
+        let req = http::Request::builder()
+            .header("origin", "http://127.0.0.1:9780")
+            .body(())
+            .unwrap();
+        let resp = http::Response::builder()
+            .status(http::StatusCode::SWITCHING_PROTOCOLS)
+            .body(())
+            .unwrap();
+        assert!(validate_origin(&req, resp).is_ok());
+    }
+
+    #[test]
+    fn validate_origin_allows_null() {
+        let req = http::Request::builder()
+            .header("origin", "null")
+            .body(())
+            .unwrap();
+        let resp = http::Response::builder()
+            .status(http::StatusCode::SWITCHING_PROTOCOLS)
+            .body(())
+            .unwrap();
+        assert!(validate_origin(&req, resp).is_ok());
+    }
+
+    #[test]
+    fn validate_origin_allows_no_origin() {
+        let req = http::Request::builder().body(()).unwrap();
+        let resp = http::Response::builder()
+            .status(http::StatusCode::SWITCHING_PROTOCOLS)
+            .body(())
+            .unwrap();
+        assert!(validate_origin(&req, resp).is_ok());
+    }
+
+    #[test]
+    fn validate_origin_rejects_remote() {
+        let req = http::Request::builder()
+            .header("origin", "https://evil.example.com")
+            .body(())
+            .unwrap();
+        let resp = http::Response::builder()
+            .status(http::StatusCode::SWITCHING_PROTOCOLS)
+            .body(())
+            .unwrap();
+        let result = validate_origin(&req, resp);
+        assert!(result.is_err());
+        let err_resp = result.unwrap_err();
+        assert_eq!(err_resp.status(), http::StatusCode::FORBIDDEN);
     }
 }
