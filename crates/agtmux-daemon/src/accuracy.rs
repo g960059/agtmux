@@ -292,6 +292,21 @@ pub fn extract_predicted_state(data: &serde_json::Value) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// Normalize a state name to snake_case for case-insensitive comparison.
+/// Handles PascalCase ("WaitingApproval" → "waiting_approval"),
+/// snake_case passthrough ("waiting_approval" → "waiting_approval"),
+/// and plain lowercase ("running" → "running").
+fn normalize_state_name(name: &str) -> String {
+    let mut result = String::with_capacity(name.len() + 4);
+    for (i, ch) in name.chars().enumerate() {
+        if ch.is_uppercase() && i > 0 {
+            result.push('_');
+        }
+        result.push(ch.to_lowercase().next().unwrap());
+    }
+    result
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -334,7 +349,7 @@ pub fn run_accuracy(input_path: &Path) -> Result<bool, Box<dyn std::error::Error
             }
         };
 
-        pairs.push((predicted, label));
+        pairs.push((normalize_state_name(&predicted), normalize_state_name(&label)));
     }
 
     if pairs.is_empty() {
