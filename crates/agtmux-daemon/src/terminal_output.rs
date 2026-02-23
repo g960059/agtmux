@@ -2,8 +2,18 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use tokio::sync::{broadcast, Mutex};
+use tokio_util::sync::CancellationToken;
 
 use agtmux_tmux::pipe_pane::PaneTap;
+
+/// Validate that a pane_id matches the tmux format `%<digits>`.
+pub fn validate_pane_id(pane_id: &str) -> bool {
+    pane_id.len() >= 2
+        && pane_id.starts_with('%')
+        && pane_id[1..].bytes().all(|b| b.is_ascii_digit())
+}
+
+const MAX_PANE_DIMENSION: u16 = 500;
 
 // ---------------------------------------------------------------------------
 // Binary frame format
@@ -58,8 +68,8 @@ pub struct OutputBroadcaster {
 struct BroadcasterInner {
     /// Reference counts: pane_id -> number of subscribers.
     subscribers: HashMap<String, usize>,
-    /// Active read-loop abort handles.
-    tasks: HashMap<String, tokio::task::JoinHandle<()>>,
+    /// Active read-loop handles and their cancellation tokens.
+    tasks: HashMap<String, (tokio::task::JoinHandle<()>, CancellationToken)>,
 }
 
 impl OutputBroadcaster {
@@ -83,10 +93,12 @@ impl OutputBroadcaster {
         if *count == 1 {
             let tx = self.output_tx.clone();
             let pane_id_owned = pane_id.to_string();
+            let token = CancellationToken::new();
+            let token_clone = token.clone();
             let handle = tokio::spawn(async move {
-                run_pane_tap(&pane_id_owned, tx).await;
+                run_pane_tap(&pane_id_owned, tx, token_clone).await;
             });
-            inner.tasks.insert(pane_id.to_string(), handle);
+            inner.tasks.insert(pane_id.to_string(), (handle, token));
         }
     }
 
@@ -96,8 +108,9 @@ impl OutputBroadcaster {
             *count = count.saturating_sub(1);
             if *count == 0 {
                 inner.subscribers.remove(pane_id);
-                if let Some(handle) = inner.tasks.remove(pane_id) {
-                    handle.abort();
+                if let Some((handle, token)) = inner.tasks.remove(pane_id) {
+                    token.cancel();
+                    let _ = handle.await;
                 }
             }
         }
@@ -110,7 +123,7 @@ impl OutputBroadcaster {
     }
 }
 
-async fn run_pane_tap(pane_id: &str, tx: broadcast::Sender<PaneOutput>) {
+async fn run_pane_tap(pane_id: &str, tx: broadcast::Sender<PaneOutput>, token: CancellationToken) {
     let mut tap = PaneTap::new(pane_id);
     if let Err(e) = tap.start().await {
         tracing::error!(pane_id = %pane_id, error = %e, "failed to start PaneTap");
@@ -118,19 +131,26 @@ async fn run_pane_tap(pane_id: &str, tx: broadcast::Sender<PaneOutput>) {
     }
 
     loop {
-        match tap.read().await {
-            Ok(Some(data)) => {
-                let _ = tx.send(PaneOutput {
-                    pane_id: pane_id.to_string(),
-                    data,
-                });
-            }
-            Ok(None) => {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-            Err(e) => {
-                tracing::warn!(pane_id = %pane_id, error = %e, "PaneTap read error");
+        tokio::select! {
+            _ = token.cancelled() => {
                 break;
+            }
+            result = tap.read() => {
+                match result {
+                    Ok(Some(data)) => {
+                        let _ = tx.send(PaneOutput {
+                            pane_id: pane_id.to_string(),
+                            data,
+                        });
+                    }
+                    Ok(None) => {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                    Err(e) => {
+                        tracing::warn!(pane_id = %pane_id, error = %e, "PaneTap read error");
+                        break;
+                    }
+                }
             }
         }
     }
@@ -162,7 +182,14 @@ pub async fn send_keys(pane_id: &str, data: &str) -> Result<(), String> {
 }
 
 /// Resize a tmux pane via `tmux resize-pane -t <pane_id> -x <cols> -y <rows>`.
+///
+/// `cols` and `rows` must be in the range `1..=500`.
 pub async fn resize_pane(pane_id: &str, cols: u16, rows: u16) -> Result<(), String> {
+    if cols < 1 || cols > MAX_PANE_DIMENSION || rows < 1 || rows > MAX_PANE_DIMENSION {
+        return Err(format!(
+            "cols and rows must be in 1..={MAX_PANE_DIMENSION}, got cols={cols} rows={rows}",
+        ));
+    }
     let output = tokio::process::Command::new("tmux")
         .args([
             "resize-pane",
@@ -330,5 +357,82 @@ mod tests {
         assert_eq!(p.pane_id, "%1");
         assert_eq!(p.cols, 120);
         assert_eq!(p.rows, 40);
+    }
+
+    // ----- pane_id validation tests -----
+
+    #[test]
+    fn validate_pane_id_accepts_valid() {
+        assert!(validate_pane_id("%0"));
+        assert!(validate_pane_id("%1"));
+        assert!(validate_pane_id("%42"));
+        assert!(validate_pane_id("%12345"));
+    }
+
+    #[test]
+    fn validate_pane_id_rejects_empty() {
+        assert!(!validate_pane_id(""));
+    }
+
+    #[test]
+    fn validate_pane_id_rejects_bare_percent() {
+        assert!(!validate_pane_id("%"));
+    }
+
+    #[test]
+    fn validate_pane_id_rejects_no_percent() {
+        assert!(!validate_pane_id("1"));
+        assert!(!validate_pane_id("42"));
+    }
+
+    #[test]
+    fn validate_pane_id_rejects_session_specifier() {
+        assert!(!validate_pane_id("mysession:%1"));
+        assert!(!validate_pane_id("s:w.1"));
+    }
+
+    #[test]
+    fn validate_pane_id_rejects_shell_metacharacters() {
+        assert!(!validate_pane_id("%1; rm -rf /"));
+        assert!(!validate_pane_id("%1$(whoami)"));
+        assert!(!validate_pane_id("%1`id`"));
+    }
+
+    #[test]
+    fn validate_pane_id_rejects_letters_after_percent() {
+        assert!(!validate_pane_id("%abc"));
+        assert!(!validate_pane_id("%1a"));
+    }
+
+    // ----- resize bounds tests -----
+
+    #[tokio::test]
+    async fn resize_pane_rejects_zero_cols() {
+        let err = resize_pane("%1", 0, 24).await.unwrap_err();
+        assert!(err.contains("1..=500"));
+    }
+
+    #[tokio::test]
+    async fn resize_pane_rejects_zero_rows() {
+        let err = resize_pane("%1", 80, 0).await.unwrap_err();
+        assert!(err.contains("1..=500"));
+    }
+
+    #[tokio::test]
+    async fn resize_pane_rejects_oversized_cols() {
+        let err = resize_pane("%1", 501, 24).await.unwrap_err();
+        assert!(err.contains("1..=500"));
+    }
+
+    #[tokio::test]
+    async fn resize_pane_rejects_oversized_rows() {
+        let err = resize_pane("%1", 80, 501).await.unwrap_err();
+        assert!(err.contains("1..=500"));
+    }
+
+    #[tokio::test]
+    async fn resize_pane_rejects_u16_max() {
+        let err = resize_pane("%1", u16::MAX, u16::MAX).await.unwrap_err();
+        assert!(err.contains("1..=500"));
     }
 }

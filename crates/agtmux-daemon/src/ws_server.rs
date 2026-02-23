@@ -14,7 +14,7 @@ use crate::server::{
     JsonRpcRequest, JsonRpcResponse, SharedState, SubscribeParams,
 };
 use crate::terminal_output::{
-    encode_output_frame, resize_pane, send_keys, OutputBroadcaster,
+    encode_output_frame, resize_pane, send_keys, validate_pane_id, OutputBroadcaster,
 };
 
 // ---------------------------------------------------------------------------
@@ -324,20 +324,27 @@ async fn handle_ws_client(
                             .unwrap_or("")
                             .to_string();
 
-                        if pane_id.is_empty() {
+                        if !validate_pane_id(&pane_id) {
                             let resp = JsonRpcResponse {
                                 jsonrpc: "2.0".into(),
                                 id: req.id,
                                 result: None,
                                 error: Some(JsonRpcError {
                                     code: -32602,
-                                    message: "missing required param: pane_id".into(),
+                                    message: "invalid pane_id: must match %<digits>".into(),
                                 }),
+                            };
+                            ws_tx.send(Message::Text(serde_json::to_string(&resp)?)).await?;
+                        } else if !subscribed_panes.insert(pane_id.clone()) {
+                            let resp = JsonRpcResponse {
+                                jsonrpc: "2.0".into(),
+                                id: req.id,
+                                result: Some(serde_json::json!({ "subscribed": true, "pane_id": pane_id })),
+                                error: None,
                             };
                             ws_tx.send(Message::Text(serde_json::to_string(&resp)?)).await?;
                         } else {
                             broadcaster.subscribe_pane(&pane_id).await;
-                            subscribed_panes.insert(pane_id.clone());
                             tracing::debug!(pane_id = %pane_id, "ws client subscribed to output");
 
                             let resp = JsonRpcResponse {
@@ -356,14 +363,14 @@ async fn handle_ws_client(
                             .unwrap_or("")
                             .to_string();
 
-                        if pane_id.is_empty() {
+                        if !validate_pane_id(&pane_id) {
                             let resp = JsonRpcResponse {
                                 jsonrpc: "2.0".into(),
                                 id: req.id,
                                 result: None,
                                 error: Some(JsonRpcError {
                                     code: -32602,
-                                    message: "missing required param: pane_id".into(),
+                                    message: "invalid pane_id: must match %<digits>".into(),
                                 }),
                             };
                             ws_tx.send(Message::Text(serde_json::to_string(&resp)?)).await?;
@@ -390,14 +397,14 @@ async fn handle_ws_client(
                             .and_then(|v| v.as_str())
                             .unwrap_or("");
 
-                        if pane_id.is_empty() {
+                        if !validate_pane_id(pane_id) {
                             let resp = JsonRpcResponse {
                                 jsonrpc: "2.0".into(),
                                 id: req.id,
                                 result: None,
                                 error: Some(JsonRpcError {
                                     code: -32602,
-                                    message: "missing required param: pane_id".into(),
+                                    message: "invalid pane_id: must match %<digits>".into(),
                                 }),
                             };
                             ws_tx.send(Message::Text(serde_json::to_string(&resp)?)).await?;
@@ -439,14 +446,25 @@ async fn handle_ws_client(
                             .and_then(|v| v.as_u64())
                             .unwrap_or(0) as u16;
 
-                        if pane_id.is_empty() || cols == 0 || rows == 0 {
+                        if !validate_pane_id(pane_id) {
                             let resp = JsonRpcResponse {
                                 jsonrpc: "2.0".into(),
                                 id: req.id,
                                 result: None,
                                 error: Some(JsonRpcError {
                                     code: -32602,
-                                    message: "missing required params: pane_id, cols, rows".into(),
+                                    message: "invalid pane_id: must match %<digits>".into(),
+                                }),
+                            };
+                            ws_tx.send(Message::Text(serde_json::to_string(&resp)?)).await?;
+                        } else if cols == 0 || rows == 0 {
+                            let resp = JsonRpcResponse {
+                                jsonrpc: "2.0".into(),
+                                id: req.id,
+                                result: None,
+                                error: Some(JsonRpcError {
+                                    code: -32602,
+                                    message: "missing required params: cols, rows".into(),
                                 }),
                             };
                             ws_tx.send(Message::Text(serde_json::to_string(&resp)?)).await?;
@@ -1346,5 +1364,75 @@ mod tests {
         .await;
         assert_eq!(resp2["id"], 31);
         assert_eq!(resp2["error"]["code"], -32602);
+    }
+
+    // -----------------------------------------------------------------------
+    // Pane ID validation integration tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn subscribe_output_rejects_invalid_pane_id() {
+        let (notify_tx, _) = broadcast::channel(16);
+        let server = start_test_server(vec![], notify_tx, None).await;
+        let mut ws = server.connect().await;
+
+        for bad_id in &["", "1", "mysession:%1", "%1; rm -rf /", "%abc", "%"] {
+            let resp = send_rpc(
+                &mut ws,
+                100,
+                "subscribe_output",
+                serde_json::json!({"pane_id": bad_id}),
+            )
+            .await;
+            assert_eq!(resp["error"]["code"], -32602, "should reject pane_id={bad_id:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn write_input_rejects_invalid_pane_id() {
+        let (notify_tx, _) = broadcast::channel(16);
+        let server = start_test_server(vec![], notify_tx, None).await;
+        let mut ws = server.connect().await;
+
+        let resp = send_rpc(
+            &mut ws,
+            101,
+            "write_input",
+            serde_json::json!({"pane_id": "session:%1", "data": "ls\n"}),
+        )
+        .await;
+        assert_eq!(resp["error"]["code"], -32602);
+    }
+
+    #[tokio::test]
+    async fn resize_pane_rejects_invalid_pane_id() {
+        let (notify_tx, _) = broadcast::channel(16);
+        let server = start_test_server(vec![], notify_tx, None).await;
+        let mut ws = server.connect().await;
+
+        let resp = send_rpc(
+            &mut ws,
+            102,
+            "resize_pane",
+            serde_json::json!({"pane_id": "%1$(whoami)", "cols": 80, "rows": 24}),
+        )
+        .await;
+        assert_eq!(resp["error"]["code"], -32602);
+    }
+
+    #[tokio::test]
+    async fn unsubscribe_output_rejects_invalid_pane_id() {
+        let (notify_tx, _) = broadcast::channel(16);
+        let server = start_test_server(vec![], notify_tx, None).await;
+        let mut ws = server.connect().await;
+
+        let resp = send_rpc(
+            &mut ws,
+            103,
+            "unsubscribe_output",
+            serde_json::json!({"pane_id": "not-a-pane"}),
+        )
+        .await;
+        assert_eq!(resp["error"]["code"], -32602);
     }
 }

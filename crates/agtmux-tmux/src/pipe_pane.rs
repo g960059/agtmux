@@ -188,7 +188,10 @@ impl PaneTap {
 
     /// Run `tmux pipe-pane -t <pane> -O "exec cat > <fifo>"`.
     async fn attach_pipe_pane(&self) -> Result<(), PaneTapError> {
-        let cat_cmd = format!("exec cat > {}", self.fifo_path.display());
+        let cat_cmd = format!(
+            "exec cat > '{}'",
+            self.fifo_path.display().to_string().replace('\'', "'\\''"),
+        );
 
         let output = tokio::process::Command::new(&self.tmux_bin)
             .args(["pipe-pane", "-t", &self.pane_id, "-O", &cat_cmd])
