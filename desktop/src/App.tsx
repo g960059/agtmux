@@ -14,7 +14,7 @@ function App() {
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const unlistenRef = useRef<(() => void) | null>(null);
+  const unlistenRefs = useRef<(() => void)[]>([]);
 
   const fetchPanes = useCallback(async () => {
     setLoading(true);
@@ -47,40 +47,84 @@ function App() {
   useEffect(() => {
     let cancelled = false;
 
-    async function setupListener() {
+    async function setupListeners() {
       try {
-        const unlisten = await listen<PaneInfo>("pane-update", (event) => {
+        // Fix 1 (wire-format): Listen for pane-update-all which contains a
+        // full PaneInfo[] array fetched by the backend after state_changed.
+        const unlistenUpdateAll = await listen<PaneInfo[]>(
+          "pane-update-all",
+          (event) => {
+            if (cancelled) return;
+            setPanes(event.payload);
+            // Fix 5: Mark as connected when we receive pane data
+            setConnected(true);
+          },
+        );
+
+        // Fix 2: Listen for pane-added — trigger a full list_panes refetch
+        const unlistenAdded = await listen<{ pane_id: string }>(
+          "pane-added",
+          (_event) => {
+            if (cancelled) return;
+            // Refetch the full pane list to get the new pane's PaneInfo
+            invoke<PaneInfo[]>("list_panes", { socketPath: SOCKET_PATH })
+              .then((result) => {
+                setPanes(result);
+                setConnected(true);
+              })
+              .catch((err) => {
+                console.error("Failed to refetch panes after pane-added:", err);
+              });
+          },
+        );
+
+        // Fix 2: Listen for pane-removed — remove the pane from state
+        const unlistenRemoved = await listen<{ pane_id: string }>(
+          "pane-removed",
+          (event) => {
+            if (cancelled) return;
+            const removedId = event.payload.pane_id;
+            setPanes((prev) => prev.filter((p) => p.pane_id !== removedId));
+          },
+        );
+
+        // Fix 5: Listen for daemon-status events from the backend
+        const unlistenStatus = await listen<{
+          connected: boolean;
+          reconnecting?: boolean;
+        }>("daemon-status", (event) => {
           if (cancelled) return;
-          const updated = event.payload;
-          setPanes((prev) => {
-            const idx = prev.findIndex((p) => p.pane_id === updated.pane_id);
-            if (idx >= 0) {
-              const next = [...prev];
-              next[idx] = updated;
-              return next;
-            }
-            return [...prev, updated];
-          });
-          setConnected(true);
+          setConnected(event.payload.connected);
         });
+
         if (!cancelled) {
-          unlistenRef.current = unlisten;
+          unlistenRefs.current = [
+            unlistenUpdateAll,
+            unlistenAdded,
+            unlistenRemoved,
+            unlistenStatus,
+          ];
         } else {
-          unlisten();
+          // Already unmounted — clean up immediately
+          unlistenUpdateAll();
+          unlistenAdded();
+          unlistenRemoved();
+          unlistenStatus();
         }
       } catch {
         // listen may fail if Tauri runtime is not available (e.g. in browser dev)
       }
     }
 
-    setupListener();
+    setupListeners();
 
+    // Fix 2: Clean up all listeners on unmount
     return () => {
       cancelled = true;
-      if (unlistenRef.current) {
-        unlistenRef.current();
-        unlistenRef.current = null;
+      for (const unlisten of unlistenRefs.current) {
+        unlisten();
       }
+      unlistenRefs.current = [];
     };
   }, []);
 
