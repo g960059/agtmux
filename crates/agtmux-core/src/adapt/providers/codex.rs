@@ -126,6 +126,8 @@ impl EventNormalizer for CodexNormalizer {
                 state: ActivityState::WaitingApproval,
                 reason_code: "api:approval".into(),
                 confidence: 0.97,
+                weight: 0.98,
+                ttl: Duration::from_secs(180),
             });
         }
 
@@ -135,6 +137,8 @@ impl EventNormalizer for CodexNormalizer {
                 state: ActivityState::WaitingInput,
                 reason_code: "api:input".into(),
                 confidence: 0.96,
+                weight: 0.92,
+                ttl: Duration::from_secs(120),
             });
         }
 
@@ -144,6 +148,8 @@ impl EventNormalizer for CodexNormalizer {
                 state: ActivityState::Error,
                 reason_code: "api:error".into(),
                 confidence: 0.98,
+                weight: 1.0,
+                ttl: Duration::from_secs(180),
             });
         }
 
@@ -153,6 +159,8 @@ impl EventNormalizer for CodexNormalizer {
                 state: ActivityState::Running,
                 reason_code: "api:running".into(),
                 confidence: 0.94,
+                weight: 0.90,
+                ttl: Duration::from_secs(90),
             });
         }
 
@@ -162,6 +170,8 @@ impl EventNormalizer for CodexNormalizer {
                 state: ActivityState::Idle,
                 reason_code: "api:idle".into(),
                 confidence: 0.92,
+                weight: 0.85,
+                ttl: Duration::from_secs(90),
             });
         }
 

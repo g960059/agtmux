@@ -39,6 +39,8 @@ pub struct NormalizedState {
     pub state: crate::types::ActivityState,
     pub reason_code: String,
     pub confidence: f64,
+    pub weight: f64,
+    pub ttl: Duration,
 }
 
 impl NormalizedState {
@@ -53,10 +55,10 @@ impl NormalizedState {
             provider: self.provider,
             kind,
             signal: self.state,
-            weight: self.confidence,
+            weight: self.weight,
             confidence: self.confidence,
             timestamp: now,
-            ttl: Duration::from_secs(120),
+            ttl: self.ttl,
             source,
             reason_code: self.reason_code.clone(),
         }
@@ -100,6 +102,8 @@ mod tests {
             state: ActivityState::Running,
             reason_code: "hook:running".into(),
             confidence: 0.94,
+            weight: 0.90,
+            ttl: Duration::from_secs(90),
         };
         let ev = ns.to_evidence(SourceType::Hook, Utc::now());
         assert_eq!(ev.provider, Provider::Claude);
@@ -107,8 +111,8 @@ mod tests {
         assert_eq!(ev.source, SourceType::Hook);
         assert!(matches!(ev.kind, EvidenceKind::HookEvent(_)));
         assert!((ev.confidence - 0.94).abs() < f64::EPSILON);
-        assert!((ev.weight - 0.94).abs() < f64::EPSILON);
-        assert_eq!(ev.ttl, Duration::from_secs(120));
+        assert!((ev.weight - 0.90).abs() < f64::EPSILON);
+        assert_eq!(ev.ttl, Duration::from_secs(90));
     }
 
     #[test]
@@ -118,6 +122,8 @@ mod tests {
             state: ActivityState::WaitingApproval,
             reason_code: "api:approval".into(),
             confidence: 0.97,
+            weight: 0.98,
+            ttl: Duration::from_secs(180),
         };
         let ev = ns.to_evidence(SourceType::Api, Utc::now());
         assert_eq!(ev.source, SourceType::Api);
@@ -131,6 +137,8 @@ mod tests {
             state: ActivityState::Idle,
             reason_code: "file:idle".into(),
             confidence: 0.90,
+            weight: 0.85,
+            ttl: Duration::from_secs(90),
         };
         let ev = ns.to_evidence(SourceType::File, Utc::now());
         assert_eq!(ev.source, SourceType::File);

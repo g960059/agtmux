@@ -208,12 +208,13 @@ impl Orchestrator {
                 source,
                 payload,
                 timestamp,
+                provider,
             } => {
                 debug!(pane_id = %pane_id, event_type = %event_type, "raw signal received");
                 if let Some(state) = self.pane_states.get_mut(&pane_id) {
                     state.last_event_type = event_type.clone();
                 }
-                self.normalize_raw_signal(&pane_id, &event_type, source, &payload, timestamp);
+                self.normalize_raw_signal(&pane_id, &event_type, source, &payload, timestamp, provider);
             }
             SourceEvent::TopologyChange(topo) => {
                 self.handle_topology(topo);
@@ -234,7 +235,7 @@ impl Orchestrator {
         }
     }
 
-    /// Pass a raw signal through all registered normalizers.
+    /// Pass a raw signal through normalizers matching the signal's provider.
     /// Each normalizer that produces a NormalizedState generates Evidence that is
     /// ingested and triggers re-evaluation.
     fn normalize_raw_signal(
@@ -244,6 +245,7 @@ impl Orchestrator {
         source: SourceType,
         payload: &str,
         timestamp: DateTime<Utc>,
+        provider: Provider,
     ) {
         let signal = RawSignal {
             event_type: event_type.to_string(),
@@ -253,6 +255,9 @@ impl Orchestrator {
 
         let mut evidence = Vec::new();
         for normalizer in &self.normalizers {
+            if normalizer.provider() != provider {
+                continue;
+            }
             if let Some(normalized) = normalizer.normalize(&signal) {
                 debug!(
                     pane_id = %pane_id,
@@ -872,6 +877,7 @@ mod tests {
             source: SourceType::Hook,
             payload: "{}".into(),
             timestamp: Utc::now(),
+            provider: Provider::Claude,
         });
 
         let state = orch.get_pane_state("%1").unwrap();
@@ -1636,6 +1642,8 @@ mod tests {
                     state: self.output_state,
                     reason_code: format!("mock:{}", self.match_event),
                     confidence: self.output_confidence,
+                    weight: 0.90,
+                    ttl: Duration::from_secs(90),
                 })
             } else {
                 None
@@ -1676,6 +1684,7 @@ mod tests {
             source: SourceType::Hook,
             payload: "{}".into(),
             timestamp: Utc::now(),
+            provider: Provider::Claude,
         });
 
         let state = orch.get_pane_state("%1").expect("pane state should exist after normalization");
@@ -1701,6 +1710,7 @@ mod tests {
             source: SourceType::Hook,
             payload: "{}".into(),
             timestamp: Utc::now(),
+            provider: Provider::Claude,
         });
 
         assert!(
@@ -1714,7 +1724,7 @@ mod tests {
     }
 
     #[test]
-    fn multiple_normalizers_all_produce_evidence() {
+    fn multiple_normalizers_only_matching_provider_produces_evidence() {
         let normalizers: Vec<Box<dyn EventNormalizer>> = vec![
             Box::new(MockNormalizer {
                 provider: Provider::Claude,
@@ -1737,12 +1747,12 @@ mod tests {
             source: SourceType::Hook,
             payload: "{}".into(),
             timestamp: Utc::now(),
+            provider: Provider::Claude,
         });
 
         let window = orch.evidence_windows.get("%1").expect("evidence window should exist");
-        assert_eq!(window.len(), 2, "both normalizers should produce evidence");
-        assert!(window.iter().any(|e| e.provider == Provider::Claude));
-        assert!(window.iter().any(|e| e.provider == Provider::Codex));
+        assert_eq!(window.len(), 1, "only the matching provider normalizer should produce evidence");
+        assert_eq!(window[0].provider, Provider::Claude);
     }
 
     #[test]
@@ -1763,6 +1773,7 @@ mod tests {
             source: SourceType::Hook,
             payload: "{}".into(),
             timestamp: Utc::now(),
+            provider: Provider::Claude,
         });
 
         let window = orch.evidence_windows.get("%1").unwrap();
@@ -1792,6 +1803,7 @@ mod tests {
             source: SourceType::Api,
             payload: "{}".into(),
             timestamp: Utc::now(),
+            provider: Provider::Codex,
         });
 
         let window = orch.evidence_windows.get("%1").unwrap();
@@ -1819,6 +1831,7 @@ mod tests {
             source: SourceType::Hook,
             payload: "{}".into(),
             timestamp: Utc::now(),
+            provider: Provider::Claude,
         });
         assert_eq!(orch.evidence_windows["%1"].len(), 1);
         assert_eq!(orch.evidence_windows["%1"][0].signal, ActivityState::Running);
@@ -1833,6 +1846,7 @@ mod tests {
             source: SourceType::Hook,
             payload: "{}".into(),
             timestamp: Utc::now(),
+            provider: Provider::Claude,
         });
         assert_eq!(
             orch.evidence_windows["%1"].len(),
@@ -1859,6 +1873,7 @@ mod tests {
             source: SourceType::Hook,
             payload: "{}".into(),
             timestamp: Utc::now(),
+            provider: Provider::Claude,
         });
 
         let notif = rx.try_recv().expect("should broadcast state change from normalizer");
@@ -1901,6 +1916,7 @@ mod tests {
             source: SourceType::Hook,
             payload: "{}".into(),
             timestamp: Utc::now(),
+            provider: Provider::Claude,
         });
 
         let state = orch.get_pane_state("%1").unwrap();
@@ -1928,6 +1944,7 @@ mod tests {
             source: SourceType::Hook,
             payload: "{}".into(),
             timestamp: Utc::now(),
+            provider: Provider::Claude,
         })
         .await
         .unwrap();
@@ -1973,6 +1990,7 @@ mod tests {
             source: SourceType::Hook,
             payload: "{}".into(),
             timestamp: Utc::now(),
+            provider: Provider::Claude,
         });
 
         let window = orch.evidence_windows.get("%1").unwrap();

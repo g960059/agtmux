@@ -1,4 +1,4 @@
-use crate::types::{Evidence, PaneMeta, SourceType};
+use crate::types::{Evidence, PaneMeta, Provider, SourceType};
 use chrono::{DateTime, Utc};
 
 /// Marker trait for state sources.
@@ -17,6 +17,7 @@ pub enum SourceEvent {
         source: SourceType,
         payload: String,
         timestamp: DateTime<Utc>,
+        provider: Provider,
     },
     /// Pre-built evidence (from pollers that do their own matching).
     /// Optionally carries the `PaneMeta` snapshot that was used to produce
