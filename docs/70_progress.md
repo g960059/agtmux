@@ -247,3 +247,154 @@
 - Next action:
   - 10x gate を nightly/手動 gate へ昇格し、失敗時は対応する iteration log を Review Pack に添付する
 - Waiting on user? no
+
+---
+
+## 2026-02-25
+### Current objective
+- レビュー指摘3点（cursor契約 / binding state machine / 遅延予算）を docs 正本へ反映し、実装判断をなくす。
+
+### What changed (and why)
+- `20_spec.md` に FR-018〜FR-023 を追加し、ackベース cursor進行、safe rewind、pane-first identity、session representative pane、p95 2.0/5.0 を固定した。
+- `30_architecture.md` に Flow-006/007 と storage/metrics 拡張を追加し、cursor replay safety と pane再利用対策をアーキ視点で明文化した。
+- `40_design.md` に API契約（`heartbeat_ts`, `gateway.ack_delivery`, `invalid_cursor`）、data model（`pane_instance`/`binding_link`/`cursor_state`）、FSM、latency budget、テスト観点を追加した。
+- `50_plan.md` と `60_tasks.md` を同期更新し、実装タスクを T-041/T-042/T-043 として分解した。
+- `80_decisions/ADR-20260225-cursor-binding-latency.md` を新規追加し、代替案と採否理由を記録した。
+- `90_index.md` を更新し、cursor/binding/latency の参照導線を追加した。
+
+### Evidence / Gates
+- User decision:
+  - 2026-02-25 ユーザー要求（「docsを更新してください。これが正です。」「codingはしないでください。」）
+- Tests:
+  - 未実行（本作業は docs 更新のみ）
+
+### Next
+- Next action:
+  - T-040/T-041/T-042/T-043 を実装順で着手（gateway cursor -> binding FSM -> latency metrics）
+- Waiting on user? no
+
+---
+
+## 2026-02-25
+### Current objective
+- v4 と go-codex POC の実装実態を踏まえて、managed/unmanaged 判定を `pane signature v1` として docs 正本へ固定する。
+
+### What changed (and why)
+- v4（Rust）と exp/go-codex-implementation-poc（Go）を調査し、判定が env 固定ではなく `event/cmd/process/capture` 複合であることを確認した。
+- `20_spec.md` に Pane Signature Model を追加し、FR-024〜FR-031（signature class/reason、重み、title-only guard、8s/45s/idle安定窓、no-agent連続2回）を固定した。
+- `30_architecture.md` に pane signature classifier component と Flow-008（hysteresis guard）を追加した。
+- `40_design.md` に signature contract/API fields、classifier アルゴリズム、error taxonomy、signature関連テスト観点を追加した。
+- `50_plan.md` / `60_tasks.md` を同期し、T-044/T-045/T-046 を追加した。
+- `80_decisions/ADR-20260225-pane-signature-v1.md` を新規追加し、代替案と採否理由を記録した。
+- `90_index.md` に pane signature v1 の参照導線を追加した。
+
+### Evidence / Gates
+- User decision:
+  - 2026-02-25 ユーザー要求（「それを踏まえたうえで、おすすめ」「その形でdocs更新」）
+- Context evidence:
+  - `/Users/virtualmachine/ghq/github.com/g960059/agtmux=v4`
+  - `/Users/virtualmachine/ghq/github.com/g960059/agtmux/.worktrees/exp/go-codex-implementation-poc`
+- Tests:
+  - 未実行（本作業は docs 更新のみ）
+
+### Next
+- Next action:
+  - T-044（signature classifier）-> T-045（hysteresis/no-agent）-> T-046（API露出）の順で実装着手
+- Waiting on user? no
+
+---
+
+## 2026-02-25
+### Current objective
+- `docs/v3` を撤去し、v5 blueprint docs のみを正本構成として維持する。
+
+### What changed (and why)
+- `docs/v3/*` を削除した。
+- `90_index.md` の `v3/` 参照を削除し、現行ディレクトリ導線を v5 前提に揃えた。
+- `70_progress.md` 既存履歴中の `docs/v3/*` 記述は過去時点の証跡として保持した（append-only ルール準拠）。
+
+### Evidence / Gates
+- User decision:
+  - 2026-02-25 ユーザー要求（「docs下のv3は削除してよい」）
+- Tests:
+  - 未実行（本作業は docs 整理のみ）
+
+### Next
+- Next action:
+  - v5 実装タスク（T-040 以降）を継続
+- Waiting on user? no
+
+---
+
+## 2026-02-25
+### Current objective
+- review 指摘（poller gate / invalid_cursor / tombstone lifecycle / UDS trust / SLO運用 / backup-restore）を docs 正本へ固定する。
+
+### What changed (and why)
+- `20_spec.md` に FR-032〜FR-038 を追加し、poller受入基準、cursor数値契約、UDS trust admission、rolling SLO判定、snapshot/restore 契約を固定した。
+- `30_architecture.md` に Flow-009/010 と `ops guardrail manager` を追加し、trust admission と運用復旧導線をアーキ構成へ反映した。
+- `40_design.md` に `source.hello` 前提、UDS trust contract、checkpoint/rewind/streak、tombstone終端、SLO 3連続 breach 判定、Backup/Restore 設計、追加テスト観点を反映した。
+- `50_plan.md` と `60_tasks.md` を同期更新し、T-047/T-048/T-049/T-051/T-071 を追加、T-033/T-041/T-042/T-043 を数値契約ベースに更新した。
+- `90_index.md` を更新し、新契約への導線を追加した。
+- `80_decisions/ADR-20260225-operational-guards.md` を追加し、運用ガードレールの採否理由を明文化した。
+
+### Evidence / Gates
+- User decision:
+  - 2026-02-25 ユーザー要求（「では、docsを更新してください。」）
+- Tests:
+  - 未実行（本作業は docs 更新のみ）
+
+### Next
+- Next action:
+  - T-033（poller gate fixture固定）-> T-047（UDS trust）-> T-041（cursor recovery）の順で実装着手
+- Waiting on user? no
+
+---
+
+## 2026-02-25
+### Current objective
+- review 指摘（supervisor契約 / ack再送契約 / source registry lifecycle / ops guardrail実体 / Binding FSM並行制御）を docs 正本へ固定する。
+
+### What changed (and why)
+- `20_spec.md` に FR-039〜FR-047 を追加し、supervisor readiness+backoff+hold-down、delivery/ack 冪等契約、registry lifecycle、binding CAS、ops alert を固定した。
+- `30_architecture.md` に Flow-011〜014 を追加し、起動再起動契約・ack redelivery・registry遷移・binding直列化をアーキフローへ反映した。
+- `40_design.md` に `source.hello` contract、ack state machine、registry lifecycle、ops guardrail manager、binding concurrency control（single-writer + CAS）を具体化した。
+- `50_plan.md` と `60_tasks.md` を同期し、T-052（supervisor contract）/T-053（binding concurrency）を追加、既存タスクの gate を retry/idempotency/lifecycle 前提へ更新した。
+- `90_index.md` を更新し、新契約への参照導線を追加した。
+
+### Evidence / Gates
+- User decision:
+  - 2026-02-25 ユーザー要求（「では、docsを改善してください。」）
+- Tests:
+  - 未実行（本作業は docs 更新のみ）
+
+### Next
+- Next action:
+  - T-041（ack/retry/idempotency）-> T-048（registry lifecycle）-> T-052（supervisor contract）の順で実装着手
+- Waiting on user? no
+
+---
+
+## 2026-02-25
+### Current objective
+- 実行方針を A（仕様駆動フル固定）から B（核心仕様 + 実装フィードバック）へ切り替え、実装開始可能な docs へ再編する。
+
+### What changed (and why)
+- `00_router.md` に `Execution Mode B` を追加し、Phase 1-2 は `[MVP]` 要件のみを実装ブロッカーに固定した。
+- `20_spec.md` の FR-001〜FR-047 を `[MVP]` / `[Post-MVP]` にタグ分離した。
+- `40_design.md` を `Main (MVP Slice)` と `Appendix (Post-MVP Hardening)` に再構成し、実装時に読む範囲を明確化した。
+- `50_plan.md` を再編し、Phase 1-2=実装本線、Phase 3+=hardening backlog へ整理した。
+- `60_tasks.md` を `MVP Track` / `Post-MVP Backlog` に分離し、全TODOへ `blocked_by` を追加して依存関係を明示した。
+- `90_index.md` を `Start Here (MVP)` / `Hardening Later` 導線へ更新した。
+- `80_decisions/ADR-20260225-core-first-mode-b.md` を追加し、方針転換の理由とガードレールを固定した。
+
+### Evidence / Gates
+- User decision:
+  - 2026-02-25 ユーザー要求（「Bの方向性で書き換えてください」）
+- Tests:
+  - 未実行（本作業は docs 更新のみ）
+
+### Next
+- Next action:
+  - `MVP Track` の依存順に T-010 -> T-020 -> T-030/T-031/T-032 -> T-040 -> T-050 で実装着手
+- Waiting on user? no

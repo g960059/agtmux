@@ -1,94 +1,82 @@
 # Plan (mutable; keep it operational)
 
+## Execution Policy (Mode B)
+- Phase 1-2 は `[MVP]` 要件だけを実装ブロッカーとする。
+- `[Post-MVP]` 要件は Phase 3+ の hardening backlog として維持する。
+- 実装中に `[Post-MVP]` が必要と判明した場合のみ、タスクを昇格して着手する。
+
 ## Phase 0: Setup / Spec Freeze
 - Deliverables:
   - `00/10/20/30/40/50/60/70/80/85/90` の整備
-  - v5 契約（tier/freshness/API）固定
+  - FR の `[MVP]` / `[Post-MVP]` タグ付け
+  - `Main (MVP Slice)` / `Appendix (Post-MVP)` の設計分離
   - root `justfile`（`fmt` / `lint` / `test` / `verify` / `preflight-online` / `test-source-*`）整備
 - Exit criteria:
-  - architecture-level の未決が `20_spec.md` の Open Questions のみに限定される
-  - local-first の日次検証が `just verify` で完結し、commit/PR 前提でない
+  - Phase 1-2 実装に必要な仕様が `MVP` スライスだけで完結
+  - Post-MVP が非ブロッカーであることを tasks/plan に明記
 
 ## Phase 1: Core MVP (types + resolver)
 - Deliverables:
   - `agtmux-core-v5`（EvidenceTier, PanePresence, EvidenceMode, SourceEventV2）
-  - tier winner resolver 実装
-  - v4 再利用ロジックの抽出（poller core / source-health transition / title resolver）
+  - tier winner resolver
+  - pane signature classifier v1
+  - v4 再利用ロジック抽出（poller core / source-health / title resolver）
   - fresh/stale/down/re-promotion unit tests
 - Exit criteria:
   - deterministic priority と fallback/re-promotion が unit/replay で PASS
-  - 再利用ロジックが独立モジュールとして結合テストを持つ
-  - Related stories: US-001, US-002
+  - signature classifier（weights/guard/hysteresis）が PASS
+  - related stories: US-001, US-002
 
-## Phase 2: Source Servers + Gateway
+## Phase 2: MVP Runtime Path (sources + gateway + daemon)
 - Deliverables:
   - `agtmux-source-codex-appserver`
   - `agtmux-source-claude-hooks`
-  - `agtmux-source-poller`（v4 logic 再利用）
-  - `agtmux-gateway` cursor/pull aggregation
+  - `agtmux-source-poller`
+  - gateway basic pull aggregation（single committed cursor）
+  - daemon projection + client API (`list_panes/list_sessions/state_changed/summary_changed`)
+  - pane-first binding basic flow + handshake title priority
 - Exit criteria:
   - provider priority/suppress/fallback integration tests PASS
-  - codex/claude の online/e2e source tests は `just preflight-online` 実行後のみ実施される
-  - source health API で各source状態を取得可能
-  - Related stories: US-001, US-002, US-004
+  - codex/claude online tests は `just preflight-online` 後に PASS
+  - poller fallback quality gate (`weighted F1>=0.85`, `waiting recall>=0.85`) PASS
+  - related stories: US-001, US-002, US-003, US-004
 
-## Phase 3: Daemon v5 + Client API
-- Deliverables:
-  - gateway pull loop
-  - read model projection + storage v2
-  - `list_panes/list_sessions/state_changed/summary_changed`
-  - handshake-aware title resolution（session tile canonical title priority）
-- Exit criteria:
-  - 状態変化が CLI/TUI で観測できる
-  - `managed/unmanaged` は agent session 有無で判定され、`agents` 表示ルールが反映される
-  - deterministic/heuristic 切替は evidence mode として表示・配信される
-  - handshake 完了 pane で agent session name が優先表示される
-  - Related stories: US-003
+## Phase 3: Hardening Wave 1 (only if needed)
+- Scope (default deferred):
+  - cursor two-watermark + ack idempotency + retry
+  - invalid_cursor numeric recovery
+  - binding concurrency hardening（single-writer/CAS）
+  - latency rolling-window evaluator
+- Promotion rule:
+  - 実装/運用で再現した課題に紐づくものだけ着手
 
-## Reuse Policy
-- Reuse first:
-  - v4 poller logic
-  - v4 title resolution logic
-  - v4 source health transition logic
-- Re-architecture required:
-  - v4 orchestrator composition
-  - v4 persistence layout
-
-## Phase 4: Supervisor + UX integration
-- Deliverables:
-  - runtime supervisor（起動順/再起動/終了）
-  - TUI/GUI 起動パス統一
-  - unmanaged badge 表示最終調整
-- Exit criteria:
-  - source crash を含む運用シナリオで UX 継続
-  - restart/backoff/shutdown が検証済み
-  - Related stories: US-003, US-005
+## Phase 4: Hardening Wave 2 (ops/security)
+- Scope (default deferred):
+  - UDS trust boundary（peer credential, nonce）
+  - source registry lifecycle（pending/active/stale/revoked）
+  - supervisor strict readiness/backoff/hold-down
+  - ops guardrail manager + `list_alerts`
 
 ## Phase 5: Migration / Cutover
 - Deliverables:
   - v4/v5 side-by-side runbook
   - canary plan + rollback plan
   - operator checklist
-- Exit criteria:
-  - canary環境で gate 充足
-  - rollback dry-run 成功
-  - Related stories: US-005
+- Optional hardening:
+  - backup/restore runbook（snapshot/restore）
 
 ## Risks / Mitigations
-- source protocol churn
-  - Mitigation: SourceEvent schema versioning + contract tests
-- process count 増加による運用複雑化
-  - Mitigation: supervisor 一元管理 + health visibility
-- fallback quality の過大評価
-  - Mitigation: fallback専用 accuracy gate を固定し、live labeling で定期測定
+- Risk: docs 先行で実装が遅れる
+  - Mitigation: `[MVP]` のみで Phase 1-2 を完了させる
+- Risk: hardening 未実装で運用課題が残る
+  - Mitigation: 課題が再現した時点で Post-MVP タスクを昇格する
 
 ## Rollout
-1. Internal alpha: v4 と v5 を並走し、同一セッションを比較
-2. Canary: 限定ユーザーで v5 supervisor を既定化
-3. Gradual default: 新規セッションを v5 側へ段階移行
-4. Full cutover: v5 を既定化、v4 は rollback path として維持
+1. Internal alpha: v4 と v5 を並走し比較
+2. Canary: 限定ユーザーで v5 を既定化
+3. Gradual default: 新規セッションを段階移行
+4. Full cutover: v5 既定化、v4 は rollback path として維持
 
 ## Rollback
 - runtime selector で v4 daemon path に即時戻せること
-- storage migration は additive に限定し downgrade 可能にする
-- rollback 手順は canary 前に dry-run して証跡を残す
+- migration は additive 優先で downgrade 可能にする

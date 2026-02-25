@@ -1,8 +1,15 @@
 # Design (mutable; changes common)
 
-## Interfaces / APIs
+## How to read this doc
+- `Main (MVP Slice)` is the implementation blocker for Phase 1-2.
+- `Appendix (Post-MVP Hardening)` is intentionally non-blocking during Phase 1-2.
+- If implementation hits an Appendix dependency, promote it via `docs/60_tasks.md` and `docs/70_progress.md`.
 
-### 1) Source Server -> Gateway
+## Main (MVP Slice)
+
+### 1) Interfaces / APIs (MVP)
+
+#### Source Server -> Gateway
 - Transport: UDS JSON-RPC (newline-delimited JSON)
 - Method: `source.pull_events`
 - Request:
@@ -16,17 +23,24 @@
   "result":{
     "events":["SourceEventV2"],
     "next_cursor":"opaque-2",
+    "heartbeat_ts":"2026-02-25T10:30:00Z",
     "source_health":{"status":"healthy|degraded|down","checked_at":"2026-..."}
   }
 }
 ```
 
-### 2) Gateway -> Daemon
+#### Gateway -> Daemon
 - Transport: UDS JSON-RPC
 - Method: `gateway.pull_events`
+- Response (MVP minimal):
+  - `events`
+  - `next_cursor`
+- Cursor policy (MVP):
+  - single watermark (`committed_cursor`) only
+  - daemon projection/persist 成功後に cursor を前進
 - Poll interval (default): daemon 250ms / gateway 200ms
 
-### 3) Daemon -> Clients
+#### Daemon -> Clients
 - Pull:
   - `list_panes`
   - `list_sessions`
@@ -34,32 +48,31 @@
 - Push:
   - `state_changed`
   - `summary_changed`
+- Required payload fields (`list_panes` / `state_changed`):
+  - `signature_class`: `deterministic | heuristic | none`
+  - `signature_reason`
+  - `signature_confidence`
+  - `signature_inputs` (`provider_hint`, `cmd_match`, `poller_match`, `title_match`)
 
-### 4) Compatibility hook (transition aid)
-- Method: `ingest_source_event`
-- Purpose: bridge/runtime wiring の段階移行時のみ使用（最終的には gateway pull へ統合）
+#### Deterministic sources (MVP fixed)
+- Codex: `agtmux-source-codex-appserver`
+- Claude: `agtmux-source-claude-hooks`
 
-### 5) MVP deterministic sources (fixed)
-- Codex: `agtmux-source-codex-appserver`（appserver events）
-- Claude: `agtmux-source-claude-hooks`（hooks events）
-- Note: Codex hooks など将来 capability は source server を増やして統合する。
-
-### 6) Reuse strategy (from v4)
+#### Reuse strategy (from v4)
 - Reuse as crate/module:
   - poller pattern matching core
   - source health state transition logic
   - title resolution logic (canonical session index + binding history)
 - Do not reuse as-is:
-  - v4 orchestrator monolith (責務分離の観点で再構成する)
-  - v4 store schema (v5 `*_v2` に合わせて再設計する)
+  - v4 orchestrator monolith
+  - v4 store schema
 
-## Data Model
-
-### Canonical entities
+### 2) Data Model (MVP)
 ```rust
 pub enum EvidenceTier { Deterministic, Heuristic }
-pub enum PanePresence { Managed, Unmanaged } // agent session 有無
-pub enum EvidenceMode { Deterministic, Heuristic, None } // 判定経路
+pub enum PanePresence { Managed, Unmanaged }
+pub enum EvidenceMode { Deterministic, Heuristic, None }
+pub enum PaneSignatureClass { Deterministic, Heuristic, None }
 
 pub struct SourceEventV2 {
     pub event_id: String,
@@ -69,9 +82,18 @@ pub struct SourceEventV2 {
     pub observed_at: DateTime<Utc>,
     pub session_key: String,
     pub pane_id: Option<String>,
+    pub pane_generation: Option<u64>,
+    pub pane_birth_ts: Option<DateTime<Utc>>,
+    pub source_event_id: Option<String>,
     pub event_type: String,
     pub payload: serde_json::Value,
     pub confidence: f64,
+}
+
+pub struct PaneInstanceId {
+    pub pane_id: String,
+    pub generation: u64,
+    pub birth_ts: DateTime<Utc>,
 }
 
 pub struct SessionRuntimeState {
@@ -82,99 +104,197 @@ pub struct SessionRuntimeState {
     pub winner_tier: EvidenceTier,
     pub activity_state: ActivityState,
     pub activity_source: SourceKind,
+    pub representative_pane_instance_id: Option<PaneInstanceId>,
     pub updated_at: DateTime<Utc>,
 }
-```
 
-### Source health
-```rust
-pub enum SourceHealthState { Healthy, Degraded, Down }
-pub struct SourceHealthRecord {
+pub struct PaneRuntimeState {
+    pub pane_instance_id: PaneInstanceId,
+    pub presence: PanePresence,
+    pub evidence_mode: EvidenceMode,
+    pub signature_class: PaneSignatureClass,
+    pub signature_reason: String,
+    pub signature_confidence: f64,
+    pub no_agent_streak: u32,
+    pub updated_at: DateTime<Utc>,
+}
+
+pub struct SourceCursorState {
     pub source_kind: SourceKind,
-    pub state: SourceHealthState,
-    pub checked_at: DateTime<Utc>,
-    pub reason: String,
+    pub committed_cursor: Option<String>,
+    pub checkpoint_ts: DateTime<Utc>,
 }
 ```
 
-### Persistence schema (v2)
-- `events_raw_v2`:
+#### Persistence schema (MVP)
+- `events_raw_v2`
   - key: `(provider, source_kind, event_id)`
-  - fields: payload, observed_at, tier
-- `session_state_v2`:
+- `session_state_v2`
   - key: `session_key`
-  - fields: presence, evidence_mode, winner_tier, activity_state, updated_at
-- `pane_state_v2`:
-  - key: `pane_id`
-  - fields: presence, evidence_mode, activity_source, attention_state, attention_reason, updated_at
-- `source_health_v2`:
+- `pane_state_v2`
+  - key: `pane_instance_id` (`pane_id,generation,birth_ts`)
+- `binding_link_v2`
+  - key: `(pane_instance_id, bound_at)`
+- `cursor_state_v2`
   - key: `source_kind`
-  - fields: state, checked_at, reason
+- `source_health_v2`
+  - key: `source_kind`
 
-## Resolver and Arbitration
+### 3) Resolver and Arbitration (MVP)
+- Dedup key: `provider + session_key + event_id`
 - Deterministic freshness:
-  - fresh: `now - deterministic_last_seen <= 3s`
+  - fresh: `<= 3s`
   - stale: `> 3s`
   - down: `> 15s` or health down
 - Winner selection:
-  1. dedup (`provider + session_key + event_id`)
+  1. dedup
   2. split deterministic/heuristic
-  3. deterministic fresh があれば deterministic tier 内で解決
-  4. それ以外は heuristic tier 内で解決
+  3. deterministic fresh があれば deterministic tier を採用
+  4. それ以外は heuristic tier を採用
   5. fresh deterministic 再到達で即時 re-promotion
+- Source rank policy (MVP):
+  - Codex: `appserver > poller`
+  - Claude: `hooks > poller`
 - Presence rule:
-  - deterministic/heuristic の切り替えは `presence` を変更しない。
-  - `presence=managed` は agent session がある限り維持する。
-- Intra-tier tie break:
-  - score（weight * confidence + source bonus/penalty）
-  - 同点は新しい `observed_at`、次に source rank
+  - deterministic/heuristic 切替は `presence` を変更しない
+  - `presence=managed` は agent session がある限り維持
 
-## Pane/Session Title Resolution
+### 4) Pane Signature Classifier (v1, MVP)
+- Output:
+  - `signature_class`, `signature_reason`, `signature_confidence`
+- Deterministic rule:
+  - required fields (`provider, source_kind, pane_instance_id, session_key, source_event_id, event_time`) が揃えば `deterministic`
+  - 欠ける event は `signature_inconclusive`
+- Heuristic scoring:
+  - process/provider hint: `1.00`
+  - current_cmd token: `0.86`
+  - poller capture signal: `0.78`
+  - pane_title token: `0.66`
+- Guardrails:
+  - title-only は managed 昇格根拠にしない
+  - wrapper (`node|bun|deno`) + no provider hint + title-only は reject
+- Hysteresis:
+  - idle確定: `max(4s, 2 * poll_interval)`
+  - running昇格: running hint + `last_interaction <= 8s`
+  - running降格: hint消失 + `last_interaction > 45s`
+  - `no-agent` 連続2回で `none`
+
+### 5) Binding State Machine (MVP)
+- Entity:
+  - key: `pane_instance_id` (`pane_id,generation,birth_ts`)
+  - `session_key` は link target
+- States:
+  - `Unmanaged`
+  - `ManagedHeuristic`
+  - `ManagedDeterministicFresh`
+  - `ManagedDeterministicStale`
+- Key transitions:
+  - heuristic signature: `Unmanaged -> ManagedHeuristic`
+  - deterministic handshake: `ManagedHeuristic -> ManagedDeterministicFresh`
+  - freshness超過: `ManagedDeterministicFresh -> ManagedDeterministicStale`
+  - deterministic復帰: `ManagedDeterministicStale -> ManagedDeterministicFresh`
+  - heuristic no-agent x2: `ManagedHeuristic -> Unmanaged`
+- Pane reuse guard:
+  - 同一 `pane_id` 再利用時に `generation` をインクリメント
+  - grace window (`120s`) 中は tombstone を保持し誤結合を防ぐ
+
+### 6) Pane/Session Title Resolution (MVP)
 - Handshake completion:
-  - deterministic source event で `session_key` と `pane_id` の関連が確立し、最新関連が有効であること
-- Title priority (highest first):
-  1. canonical agent session name（handshake 完了時）
-  2. bound title history（同一 pane binding 継続時）
-  3. live pane title（generic/placeholder は除外）
-  4. canonical path-based title
-  5. deterministic fallback title
-- UI rule:
-  - handshake 完了 pane は session tile で canonical agent session name を優先表示する
+  - deterministic event で `session_key` と `pane_instance_id` の関連が確立し、最新関連が有効
+- Representative pane (session tile):
+  1. 最新 deterministic handshake 時刻
+  2. 同点は latest activity
+  3. 同点は `pane_id` lexical order
+- Title priority:
+  1. canonical agent session name
+  2. bound title history
+  3. live pane title
+  4. path-based title
+  5. fallback title
 
-## Error Handling
-- Error taxonomy:
+### 7) Error Handling (MVP)
+- Minimal taxonomy:
   - `invalid_source_event`
   - `missing_event_time`
-  - `source_unsupported_for_provider`
   - `source_inadmissible`
   - `source_rank_suppressed`
-  - `normalizer_recoverable_error`
   - `late_event`
-- User-visible messages:
-  - API は JSON-RPC error code + reason string を返す
-  - UI は「監視継続可否」に絞って表示（詳細は logs/diagnostics）
+  - `binding_conflict`
+  - `signature_inconclusive`
+  - `signature_guard_rejected`
+- User-visible policy:
+  - API は JSON-RPC error code + reason
+  - UI は監視継続可否だけを表示（詳細は logs）
 
-## Compatibility & Fallbacks
-- Default: breaking change を許容（v5はgreenfield）
-- Exceptions:
-  - v4 poller-only equivalent の動作は回帰禁止
-  - `status/tui/tmux-status` の主要表示意味は維持
-
-## Test Strategy (design-level)
+### 8) Test Strategy (MVP)
 - Unit:
-  - tier resolver（fresh/stale/down境界、re-promotion）
+  - tier resolver（fresh/stale/down, re-promotion）
   - source admissibility（priority + health）
-  - dedup/watermark/late-event
+  - dedup
+  - signature classifier（weights, guardrails, hysteresis）
+  - binding transitions（generation + grace）
 - Integration:
-  - existing managed(heuristic) pane + deterministic handshakeでmode昇格
-  - existing unmanaged(non-agent) pane の非汚染確認
-  - new managed pane detection via signature（deterministic未接続）
-  - managed pane の deterministic handshake 到達で mode 昇格
-  - source outage/recovery and suppress behavior
+  - managed(heuristic) -> deterministic 昇格
+  - unmanaged pane 非汚染
+  - pane再利用で誤結合しない
+  - source outage/recovery and suppress
 - E2E/Replay:
-  - `hook_to_poller_fallback`
   - deterministic drop -> fallback -> re-promotion
-  - mixed provider with independent health
+  - mixed provider independent health
 - Accuracy gate:
-  - v4下限を継承（Dev: weighted F1 >= 0.88）
-  - fallback専用の品質指標（約85%前提）を別途固定
+  - deterministic: weighted F1 >= 0.88
+  - poller fallback: weighted F1 >= 0.85 and waiting recall >= 0.85
+
+## Appendix (Post-MVP Hardening; non-blocking for Phase 1-2)
+
+### A1) Cursor two-watermark + ack delivery
+- `fetched_cursor` / `committed_cursor` 二水位
+- `delivery_token` + `gateway.ack_delivery` idempotency
+- ack timeout/retry/redelivery (`ack_timeout=2s`, `max_attempts=5`)
+
+### A2) Invalid cursor recovery numeric contract
+- checkpoint: `30s` or `500 events`
+- safe rewind: `min(10m, 10,000 events)`
+- streak-based full resync (`>=3 in 60s`)
+- dedup retention: `rewind_window + 120s`
+
+### A3) UDS trust boundary + source registry lifecycle
+- peer credential check (`SO_PEERCRED` / `getpeereid`)
+- runtime nonce / protocol version check
+- registry states: `pending/active/stale/revoked`
+- socket rotation policy (re-register)
+
+### A4) Supervisor runtime contract (strict)
+- startup readiness gate (dependency-aware)
+- exponential backoff + jitter
+- failure budget (`5 failures / 10m`)
+- hold-down (`5m`) + escalate
+
+### A5) Binding concurrency hardening
+- single-writer projection
+- `state_version` CAS update
+- CAS conflict retry
+- ordering key `(event_time, ingest_seq)`
+
+### A6) Ops guardrail manager and alerts
+- alert levels: `warn/degraded/escalate`
+- rolling window evaluation
+- `list_alerts` API + `alert_ledger_v1`
+- auto-resolve / operator-ack resolve policy
+
+### A7) Snapshot / restore contract
+- periodic snapshot (`15m`) + shutdown snapshot
+- restore dry-run before canary
+- snapshot metadata persistence
+
+### A8) Extended error taxonomy / tests
+- post-MVP error codes:
+  - `invalid_cursor`, `ack_timeout`, `ack_retry_exhausted`, `unknown_delivery_token`
+  - `peer_uid_mismatch`, `source_registry_miss`, `runtime_nonce_mismatch`
+  - `source_not_active`, `source_revoked`
+  - `binding_cas_conflict`, `rewind_window_exceeded`, `slo_breach`
+- post-MVP test additions:
+  - ack state machine
+  - source registry lifecycle
+  - supervisor hold-down
+  - snapshot restore dry-run

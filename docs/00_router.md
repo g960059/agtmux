@@ -11,12 +11,23 @@
 - If commit/PR/release is performed, Quality Gates MUST pass first (see below).
 - If unsure, be fail-closed: STOP or escalate (Escalation Matrix).
 
+## L1.5: Execution Mode (B: Core-first)
+- Current mode is `B` (core spec + implementation feedback).
+- During Phase 1-2, only items tagged `[MVP]` in `docs/20_spec.md` are implementation blockers.
+- Items tagged `[Post-MVP]` are valid design assets but must NOT block Phase 1-2 coding.
+- If `[Post-MVP]` work is discovered as unexpectedly necessary, Orchestrator must:
+  - create a task in `docs/60_tasks.md` with clear dependency and rationale
+  - record the decision in `docs/70_progress.md`
+  - escalate only when it changes `docs/10_foundation.md` or public behavior
+
 ## L2: Progressive Disclosure (What to read, in order)
 1) `docs/70_progress.md` (latest learnings, constraints, open points)
-2) `docs/60_tasks.md` (what to do now)
+2) `docs/60_tasks.md` (`MVP Track` first)
 3) `docs/10_foundation.md` (stable intent)
-4) `docs/20_spec.md` -> `docs/30_architecture.md` -> `docs/40_design.md` -> `docs/50_plan.md` (as needed)
-5) `docs/90_index.md` (only if structure changed / cannot navigate)
+4) `docs/20_spec.md` (`[MVP]` first, `[Post-MVP]` only as needed)
+5) `docs/40_design.md` (`Main (MVP Slice)` first, `Appendix` only if blocked)
+6) `docs/30_architecture.md` -> `docs/50_plan.md` (as needed)
+7) `docs/90_index.md` (only if structure changed / cannot navigate)
 
 ## Plan mode policy (Docs-first)
 - Built-in plan/task outputs are scratch.
