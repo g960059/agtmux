@@ -66,11 +66,30 @@ pub async fn run_daemon(opts: DaemonOpts, socket_path: &str) -> anyhow::Result<(
         run_poll_loop(poll_executor, poll_state, poll_ms).await;
     });
 
-    // Wait for shutdown signal
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
+    // Wait for shutdown signal (ctrl-c or SIGTERM)
+    let shutdown = async {
+        let ctrl_c = tokio::signal::ctrl_c();
+
+        #[cfg(unix)]
+        {
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("failed to register SIGTERM handler");
+            tokio::select! {
+                _ = ctrl_c => tracing::info!("received ctrl-c, shutting down"),
+                _ = sigterm.recv() => tracing::info!("received SIGTERM, shutting down"),
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            ctrl_c.await.ok();
             tracing::info!("received ctrl-c, shutting down");
         }
+    };
+
+    tokio::select! {
+        () = shutdown => {}
         _ = poll_handle => {
             tracing::warn!("poll loop exited unexpectedly");
         }
@@ -216,8 +235,18 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
         st.daemon.apply_events(gw_response.events, now);
     }
 
-    // 11. Compact — in MVP single-process, buffer growth is bounded by poll rate.
-    // Full compaction (poller buffer trim, gateway truncation) is Post-MVP.
+    // 11. Compact consumed events to prevent unbounded memory growth.
+    // Poller: trim events up to the gateway's source cursor.
+    if let Some(poller_cursor) = st.gateway.source_cursor(SourceKind::Poller)
+        && let Some(seq_str) = poller_cursor.strip_prefix("poller:")
+        && let Ok(seq) = seq_str.parse::<u64>()
+    {
+        st.poller.compact(seq);
+    }
+    // Gateway: trim events up to the daemon's committed cursor.
+    if let Some(gw_cursor) = st.gateway_cursor.clone() {
+        st.gateway.commit_cursor(&gw_cursor);
+    }
 
     Ok(())
 }

@@ -145,6 +145,9 @@ const CURSOR_PREFIX: &str = "poller:";
 pub struct PollerSourceState {
     events: Vec<SourceEventV2>,
     seq: u64,
+    /// Offset from compaction: number of events drained from the front.
+    /// Cursors are always absolute; `compact_offset` adjusts the index.
+    compact_offset: u64,
 }
 
 impl PollerSourceState {
@@ -175,25 +178,46 @@ impl PollerSourceState {
         }
     }
 
+    /// Truncate events that have been consumed (cursor position <= `up_to_seq`).
+    ///
+    /// Adjusts internal state so that subsequent `pull_events` calls with
+    /// cursors based on the old sequence numbers still work correctly.
+    pub fn compact(&mut self, up_to_seq: u64) {
+        // up_to_seq is an absolute cursor; convert to local buffer index
+        let local_pos = up_to_seq.saturating_sub(self.compact_offset);
+        #[expect(clippy::cast_possible_truncation)]
+        let drain_count = (local_pos as usize).min(self.events.len());
+        if drain_count > 0 {
+            self.events.drain(..drain_count);
+            self.compact_offset += drain_count as u64;
+        }
+    }
+
+    /// Number of events currently buffered.
+    pub fn buffered_len(&self) -> usize {
+        self.events.len()
+    }
+
     /// Handle a `pull_events` request.
     pub fn pull_events(
         &self,
         request: &PullEventsRequest,
         now: DateTime<Utc>,
     ) -> PullEventsResponse {
-        let start_seq = Self::parse_cursor(&request.cursor).unwrap_or(0);
+        let abs_start = Self::parse_cursor(&request.cursor).unwrap_or(0);
 
+        // Convert absolute cursor to index into current (possibly compacted) buffer
         #[expect(clippy::cast_possible_truncation)]
-        let start_index = (start_seq as usize).min(self.events.len());
+        let local_start = abs_start.saturating_sub(self.compact_offset) as usize;
+        let start_index = local_start.min(self.events.len());
         let limit = request.limit as usize;
         let end = self.events.len().min(start_index.saturating_add(limit));
 
         let page: Vec<SourceEventV2> = self.events[start_index..end].to_vec();
 
-        // Always return current position so the gateway can overwrite its
-        // tracker cursor.  Returning None when caught-up would cause the
-        // gateway to keep the old cursor and re-deliver the same events.
-        let next_cursor = Some(format!("{CURSOR_PREFIX}{end}"));
+        // Cursor is always absolute (compact_offset + buffer position)
+        let abs_end = self.compact_offset + end as u64;
+        let next_cursor = Some(format!("{CURSOR_PREFIX}{abs_end}"));
 
         PullEventsResponse {
             events: page,
@@ -665,5 +689,132 @@ mod tests {
         };
         let result = poll_pane(&snapshot);
         assert!(result.is_none(), "stale title + shell → suppressed");
+    }
+
+    // ── Compaction tests ────────────────────────────────────────────
+
+    #[test]
+    fn compact_trims_consumed_events() {
+        let mut state = PollerSourceState::new();
+        for i in 0..5 {
+            let snapshot = PaneSnapshot {
+                pane_id: format!("%{i}"),
+                current_cmd: "claude".to_string(),
+                process_hint: Some("claude".to_string()),
+                capture_lines: vec!["output".to_string()],
+                captured_at: now(),
+                ..Default::default()
+            };
+            state.poll_batch(&[snapshot]);
+        }
+        assert_eq!(state.buffered_len(), 5);
+
+        // Compact first 3 events
+        state.compact(3);
+        assert_eq!(state.buffered_len(), 2);
+    }
+
+    #[test]
+    fn compact_cursors_remain_valid() {
+        let mut state = PollerSourceState::new();
+        let n = now();
+
+        for i in 0..5 {
+            let snapshot = PaneSnapshot {
+                pane_id: format!("%{i}"),
+                current_cmd: "claude".to_string(),
+                process_hint: Some("claude".to_string()),
+                capture_lines: vec!["output".to_string()],
+                captured_at: n,
+                ..Default::default()
+            };
+            state.poll_batch(&[snapshot]);
+        }
+
+        // Pull first 3
+        let resp1 = state.pull_events(
+            &PullEventsRequest {
+                cursor: None,
+                limit: 3,
+            },
+            n,
+        );
+        assert_eq!(resp1.events.len(), 3);
+        let cursor = resp1.next_cursor.expect("has cursor");
+        assert_eq!(cursor, "poller:3");
+
+        // Compact those 3
+        state.compact(3);
+        assert_eq!(state.buffered_len(), 2);
+
+        // Pull remaining with the old cursor — should still work
+        let resp2 = state.pull_events(
+            &PullEventsRequest {
+                cursor: Some(cursor),
+                limit: 10,
+            },
+            n,
+        );
+        assert_eq!(resp2.events.len(), 2, "remaining 2 events after compact");
+        assert_eq!(resp2.next_cursor, Some("poller:5".to_string()));
+    }
+
+    #[test]
+    fn compact_beyond_buffer_is_safe() {
+        let mut state = PollerSourceState::new();
+        state.poll_batch(&[claude_snapshot()]);
+        assert_eq!(state.buffered_len(), 1);
+
+        // Compact more than what exists
+        state.compact(100);
+        assert_eq!(state.buffered_len(), 0);
+    }
+
+    /// F1 regression: repeated compaction with absolute cursors must not over-drain.
+    #[test]
+    fn compact_repeated_absolute_cursors_no_over_drain() {
+        let mut state = PollerSourceState::new();
+        let n = now();
+
+        // Insert 6 events (absolute positions 0..6)
+        for i in 0..6 {
+            let snapshot = PaneSnapshot {
+                pane_id: format!("%{i}"),
+                current_cmd: "claude".to_string(),
+                process_hint: Some("claude".to_string()),
+                capture_lines: vec!["output".to_string()],
+                captured_at: n,
+                ..Default::default()
+            };
+            state.poll_batch(&[snapshot]);
+        }
+        assert_eq!(state.buffered_len(), 6);
+
+        // 1st compact: up_to_seq=3 → drain 3 events, offset=3, buffer=3
+        state.compact(3);
+        assert_eq!(state.buffered_len(), 3);
+
+        // 2nd compact: up_to_seq=5 → should drain 2 more (5 - 3), not 5
+        state.compact(5);
+        assert_eq!(
+            state.buffered_len(),
+            1,
+            "2nd compact should only drain 2, not 5"
+        );
+
+        // Cursor from before compaction still works
+        let resp = state.pull_events(
+            &PullEventsRequest {
+                cursor: Some("poller:5".to_string()),
+                limit: 10,
+            },
+            n,
+        );
+        assert_eq!(
+            resp.events.len(),
+            1,
+            "last event accessible via absolute cursor"
+        );
+        assert_eq!(resp.next_cursor, Some("poller:6".to_string()));
     }
 }

@@ -23,6 +23,12 @@
 - [ ] (none)
 
 ## DONE (keep short)
+- [x] T-110 (P1) [MVP] Push event methods: state_changed + summary_changed
+  - Evidence: `state_changed` returns version-based changes with pane/session state. `summary_changed` returns managed/unmanaged counts and change flags. Both accept `since_version` param. 4 new tests. `just verify` PASS (536 tests).
+- [x] T-109 (P1) [MVP] Title resolver wiring into list_panes API
+  - Evidence: `resolve_title()` called in `build_pane_list()` for managed (HeuristicTitle) and unmanaged (Unmanaged fallback) panes. `title` + `title_quality` fields added to JSON response. 1 new test. `just verify` PASS (532 tests).
+- [x] T-108 (P1) [MVP] Runtime hardening: API completeness + memory compaction + SIGTERM
+  - Evidence: (a) `signature_reason` + `signature_inputs` added to `list_panes` API (FR-024). (b) Poller + gateway buffer compaction wired into poll_loop (compact_offset cursor compatibility). (c) SIGTERM handler added via `tokio::signal::unix`. `just verify` PASS (531 tests = 526 + 5 new).
 - [x] T-107 (P1) [MVP] Detection accuracy + activity_state display
   - Evidence: Capture-based 4th detection signal (WEIGHT_POLLER_MATCH=0.78), stale title suppression (title-only + shell + no capture → None), per-pane activity_state + provider in list-panes output. Codex+Claude parallel review adopted (capture tokens tightened: `╭ Claude Code`/`codex>`, shell list expanded: nu/pwsh/tcsh/csh, capture_match wired through payload→poller_match, provider as Option, changed condition updated). `just verify` PASS (525 tests = 514 existing + 11 new).
 - [x] T-106 (P1) test strategy + quality gates for runtime crates

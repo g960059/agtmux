@@ -6,6 +6,52 @@
 
 ---
 
+## 2026-02-26 (cont.)
+### Current objective
+- T-108: Runtime hardening batch (API completeness, memory compaction, SIGTERM)
+
+### Completed
+- **T-108a**: `list_panes` API に `signature_reason` + `signature_inputs` 追加 (FR-024 準拠)
+  - `build_pane_list()` の managed pane JSON に `signature_reason` (string) と `signature_inputs` (object: provider_hint/cmd_match/poller_match/title_match) を追加。
+  - 1 new test: `build_pane_list_includes_signature_fields`
+- **T-108b**: Memory compaction — poller/gateway バッファの定期トリム
+  - `PollerSourceState::compact(up_to_seq)`: absolute cursor → local index 変換で consumed events を drain。`compact_offset` で cursor 互換性維持。
+  - `Gateway::compact_before(abs_position)` + `commit_cursor()` がバッファ compaction を実行。`compact_offset` で absolute cursor 維持。
+  - poll_loop step 11: poller → gateway source cursor から poller compact、daemon gateway_cursor から gateway commit_cursor を毎 tick 実行。
+  - 3 new poller tests: `compact_trims_consumed_events`, `compact_cursors_remain_valid`, `compact_beyond_buffer_is_safe`
+  - 1 new gateway test: `compact_before_with_pagination` + `commit_cursor_compacts_buffer` (既存 noop テストを更新)
+- **T-108c**: SIGTERM ハンドリング — `tokio::signal::unix::SignalKind::terminate()` を ctrl-c と並列で待機。`#[cfg(unix)]`/`#[cfg(not(unix))]` で cross-platform 対応。
+
+- **T-109**: Title resolver wiring into `list_panes` API (FR-015/FR-016)
+  - `resolve_title()` called in `build_pane_list()` for managed and unmanaged panes.
+  - Managed panes: `TitleInput` with `provider`, `pane_title`, `is_managed=true` → HeuristicTitle quality (MVP: no deterministic sources wired, so canonical/handshake tiers are dormant).
+  - Unmanaged panes: `TitleInput` with `pane_title`, `is_managed=false` → Unmanaged quality.
+  - JSON response includes `title` (resolved string) and `title_quality` (tier name).
+  - 1 new test: `build_pane_list_includes_resolved_title`
+- **T-110**: Push event methods: `state_changed` + `summary_changed` (FR-010)
+  - `state_changed`: accepts `since_version` param, returns version-based changes with pane state (signature_class, evidence_mode, activity_state, provider, confidence) and session state (presence, evidence_mode, activity_state, winner_tier). Uses daemon's `changes_since()` API.
+  - `summary_changed`: accepts `since_version` param, returns `has_changes` flag, pane/session change counts, and summary (managed/unmanaged/total counts).
+  - Both methods registered in UDS handler alongside existing list_panes/list_sessions/list_source_health.
+  - 4 new tests: state_changed returns changes, state_changed no changes at current version, summary_changed returns counts, summary_changed no changes at current version.
+
+### Review (Codex)
+- 5 findings. Adoption:
+  - **F1 [P0] ADOPT**: `compact(up_to_seq)` absolute→local conversion bug — 2nd+ compaction over-drained because `up_to_seq` was used as raw count instead of `up_to_seq - compact_offset`. Fixed with `saturating_sub(compact_offset)`.
+  - **F2 [P1] ADOPT**: Gateway stale cursor `next_cursor` calculation — if `abs_start < compact_offset`, `next_pos = abs_start + returned_count` produced stale cursors causing re-delivery. Fixed with `abs_start.max(compact_offset)`.
+  - **F3 [P1] DEFER**: `state_changed` missing signature_reason/inputs — `list_panes` already has these; push events are for change notification.
+  - **F4 [P2] DEFER**: `summary_changed` managed/total from different data sources — practically harmless in single-process MVP.
+  - **F5 [P3] DEFER**: SIGTERM `expect()` → Result — if SIGTERM registration fails, the process can't run anyway.
+- 2 regression tests added: `compact_repeated_absolute_cursors_no_over_drain`, `stale_cursor_after_compaction_no_redelivery`
+
+### Gate evidence
+- `just verify` PASS — 538 tests (526 existing + 12 new), 0 failures, fmt + clippy clean
+
+### Next
+- Remaining MVP gaps: deterministic IO adapters (larger task, may need user input)
+- Waiting on user? no
+
+---
+
 ## 2026-02-26
 ### Current objective
 - T-107: Detection accuracy + activity_state display (MVP)

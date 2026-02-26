@@ -51,6 +51,9 @@ pub struct Gateway {
     buffer: Vec<SourceEventV2>,
     /// Global monotonic sequence (used for gateway cursor generation).
     global_seq: u64,
+    /// Offset from compaction: number of events drained from the front.
+    /// Cursors are always absolute; `compact_offset` adjusts the index.
+    compact_offset: usize,
 }
 
 impl Gateway {
@@ -60,6 +63,7 @@ impl Gateway {
             sources: HashMap::new(),
             buffer: Vec::new(),
             global_seq: 0,
+            compact_offset: 0,
         }
     }
 
@@ -86,6 +90,7 @@ impl Gateway {
             sources,
             buffer: Vec::new(),
             global_seq: 0,
+            compact_offset: 0,
         }
     }
 
@@ -146,16 +151,17 @@ impl Gateway {
     /// # Cursor semantics
     ///
     /// - `None` cursor starts from the beginning (position 0).
-    /// - Cursor format: `"gw:{position}"` where position is the 0-based
-    ///   index into the gateway buffer.
+    /// - Cursor format: `"gw:{position}"` where position is an absolute
+    ///   index (accounts for compacted events).
     /// - Returns at most `request.limit` events.
     /// - `next_cursor` points one past the last returned event.
     pub fn pull_events(&self, request: &GatewayPullRequest) -> GatewayPullResponse {
-        let start = parse_gateway_cursor(request.cursor.as_deref());
+        let abs_start = parse_gateway_cursor(request.cursor.as_deref());
+        let local_start = abs_start.saturating_sub(self.compact_offset);
         let limit = request.limit as usize;
 
-        let available = if start < self.buffer.len() {
-            &self.buffer[start..]
+        let available = if local_start < self.buffer.len() {
+            &self.buffer[local_start..]
         } else {
             &[]
         };
@@ -164,7 +170,10 @@ impl Gateway {
         let returned_count = page.len();
 
         let next_cursor = if returned_count > 0 {
-            let next_pos = start + returned_count;
+            // Clamp abs_start to compact_offset so stale cursors don't
+            // produce next_pos values that point into already-compacted range.
+            let effective_start = abs_start.max(self.compact_offset);
+            let next_pos = effective_start + returned_count;
             Some(format!("{GATEWAY_CURSOR_PREFIX}{next_pos}"))
         } else {
             // No events: keep the same cursor (or None)
@@ -177,14 +186,24 @@ impl Gateway {
         }
     }
 
-    /// Commit a cursor position, indicating the daemon has successfully
-    /// processed events up to this point.
+    /// Compact the buffer: remove events before the given absolute cursor position.
     ///
-    /// In the MVP, this is informational — the buffer is not truncated.
-    /// Post-MVP (T-041) will add two-watermark and buffer compaction.
-    pub fn commit_cursor(&mut self, _cursor: &str) {
-        // MVP: no-op. Buffer compaction is post-MVP (T-041).
-        // The daemon tracks its own committed_cursor externally.
+    /// This should be called periodically after the daemon has consumed events.
+    /// The cursor must be an absolute position (as returned by `pull_events`).
+    pub fn compact_before(&mut self, abs_position: usize) {
+        let local_pos = abs_position.saturating_sub(self.compact_offset);
+        let drain_count = local_pos.min(self.buffer.len());
+        if drain_count > 0 {
+            self.buffer.drain(..drain_count);
+            self.compact_offset += drain_count;
+        }
+    }
+
+    /// Commit a cursor position, indicating the daemon has successfully
+    /// processed events up to this point. Compacts the buffer.
+    pub fn commit_cursor(&mut self, cursor: &str) {
+        let abs_pos = parse_gateway_cursor(Some(cursor));
+        self.compact_before(abs_pos);
     }
 
     // ── Source Health ────────────────────────────────────────────────
@@ -1182,31 +1201,150 @@ mod tests {
         assert_eq!(gw.buffer_len(), 1);
     }
 
-    // ── 24. Commit cursor is no-op in MVP ───────────────────────────
+    // ── 24. Commit cursor compacts buffer ──────────────────────────
 
     #[test]
-    fn commit_cursor_is_noop_in_mvp() {
+    fn commit_cursor_compacts_buffer() {
         let mut gw = Gateway::new();
         let t = now();
 
         gw.ingest_source_response(
             SourceKind::CodexAppserver,
             make_source_response(
-                vec![make_event(
-                    "e1",
-                    Provider::Codex,
-                    SourceKind::CodexAppserver,
-                    t,
-                )],
-                Some("codex-app:1"),
+                vec![
+                    make_event("e1", Provider::Codex, SourceKind::CodexAppserver, t),
+                    make_event(
+                        "e2",
+                        Provider::Codex,
+                        SourceKind::CodexAppserver,
+                        t + TimeDelta::seconds(1),
+                    ),
+                ],
+                Some("codex-app:2"),
                 t,
                 SourceHealthStatus::Healthy,
             ),
         );
+        assert_eq!(gw.buffer_len(), 2);
 
+        // Commit cursor at position 1 → compact first event
         gw.commit_cursor("gw:1");
-
-        // Buffer not truncated in MVP
         assert_eq!(gw.buffer_len(), 1);
+
+        // Pull from absolute position 1 still works
+        let resp = gw.pull_events(&GatewayPullRequest {
+            cursor: Some("gw:1".to_string()),
+            limit: 500,
+        });
+        assert_eq!(resp.events.len(), 1);
+        assert_eq!(resp.events[0].event_id, "e2");
+
+        // Commit all → buffer empty
+        gw.commit_cursor("gw:2");
+        assert_eq!(gw.buffer_len(), 0);
+    }
+
+    // ── 25. compact_before with pagination ──────────────────────────
+
+    #[test]
+    fn compact_before_with_pagination() {
+        let mut gw = Gateway::new();
+        let t = now();
+
+        // Ingest 5 events
+        for i in 0..5 {
+            gw.ingest_source_response(
+                SourceKind::CodexAppserver,
+                make_source_response(
+                    vec![make_event(
+                        &format!("e{i}"),
+                        Provider::Codex,
+                        SourceKind::CodexAppserver,
+                        t + TimeDelta::seconds(i),
+                    )],
+                    Some(&format!("codex-app:{}", i + 1)),
+                    t,
+                    SourceHealthStatus::Healthy,
+                ),
+            );
+        }
+        assert_eq!(gw.buffer_len(), 5);
+
+        // Pull first 3
+        let resp = gw.pull_events(&GatewayPullRequest {
+            cursor: None,
+            limit: 3,
+        });
+        assert_eq!(resp.events.len(), 3);
+        let cursor = resp.next_cursor.expect("has cursor");
+        assert_eq!(cursor, "gw:3");
+
+        // Compact first 3
+        gw.compact_before(3);
+        assert_eq!(gw.buffer_len(), 2);
+
+        // Pull remaining with old cursor
+        let resp2 = gw.pull_events(&GatewayPullRequest {
+            cursor: Some(cursor),
+            limit: 500,
+        });
+        assert_eq!(resp2.events.len(), 2);
+        assert_eq!(resp2.events[0].event_id, "e3");
+        assert_eq!(resp2.events[1].event_id, "e4");
+        assert_eq!(resp2.next_cursor, Some("gw:5".to_string()));
+    }
+
+    /// F2 regression: stale cursor (before compact_offset) must not produce
+    /// a next_cursor that causes re-delivery.
+    #[test]
+    fn stale_cursor_after_compaction_no_redelivery() {
+        let mut gw = Gateway::new();
+        let t = now();
+
+        // Ingest 4 events (abs positions 0..4)
+        for i in 0..4 {
+            gw.ingest_source_response(
+                SourceKind::CodexAppserver,
+                make_source_response(
+                    vec![make_event(
+                        &format!("e{i}"),
+                        Provider::Codex,
+                        SourceKind::CodexAppserver,
+                        t + TimeDelta::seconds(i),
+                    )],
+                    Some(&format!("codex-app:{}", i + 1)),
+                    t,
+                    SourceHealthStatus::Healthy,
+                ),
+            );
+        }
+
+        // Compact first 3 → buffer = [e3], compact_offset = 3
+        gw.compact_before(3);
+        assert_eq!(gw.buffer_len(), 1);
+
+        // Pull with stale cursor "gw:1" (before compact_offset=3)
+        let resp = gw.pull_events(&GatewayPullRequest {
+            cursor: Some("gw:1".to_string()),
+            limit: 500,
+        });
+        assert_eq!(resp.events.len(), 1, "should get remaining event e3");
+        assert_eq!(resp.events[0].event_id, "e3");
+        // next_cursor must be gw:4 (compact_offset + 1), not gw:2 (stale abs_start + 1)
+        assert_eq!(
+            resp.next_cursor,
+            Some("gw:4".to_string()),
+            "next_cursor must account for compact_offset, not stale abs_start"
+        );
+
+        // Re-pull with the returned cursor: no re-delivery
+        let resp2 = gw.pull_events(&GatewayPullRequest {
+            cursor: resp.next_cursor,
+            limit: 500,
+        });
+        assert!(
+            resp2.events.is_empty(),
+            "no re-delivery after stale cursor pull"
+        );
     }
 }
