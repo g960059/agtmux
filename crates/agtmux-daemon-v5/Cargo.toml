@@ -1,0 +1,10 @@
+[package]
+name = "agtmux-daemon-v5"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+agtmux-core-v5 = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

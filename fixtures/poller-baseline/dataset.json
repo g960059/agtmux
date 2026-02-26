@@ -1,0 +1,3856 @@
+[
+  {
+    "pane_id": "%44",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Completed.",
+      "$ "
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%23",
+    "pane_title": "Claude Code",
+    "current_cmd": "claude --resume",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Generating code for you"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%241",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "loading model..."
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Unknown"
+  },
+  {
+    "pane_id": "%250",
+    "pane_title": "bash",
+    "current_cmd": "bash",
+    "process_hint": null,
+    "capture_lines": [
+      "user@host:~$ "
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%272",
+    "pane_title": "cargo build",
+    "current_cmd": "cargo",
+    "process_hint": null,
+    "capture_lines": [
+      "Compiling myproject v0.1.0"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%232",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "error: authentication failed"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Error"
+  },
+  {
+    "pane_id": "%168",
+    "pane_title": "codex",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Running tests in sandbox"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%318",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Unknown"
+  },
+  {
+    "pane_id": "%158",
+    "pane_title": "openai codex",
+    "current_cmd": "codex --full-auto",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Running tests in sandbox"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%35",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "⠙ Analyzing..."
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%269",
+    "pane_title": "node",
+    "current_cmd": "node",
+    "process_hint": null,
+    "capture_lines": [
+      "> console.log('hello')"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%123",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "some intermediate state"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Unknown"
+  },
+  {
+    "pane_id": "%243",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "setting up environment"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Unknown"
+  },
+  {
+    "pane_id": "%54",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Completed.",
+      "$ "
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%100",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Allow? Create new file utils.rs"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%4",
+    "pane_title": "Claude Code",
+    "current_cmd": "claude --resume",
+    "process_hint": "claude",
+    "capture_lines": [
+      "⠋ Loading files..."
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%56",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "❯"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%306",
+    "pane_title": "ssh",
+    "current_cmd": "ssh",
+    "process_hint": null,
+    "capture_lines": [
+      "Last login: Mon Feb 25"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%117",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "no recognizable output here"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Unknown"
+  },
+  {
+    "pane_id": "%69",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Completed.",
+      "$ "
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%165",
+    "pane_title": "codex",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Running the command"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%271",
+    "pane_title": "make",
+    "current_cmd": "make",
+    "process_hint": null,
+    "capture_lines": [
+      "Compiling src/main.c"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%222",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "approve running make build"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%150",
+    "pane_title": "openai codex",
+    "current_cmd": "codex --full-auto",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Running the command"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%92",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Do you approve this change?"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%144",
+    "pane_title": "openai codex",
+    "current_cmd": "codex --full-auto",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Processing your request"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%76",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "permission needed for network access"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%302",
+    "pane_title": "git log",
+    "current_cmd": "git",
+    "process_hint": null,
+    "capture_lines": [
+      "commit abc1234"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%204",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Please confirm the action"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%189",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "codex>"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%247",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      ""
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Unknown"
+  },
+  {
+    "pane_id": "%128",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "loading configuration..."
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Unknown"
+  },
+  {
+    "pane_id": "%236",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "loading model..."
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Unknown"
+  },
+  {
+    "pane_id": "%78",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Do you approve running this command?"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%179",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "codex>"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%98",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Do you approve running this command?"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%224",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Error: sandbox violation"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Error"
+  },
+  {
+    "pane_id": "%45",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "❯ cd src"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%30",
+    "pane_title": "Claude Code",
+    "current_cmd": "claude --resume",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Generating a response"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%313",
+    "pane_title": "reading claude docs",
+    "current_cmd": "firefox",
+    "process_hint": null,
+    "capture_lines": [
+      "documentation page"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Unknown"
+  },
+  {
+    "pane_id": "%67",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "$ "
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%299",
+    "pane_title": "htop",
+    "current_cmd": "htop",
+    "process_hint": null,
+    "capture_lines": [
+      "CPU 5.2%  Mem 2.1G"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%48",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Done.",
+      "❯"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%277",
+    "pane_title": "less",
+    "current_cmd": "less",
+    "process_hint": null,
+    "capture_lines": [
+      "line 1 of output"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%99",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "permission to read /etc/hosts"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%174",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "codex>"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%140",
+    "pane_title": "codex",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Running the command"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%178",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "$ cd project"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%73",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "permission required to write file"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%252",
+    "pane_title": "python",
+    "current_cmd": "python3",
+    "process_hint": null,
+    "capture_lines": [
+      ">>> import os"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%89",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "permission to read /etc/hosts"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%95",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "approve the edit to main.rs?"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%230",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "error: timeout exceeded"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Error"
+  },
+  {
+    "pane_id": "%27",
+    "pane_title": "Claude Code",
+    "current_cmd": "claude --resume",
+    "process_hint": "claude",
+    "capture_lines": [
+      "⠸ Compiling..."
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%176",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "codex> _"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%290",
+    "pane_title": "ssh",
+    "current_cmd": "ssh",
+    "process_hint": null,
+    "capture_lines": [
+      "Last login: Mon Feb 25"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%3",
+    "pane_title": "claude",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Generating code for you"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%39",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Running analysis on the codebase"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%86",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "permission needed for network access"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%134",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex --model o3",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Processing your request"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%94",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Allow? (y/n)"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%121",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "no recognizable output here"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Unknown"
+  },
+  {
+    "pane_id": "%160",
+    "pane_title": "codex",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Running the command"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%298",
+    "pane_title": "bash",
+    "current_cmd": "bash",
+    "process_hint": null,
+    "capture_lines": [
+      "user@host:~$ "
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%102",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "error: compilation failed"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Error"
+  },
+  {
+    "pane_id": "%124",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "loading configuration..."
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Unknown"
+  },
+  {
+    "pane_id": "%289",
+    "pane_title": "docker",
+    "current_cmd": "docker",
+    "process_hint": null,
+    "capture_lines": [
+      "CONTAINER ID  IMAGE"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%239",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "initializing sandbox..."
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Unknown"
+  },
+  {
+    "pane_id": "%24",
+    "pane_title": "claude",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "⠋ Loading files..."
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%11",
+    "pane_title": "Claude Code",
+    "current_cmd": "claude --resume",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Thinking about the problem"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%66",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "❯"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%219",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Please confirm the action"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%214",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Please confirm the action"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%199",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Please confirm the action"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%65",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "❯ cd src"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%201",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "confirm deletion of old files"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%226",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Error: rate limit hit"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Error"
+  },
+  {
+    "pane_id": "%131",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex --model o3",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Thinking about the solution"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%258",
+    "pane_title": "ssh",
+    "current_cmd": "ssh",
+    "process_hint": null,
+    "capture_lines": [
+      "Last login: Mon Feb 25"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%41",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "❯"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%114",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      ""
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Unknown"
+  },
+  {
+    "pane_id": "%184",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "codex>"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%75",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "approve the edit to main.rs?"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%101",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Error: file not found"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Error"
+  },
+  {
+    "pane_id": "%212",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "approve running make build"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%38",
+    "pane_title": "Claude Code",
+    "current_cmd": "claude --resume",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Thinking about how to fix this bug"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%215",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "approve this file change?"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%20",
+    "pane_title": "claude",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Generating a response"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%149",
+    "pane_title": "codex",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Processing your request"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%163",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex --model o3",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Running tests in sandbox"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%159",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex --model o3",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Processing your request"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%90",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Allow? Create new file utils.rs"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%157",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex --model o3",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Processing code analysis"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%315",
+    "pane_title": "CLAUDE CODE",
+    "current_cmd": "CLAUDE",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Thinking"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%166",
+    "pane_title": "codex",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Thinking about the solution"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%155",
+    "pane_title": "openai codex",
+    "current_cmd": "codex --full-auto",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Running the command"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%319",
+    "pane_title": "claude code",
+    "current_cmd": "node",
+    "process_hint": null,
+    "capture_lines": [
+      "Thinking about it"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%228",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Error: command not found"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Error"
+  },
+  {
+    "pane_id": "%242",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      ""
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Unknown"
+  },
+  {
+    "pane_id": "%107",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Error: file not found"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Error"
+  },
+  {
+    "pane_id": "%8",
+    "pane_title": "claude",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Thinking about how to fix this bug"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%191",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "codex> _"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%284",
+    "pane_title": "python",
+    "current_cmd": "python3",
+    "process_hint": null,
+    "capture_lines": [
+      ">>> import os"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%267",
+    "pane_title": "htop",
+    "current_cmd": "htop",
+    "process_hint": null,
+    "capture_lines": [
+      "CPU 5.2%  Mem 2.1G"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%193",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "$ cd project"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%53",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Done.",
+      "❯"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%221",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "confirm deletion of old files"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%181",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "codex> _"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%97",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Allow? This will modify 3 files"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%12",
+    "pane_title": "Claude Code",
+    "current_cmd": "claude --resume",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Running the test suite"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%170",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "$ "
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%317",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Unknown"
+  },
+  {
+    "pane_id": "%70",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "❯ cd src"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%310",
+    "pane_title": "top",
+    "current_cmd": "top",
+    "process_hint": null,
+    "capture_lines": [
+      "load average: 0.5"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%7",
+    "pane_title": "claude",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "⠸ Compiling..."
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%13",
+    "pane_title": "Claude Code",
+    "current_cmd": "claude --resume",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Generating code for you"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%279",
+    "pane_title": "nano",
+    "current_cmd": "nano",
+    "process_hint": null,
+    "capture_lines": [
+      "GNU nano 7.2"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%110",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Error: network timeout"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Error"
+  },
+  {
+    "pane_id": "%145",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex --model o3",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Running the command"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%283",
+    "pane_title": "htop",
+    "current_cmd": "htop",
+    "process_hint": null,
+    "capture_lines": [
+      "CPU 5.2%  Mem 2.1G"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%171",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "codex> _"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%10",
+    "pane_title": "claude",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Generating a response"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%119",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "some intermediate state"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Unknown"
+  },
+  {
+    "pane_id": "%112",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Error: invalid syntax in config"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Error"
+  },
+  {
+    "pane_id": "%32",
+    "pane_title": "claude",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Running the test suite"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%60",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "❯ cd src"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%238",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "setting up environment"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Unknown"
+  },
+  {
+    "pane_id": "%285",
+    "pane_title": "node",
+    "current_cmd": "node",
+    "process_hint": null,
+    "capture_lines": [
+      "> console.log('hello')"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%143",
+    "pane_title": "codex",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Running tests in sandbox"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%36",
+    "pane_title": "claude",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "⠹ Processing..."
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%115",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "some intermediate state"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Unknown"
+  },
+  {
+    "pane_id": "%153",
+    "pane_title": "openai codex",
+    "current_cmd": "codex --full-auto",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Running tests in sandbox"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%50",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "❯ cd src"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%180",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "$ "
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%244",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "initializing sandbox..."
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Unknown"
+  },
+  {
+    "pane_id": "%192",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Done.",
+      "codex>"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%104",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Error: network timeout"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Error"
+  },
+  {
+    "pane_id": "%281",
+    "pane_title": "vim",
+    "current_cmd": "vim",
+    "process_hint": null,
+    "capture_lines": [
+      "-- INSERT --"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%26",
+    "pane_title": "claude",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "⠹ Processing..."
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%14",
+    "pane_title": "claude",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "⠋ Loading files..."
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%120",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "loading configuration..."
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Unknown"
+  },
+  {
+    "pane_id": "%106",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Error: invalid syntax in config"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Error"
+  },
+  {
+    "pane_id": "%257",
+    "pane_title": "docker",
+    "current_cmd": "docker",
+    "process_hint": null,
+    "capture_lines": [
+      "CONTAINER ID  IMAGE"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%91",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Allow? Press Y to confirm"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%111",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "error: permission denied"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Error"
+  },
+  {
+    "pane_id": "%227",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "error: authentication failed"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Error"
+  },
+  {
+    "pane_id": "%275",
+    "pane_title": "tmux",
+    "current_cmd": "tmux",
+    "process_hint": null,
+    "capture_lines": [
+      "[0] 0:bash*"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%49",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Completed.",
+      "$ "
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%105",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "error: permission denied"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Error"
+  },
+  {
+    "pane_id": "%152",
+    "pane_title": "codex",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Processing code analysis"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%63",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Done.",
+      "❯"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%202",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "approve running make build"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%148",
+    "pane_title": "openai codex",
+    "current_cmd": "codex --full-auto",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Running tests in sandbox"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%147",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex --model o3",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Processing code analysis"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%297",
+    "pane_title": "vim",
+    "current_cmd": "vim",
+    "process_hint": null,
+    "capture_lines": [
+      "-- INSERT --"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%194",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "codex>"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%208",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "confirm: overwrite existing file?"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%211",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "confirm deletion of old files"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%287",
+    "pane_title": "make",
+    "current_cmd": "make",
+    "process_hint": null,
+    "capture_lines": [
+      "Compiling src/main.c"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%61",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "❯"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%132",
+    "pane_title": "codex",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Processing code analysis"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%295",
+    "pane_title": "nano",
+    "current_cmd": "nano",
+    "process_hint": null,
+    "capture_lines": [
+      "GNU nano 7.2"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%85",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "approve the edit to main.rs?"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%9",
+    "pane_title": "Claude Code",
+    "current_cmd": "claude --resume",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Running analysis on the codebase"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%210",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "approve this file change?"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%173",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "$ cd project"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%16",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "⠹ Processing..."
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%294",
+    "pane_title": "top",
+    "current_cmd": "top",
+    "process_hint": null,
+    "capture_lines": [
+      "load average: 0.5"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%19",
+    "pane_title": "claude",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Running analysis on the codebase"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%292",
+    "pane_title": "man page",
+    "current_cmd": "man",
+    "process_hint": null,
+    "capture_lines": [
+      "BASH(1)  General Commands Manual"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%314",
+    "pane_title": "claude-related notes",
+    "current_cmd": "vim",
+    "process_hint": null,
+    "capture_lines": [
+      "-- INSERT --"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Unknown"
+  },
+  {
+    "pane_id": "%262",
+    "pane_title": "top",
+    "current_cmd": "top",
+    "process_hint": null,
+    "capture_lines": [
+      "load average: 0.5"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%264",
+    "pane_title": "zsh",
+    "current_cmd": "zsh",
+    "process_hint": null,
+    "capture_lines": [
+      "% ls -la"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%142",
+    "pane_title": "openai codex",
+    "current_cmd": "codex --full-auto",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Processing code analysis"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%260",
+    "pane_title": "man page",
+    "current_cmd": "man",
+    "process_hint": null,
+    "capture_lines": [
+      "BASH(1)  General Commands Manual"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%265",
+    "pane_title": "vim",
+    "current_cmd": "vim",
+    "process_hint": null,
+    "capture_lines": [
+      "-- INSERT --"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%87",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Allow? This will modify 3 files"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%301",
+    "pane_title": "node",
+    "current_cmd": "node",
+    "process_hint": null,
+    "capture_lines": [
+      "> console.log('hello')"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%278",
+    "pane_title": "top",
+    "current_cmd": "top",
+    "process_hint": null,
+    "capture_lines": [
+      "load average: 0.5"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%64",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Completed.",
+      "$ "
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%31",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Thinking about the problem"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%116",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "loading configuration..."
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Unknown"
+  },
+  {
+    "pane_id": "%133",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex --model o3",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Running tests in sandbox"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%280",
+    "pane_title": "zsh",
+    "current_cmd": "zsh",
+    "process_hint": null,
+    "capture_lines": [
+      "% ls -la"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%255",
+    "pane_title": "make",
+    "current_cmd": "make",
+    "process_hint": null,
+    "capture_lines": [
+      "Compiling src/main.c"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%304",
+    "pane_title": "cargo build",
+    "current_cmd": "cargo",
+    "process_hint": null,
+    "capture_lines": [
+      "Compiling myproject v0.1.0"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%172",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Done.",
+      "codex>"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%103",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "panic at thread main"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Error"
+  },
+  {
+    "pane_id": "%80",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Allow? Create new file utils.rs"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%183",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "$ cd project"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%52",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "$ "
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%177",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Done.",
+      "codex>"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%187",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Done.",
+      "codex>"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%231",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Error: rate limit hit"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Error"
+  },
+  {
+    "pane_id": "%55",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "❯ cd src"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%293",
+    "pane_title": "less",
+    "current_cmd": "less",
+    "process_hint": null,
+    "capture_lines": [
+      "line 1 of output"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%309",
+    "pane_title": "less",
+    "current_cmd": "less",
+    "process_hint": null,
+    "capture_lines": [
+      "line 1 of output"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%229",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Error: sandbox violation"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Error"
+  },
+  {
+    "pane_id": "%251",
+    "pane_title": "htop",
+    "current_cmd": "htop",
+    "process_hint": null,
+    "capture_lines": [
+      "CPU 5.2%  Mem 2.1G"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%43",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Done.",
+      "❯"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%141",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex --model o3",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Thinking about the solution"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%122",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      ""
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Unknown"
+  },
+  {
+    "pane_id": "%169",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "codex>"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%282",
+    "pane_title": "bash",
+    "current_cmd": "bash",
+    "process_hint": null,
+    "capture_lines": [
+      "user@host:~$ "
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%270",
+    "pane_title": "git log",
+    "current_cmd": "git",
+    "process_hint": null,
+    "capture_lines": [
+      "commit abc1234"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%197",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Done.",
+      "codex>"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%263",
+    "pane_title": "nano",
+    "current_cmd": "nano",
+    "process_hint": null,
+    "capture_lines": [
+      "GNU nano 7.2"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%308",
+    "pane_title": "man page",
+    "current_cmd": "man",
+    "process_hint": null,
+    "capture_lines": [
+      "BASH(1)  General Commands Manual"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%18",
+    "pane_title": "claude",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Thinking about how to fix this bug"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%209",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Please confirm the action"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%125",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "no recognizable output here"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Unknown"
+  },
+  {
+    "pane_id": "%188",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "$ cd project"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%22",
+    "pane_title": "Claude Code",
+    "current_cmd": "claude --resume",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Running the test suite"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%21",
+    "pane_title": "claude",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Thinking about the problem"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%146",
+    "pane_title": "codex",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Thinking about the solution"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%218",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "confirm: overwrite existing file?"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%15",
+    "pane_title": "Claude Code",
+    "current_cmd": "claude --resume",
+    "process_hint": "claude",
+    "capture_lines": [
+      "⠙ Analyzing..."
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%62",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "$ "
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%273",
+    "pane_title": "docker",
+    "current_cmd": "docker",
+    "process_hint": null,
+    "capture_lines": [
+      "CONTAINER ID  IMAGE"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%207",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "approve running make build"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%213",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "confirm: overwrite existing file?"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%93",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "permission required to write file"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%303",
+    "pane_title": "make",
+    "current_cmd": "make",
+    "process_hint": null,
+    "capture_lines": [
+      "Compiling src/main.c"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%5",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "⠙ Analyzing..."
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%311",
+    "pane_title": "nano",
+    "current_cmd": "nano",
+    "process_hint": null,
+    "capture_lines": [
+      "GNU nano 7.2"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%83",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "permission required to write file"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%154",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex --model o3",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Processing your request"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%1",
+    "pane_title": "Claude Code",
+    "current_cmd": "claude --resume",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Thinking about the problem"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%288",
+    "pane_title": "cargo build",
+    "current_cmd": "cargo",
+    "process_hint": null,
+    "capture_lines": [
+      "Compiling myproject v0.1.0"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%200",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "approve this file change?"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%307",
+    "pane_title": "tmux",
+    "current_cmd": "tmux",
+    "process_hint": null,
+    "capture_lines": [
+      "[0] 0:bash*"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%42",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "$ "
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%248",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "setting up environment"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Unknown"
+  },
+  {
+    "pane_id": "%96",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "permission needed for network access"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%40",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Generating a response"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%51",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "❯"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%156",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex --model o3",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Thinking about the solution"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%246",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "loading model..."
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Unknown"
+  },
+  {
+    "pane_id": "%164",
+    "pane_title": "codex",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Processing your request"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%216",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "confirm deletion of old files"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%77",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Allow? This will modify 3 files"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%161",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex --model o3",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Thinking about the solution"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%259",
+    "pane_title": "tmux",
+    "current_cmd": "tmux",
+    "process_hint": null,
+    "capture_lines": [
+      "[0] 0:bash*"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%28",
+    "pane_title": "Claude Code",
+    "current_cmd": "claude --resume",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Thinking about how to fix this bug"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%234",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "initializing sandbox..."
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Unknown"
+  },
+  {
+    "pane_id": "%130",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex --model o3",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Running the command"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%46",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "❯"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%268",
+    "pane_title": "python",
+    "current_cmd": "python3",
+    "process_hint": null,
+    "capture_lines": [
+      ">>> import os"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%266",
+    "pane_title": "bash",
+    "current_cmd": "bash",
+    "process_hint": null,
+    "capture_lines": [
+      "user@host:~$ "
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%249",
+    "pane_title": "vim",
+    "current_cmd": "vim",
+    "process_hint": null,
+    "capture_lines": [
+      "-- INSERT --"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%68",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Done.",
+      "❯"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%254",
+    "pane_title": "git log",
+    "current_cmd": "git",
+    "process_hint": null,
+    "capture_lines": [
+      "commit abc1234"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%225",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "error: timeout exceeded"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Error"
+  },
+  {
+    "pane_id": "%185",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "$ "
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%245",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "connecting to API..."
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Unknown"
+  },
+  {
+    "pane_id": "%2",
+    "pane_title": "claude",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Running the test suite"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%233",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Error: command not found"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Error"
+  },
+  {
+    "pane_id": "%81",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Allow? Press Y to confirm"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%223",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "confirm: overwrite existing file?"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%151",
+    "pane_title": "openai codex",
+    "current_cmd": "codex --full-auto",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Thinking about the solution"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%58",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Done.",
+      "❯"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%175",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "$ "
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%316",
+    "pane_title": "Claude Code Session",
+    "current_cmd": "claude --resume",
+    "process_hint": "claude",
+    "capture_lines": [
+      "❯"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%59",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Completed.",
+      "$ "
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%6",
+    "pane_title": "claude",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "⠹ Processing..."
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%129",
+    "pane_title": "codex",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Processing your request"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%240",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "connecting to API..."
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Unknown"
+  },
+  {
+    "pane_id": "%196",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "codex> _"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%198",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "$ cd project"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%33",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Generating code for you"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%217",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "approve running make build"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%82",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Do you approve this change?"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%79",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "permission to read /etc/hosts"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%57",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "$ "
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%25",
+    "pane_title": "Claude Code",
+    "current_cmd": "claude --resume",
+    "process_hint": "claude",
+    "capture_lines": [
+      "⠙ Analyzing..."
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%47",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "$ "
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%253",
+    "pane_title": "node",
+    "current_cmd": "node",
+    "process_hint": null,
+    "capture_lines": [
+      "> console.log('hello')"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%261",
+    "pane_title": "less",
+    "current_cmd": "less",
+    "process_hint": null,
+    "capture_lines": [
+      "line 1 of output"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%71",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Allow? Press Y to confirm"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%305",
+    "pane_title": "docker",
+    "current_cmd": "docker",
+    "process_hint": null,
+    "capture_lines": [
+      "CONTAINER ID  IMAGE"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%186",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "codex> _"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%205",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "approve this file change?"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%220",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "approve this file change?"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%135",
+    "pane_title": "codex",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Running the command"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%276",
+    "pane_title": "man page",
+    "current_cmd": "man",
+    "process_hint": null,
+    "capture_lines": [
+      "BASH(1)  General Commands Manual"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%127",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "some intermediate state"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Unknown"
+  },
+  {
+    "pane_id": "%72",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Do you approve this change?"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%136",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex --model o3",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Thinking about the solution"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%74",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Allow? (y/n)"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%235",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "connecting to API..."
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Unknown"
+  },
+  {
+    "pane_id": "%203",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "confirm: overwrite existing file?"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%256",
+    "pane_title": "cargo build",
+    "current_cmd": "cargo",
+    "process_hint": null,
+    "capture_lines": [
+      "Compiling myproject v0.1.0"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%296",
+    "pane_title": "zsh",
+    "current_cmd": "zsh",
+    "process_hint": null,
+    "capture_lines": [
+      "% ls -la"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%300",
+    "pane_title": "python",
+    "current_cmd": "python3",
+    "process_hint": null,
+    "capture_lines": [
+      ">>> import os"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%291",
+    "pane_title": "tmux",
+    "current_cmd": "tmux",
+    "process_hint": null,
+    "capture_lines": [
+      "[0] 0:bash*"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%109",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "panic at thread main"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Error"
+  },
+  {
+    "pane_id": "%34",
+    "pane_title": "Claude Code",
+    "current_cmd": "claude --resume",
+    "process_hint": "claude",
+    "capture_lines": [
+      "⠋ Loading files..."
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%138",
+    "pane_title": "codex",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Running tests in sandbox"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%206",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "confirm deletion of old files"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%162",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex --model o3",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Processing code analysis"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%17",
+    "pane_title": "claude",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "⠸ Compiling..."
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%118",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      ""
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Unknown"
+  },
+  {
+    "pane_id": "%29",
+    "pane_title": "Claude Code",
+    "current_cmd": "claude --resume",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Running analysis on the codebase"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%167",
+    "pane_title": "openai codex",
+    "current_cmd": "codex --full-auto",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Processing code analysis"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%113",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "no recognizable output here"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Unknown"
+  },
+  {
+    "pane_id": "%286",
+    "pane_title": "git log",
+    "current_cmd": "git",
+    "process_hint": null,
+    "capture_lines": [
+      "commit abc1234"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%139",
+    "pane_title": "openai codex",
+    "current_cmd": "codex --full-auto",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Processing your request"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%195",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "$ "
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%237",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      ""
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Unknown"
+  },
+  {
+    "pane_id": "%320",
+    "pane_title": "openai codex",
+    "current_cmd": "node",
+    "process_hint": null,
+    "capture_lines": [
+      "Processing data"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%126",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      ""
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Unknown"
+  },
+  {
+    "pane_id": "%274",
+    "pane_title": "ssh",
+    "current_cmd": "ssh",
+    "process_hint": null,
+    "capture_lines": [
+      "Last login: Mon Feb 25"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%88",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Do you approve running this command?"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "WaitingApproval"
+  },
+  {
+    "pane_id": "%312",
+    "pane_title": "zsh",
+    "current_cmd": "zsh",
+    "process_hint": null,
+    "capture_lines": [
+      "% ls -la"
+    ],
+    "expected_detected": false,
+    "expected_provider": null,
+    "expected_activity": null
+  },
+  {
+    "pane_id": "%37",
+    "pane_title": "claude",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "⠸ Compiling..."
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%137",
+    "pane_title": "codex",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Processing code analysis"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Running"
+  },
+  {
+    "pane_id": "%108",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "error: compilation failed"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "Error"
+  },
+  {
+    "pane_id": "%182",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "Done.",
+      "codex>"
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%190",
+    "pane_title": "codex terminal",
+    "current_cmd": "codex",
+    "process_hint": "codex",
+    "capture_lines": [
+      "$ "
+    ],
+    "expected_detected": true,
+    "expected_provider": "codex",
+    "expected_activity": "Idle"
+  },
+  {
+    "pane_id": "%84",
+    "pane_title": "claude code",
+    "current_cmd": "claude",
+    "process_hint": "claude",
+    "capture_lines": [
+      "Allow? (y/n)"
+    ],
+    "expected_detected": true,
+    "expected_provider": "claude",
+    "expected_activity": "WaitingApproval"
+  }
+]

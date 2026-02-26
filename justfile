@@ -71,6 +71,18 @@ test-source-poller:
       echo "TODO: add scripts/tests/test-source-poller.sh"; \
     fi
 
+poller-gate:
+    cargo test -p agtmux-source-poller integration_fixture_gate -- --nocapture
+
+run-daemon *ARGS:
+    cargo run -p agtmux-runtime -- daemon {{ARGS}}
+
+run-status *ARGS:
+    cargo run -p agtmux-runtime -- status {{ARGS}}
+
+test-e2e-status:
+    @bash scripts/tests/test-e2e-status.sh
+
 test-e2e-batch:
     @bash scripts/tests/run-e2e-batch.sh
 

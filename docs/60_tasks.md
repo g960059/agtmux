@@ -11,114 +11,7 @@
 - online/e2e source test（codex/claude）を走らせる前に `just preflight-online` を必須実行する。
 
 ## TODO
-
-### MVP Track (Phase 1-2; execute now)
-- [ ] T-010 (P0) [US-005] v5 crate/workspace skeleton を作成
-  - blocked_by: `none`
-  - Output: `crates/agtmux-core-v5`, `crates/agtmux-gateway`, `crates/agtmux-daemon-v5`, `crates/agtmux-source-*`
-  - Gates: `just verify`
-- [ ] T-020 (P1) [US-001][US-002] tier resolver 実装 + unit/replay
-  - blocked_by: `T-010`
-  - Output: deterministic/fallback/re-promotion tests
-  - Gates: resolver test suite pass
-- [ ] T-011 (P1) [US-002][US-005] v4 poller logic を reusable crate 化
-  - blocked_by: `T-010`
-  - Output: poller core crate + compatibility tests
-  - Gates: v4 fixture replay parity
-- [ ] T-012 (P1) [US-005] v4 source health transition を reusable crate/module 化
-  - blocked_by: `T-010`
-  - Output: health transition module + contract tests
-  - Gates: state transition tests pass
-- [ ] T-013 (P1) [US-003] v4 title resolver を reusable 化して handshake title priority 実装
-  - blocked_by: `T-010`
-  - Output: handshake-aware title resolver + UI snapshot tests
-  - Gates: canonical session title priority tests pass
-- [ ] T-030 (P2) [US-001] codex appserver source server 実装
-  - blocked_by: `T-010`
-  - Output: `source.pull_events` for codex
-  - Gates: `just preflight-online` + `just test-source-codex` + contract/integration tests
-- [ ] T-031 (P2) [US-001] claude hooks source server 実装
-  - blocked_by: `T-010`
-  - Output: `source.pull_events` for claude hooks
-  - Gates: `just preflight-online` + `just test-source-claude` + contract/integration tests
-- [ ] T-032 (P2) [US-002] poller fallback server（v4再利用）実装
-  - blocked_by: `T-011`
-  - Output: poller source server + fallback tests
-  - Gates: `just test-source-poller` + poller regression + fallback tests
-- [ ] T-033 (P2) [US-002][US-005] poller baseline の再測定指標を確定
-  - blocked_by: `T-032`
-  - Output: v5 fallback quality spec（固定 dataset >=300 windows、weighted F1 >=0.85、waiting recall >=0.85）
-  - Gates: spec review + fixture固定 + gate command で閾値判定 PASS
-- [ ] T-040 (P2) [US-004] gateway basic aggregation/cursor/health 実装
-  - blocked_by: `T-030,T-031,T-032`
-  - Output: `gateway.pull_events`, `list_source_health`, single committed cursor progression
-  - Gates: source multi-integration tests + crash/restart replay tests
-- [ ] T-044 (P1/P3) [US-003] pane signature classifier v1 実装
-  - blocked_by: `T-020`
-  - Output: deterministic/heuristic/none classifier, heuristic weights（1.00/0.86/0.78/0.66）, title-only guard
-  - Gates: unit tests（deterministic fields / title-only reject / wrapper guard）+ replay parity
-- [ ] T-045 (P3) [US-003] signature hysteresis/no-agent demotion 実装
-  - blocked_by: `T-044`
-  - Output: idle stability `max(4s,2*interval)`, running promote 8s, running demote 45s, no-agent連続2回降格
-  - Gates: integration tests（flap suppression, no-agent demotion, deterministic優先維持）
-- [ ] T-050 (P3) [US-003] daemon v5 projection + client API
-  - blocked_by: `T-020,T-040`
-  - Output: `list_panes/list_sessions/state_changed/summary_changed`
-  - Gates: integration tests + snapshot checks
-- [ ] T-042 (P3) [US-003] pane-first binding state machine（MVP slice）実装
-  - blocked_by: `T-044,T-050`
-  - Output: `pane_instance` identity, generation更新, grace window handling, representative pane selection
-  - Gates: pane reuse/migration integration tests + title representative determinism tests
-- [ ] T-046 (P3) [US-003] signature fields API 露出
-  - blocked_by: `T-044,T-050`
-  - Output: `signature_class`, `signature_reason`, `signature_confidence`, compact `signature_inputs`
-  - Gates: API contract tests + snapshot tests
-- [ ] T-060 (P4) [US-003] supervisor + UI semantics (`agents` / unmanaged badge)
-  - blocked_by: `T-030,T-031,T-032,T-050`
-  - Output: startup/restart/shutdown behavior, UI labels
-  - Gates: UX regression tests
-
-### Post-MVP Backlog (Phase 3+; non-blocking for Phase 1-2)
-- [ ] T-041 (P2/P3) [US-004] cursor contract hardening（ack進行 + invalid_cursor復旧）
-  - blocked_by: `T-040`
-  - Output: fetched/committed two-watermark, safe rewind（10m/10,000 events）, invalid_cursor streak/full-resync
-  - Gates: ack/idempotency tests + rewind recovery tests
-- [ ] T-043 (P3) [US-004] latency window instrumentation/SLO gate 実装
-  - blocked_by: `T-040,T-050`
-  - Output: rolling 10m p95 evaluator（min 200 events）, degraded alerts
-  - Gates: 3連続 breach degraded tests
-- [ ] T-047 (P2/P3) [US-004] UDS trust admission guard 実装
-  - blocked_by: `T-040`
-  - Output: peer uid check, source registry check, runtime nonce check
-  - Gates: contract tests（peer_uid mismatch / registry miss / nonce mismatch）
-- [ ] T-048 (P2/P3) [US-004] source.hello + registry lifecycle 実装
-  - blocked_by: `T-047`
-  - Output: source handshake API, lifecycle（pending/active/stale/revoked）, protocol mismatch reject
-  - Gates: lifecycle tests + socket rotation/revoke tests
-- [ ] T-049 (P3) [US-003][US-005] snapshot/restore 基盤 実装
-  - blocked_by: `T-050`
-  - Output: periodic/shutdown snapshot metadata, restore dry-run checker
-  - Gates: restore dry-run tests + snapshot age assertions
-- [ ] T-051 (P4) [US-005] observability alert routing 実装
-  - blocked_by: `T-043,T-050`
-  - Output: warn/degraded/escalate routing + diagnostics hooks + alert ledger sink
-  - Gates: alert simulation tests + resolve policy tests
-- [ ] T-052 (P4) [US-005] supervisor strict runtime contract 実装
-  - blocked_by: `T-060`
-  - Output: dependency readiness gate, exponential backoff, failure budget, hold-down
-  - Gates: dependency-unready tests + hold-down/escalate tests
-- [ ] T-053 (P3) [US-003] binding projection の並行更新制御 実装
-  - blocked_by: `T-042,T-050`
-  - Output: single-writer projection, `state_version` CAS, CAS conflict retry
-  - Gates: concurrent event integration tests + rollback防止 tests
-- [ ] T-070 (P5) [US-005] migration/canary/rollback runbook
-  - blocked_by: `T-060`
-  - Output: operator docs + rollback dry-run evidence
-  - Gates: canary gate checklist
-- [ ] T-071 (P5) [US-005] backup/restore runbook
-  - blocked_by: `T-049`
-  - Output: snapshot cadence, restore手順, 失敗時エスカレーション運用
-  - Gates: restore dry-run evidence + review verdict `GO` 以上
+- [ ] (none)
 
 ## DOING
 - [ ] (none)
@@ -130,6 +23,78 @@
 - [ ] (none)
 
 ## DONE (keep short)
+- [x] T-107 (P1) [MVP] Detection accuracy + activity_state display
+  - Evidence: Capture-based 4th detection signal (WEIGHT_POLLER_MATCH=0.78), stale title suppression (title-only + shell + no capture → None), per-pane activity_state + provider in list-panes output. Codex+Claude parallel review adopted (capture tokens tightened: `╭ Claude Code`/`codex>`, shell list expanded: nu/pwsh/tcsh/csh, capture_match wired through payload→poller_match, provider as Option, changed condition updated). `just verify` PASS (525 tests = 514 existing + 11 new).
+- [x] T-106 (P1) test strategy + quality gates for runtime crates
+  - Evidence: FakeTmuxBackend (mock TmuxCommandRunner) + 12 poll_tick integration tests + 4 build_pane_list unit tests = 16 new runtime tests. E2E smoke script (`just test-e2e-status`). `just verify` PASS (514 tests). `just test-e2e-status` PASS with live tmux.
+- [x] T-105 (P1) CLI polish: tmux-status, socket targeting, --poll-interval-ms
+  - Evidence: `agtmux tmux-status` outputs `A:4 U:13`. `--tmux-socket`, `AGTMUX_TMUX_SOCKET_PATH/NAME` env supported. `--poll-interval-ms` configurable.
+- [x] T-104 (P0) UDS JSON-RPC server + client CLI
+  - Evidence: UDS server (connection-per-request, dir 0700, socket 0600, stale cleanup). `agtmux status` connects and prints pane info. 3 methods: list_panes, list_sessions, list_source_health.
+- [x] T-103 (P0) poll loop: tmux -> poller -> gateway -> daemon pipeline
+  - Evidence: poll_loop.rs wires tmux → poller → gateway → daemon. Unmanaged panes tracked via last_panes + build_pane_list merge. Error recovery (log+skip on capture failure).
+- [x] T-102 (P0) runtime skeleton: binary + CLI + daemon + logging
+  - Evidence: `agtmux` binary with clap CLI (daemon/status/list-panes/tmux-status). tracing + tracing-subscriber. Signal handling (ctrl_c). `just verify` PASS with 8 crates.
+- [x] T-101b (P0) agtmux-tmux-v5: capture + inspection + conversion + generation
+  - Evidence: capture_pane, inspect_pane_processes, PaneGenerationTracker (5 tests), to_pane_snapshot (3 tests). cargo test -p agtmux-tmux-v5 PASS.
+- [x] T-101a (P0) agtmux-tmux-v5: executor + list_panes parser
+  - Evidence: TmuxCommandRunner trait, TmuxExecutor, tab-delimited list_panes parser (10 tests), TmuxPaneInfo, TmuxError (thiserror). cargo test -p agtmux-tmux-v5 PASS.
+- [x] T-100a (P0) cursor contract fix: sources always return current position
+  - Evidence: 3 sources fixed to always return `Some(current_pos)`. Gateway always overwrites tracker cursor. 2 new no-re-delivery tests added. 471 tests pass.
+- [x] T-100 (P0) docs: runtime integration design
+  - Evidence: 20_spec.md, 30_architecture.md (C-015/C-016 + MVP topology), 40_design.md (Section 9), 50_plan.md, 60_tasks.md, 90_index.md updated. ADR-20260225-mvp-single-process-runtime.md created. Codex + Opus review adopted.
+- [x] T-033 (P2) poller baseline quality spec
+  - Evidence: `docs/poller-baseline-spec.md` + `accuracy.rs` 12 tests + fixture 320 windows + `just poller-gate` PASS
+- [x] T-041 (P2/P3) cursor contract hardening
+  - Evidence: 18 tests pass, two-watermark + safe rewind + invalid cursor streak/resync
+- [x] T-043 (P3) latency window SLO gate
+  - Evidence: 15 tests pass, rolling p95 + breach counting + degraded alert
+- [x] T-047 (P2/P3) UDS trust admission guard
+  - Evidence: 15 tests pass, peer uid + source registry + nonce check
+- [x] T-048 (P2/P3) source.hello + registry lifecycle
+  - Evidence: 18 tests pass, 4-state lifecycle + hello handshake + staleness + socket rotation
+- [x] T-049 (P3) snapshot/restore 基盤
+  - Evidence: 15 tests pass, snapshot manager + policy + restore dry-run checker
+- [x] T-051 (P4) observability alert routing
+  - Evidence: 16 tests pass, severity-leveled alert ledger + auto-resolve + policy enforcement
+- [x] T-052 (P4) supervisor strict runtime contract
+  - Evidence: 18 tests pass, DependencyGate + FailureBudget + HoldDownTimer
+- [x] T-053 (P3) binding projection 並行更新制御
+  - Evidence: 15 tests pass, single-writer + CAS + conflict retry + rollback prevention
+- [x] T-070 (P5) migration/canary/rollback runbook
+  - Evidence: `docs/runbooks/migration-canary-rollback.md` + RP-T070
+- [x] T-071 (P5) backup/restore runbook
+  - Evidence: `docs/runbooks/backup-restore.md` + RP-T071
+- [x] T-010 (P0) v5 crate/workspace skeleton
+  - Evidence: 6 crates, `just verify` pass
+- [x] T-020 (P1) tier resolver + unit/replay
+  - Evidence: 35 resolver tests pass, dedup/freshness/rank suppression/re-promotion
+- [x] T-011 (P1) poller logic reusable crate
+  - Evidence: detect + evidence modules, 24 tests pass
+- [x] T-012 (P1) source health FSM
+  - Evidence: 31 health transition tests pass, 6-state FSM
+- [x] T-013 (P1) title resolver + handshake priority
+  - Evidence: 25 title tests pass, 5-tier priority + canonical session
+- [x] T-030 (P2) codex appserver source server
+  - Evidence: 10 tests pass, translate + source + cursor + health
+- [x] T-031 (P2) claude hooks source server
+  - Evidence: 11 tests pass, translate + source + cursor clamp fix
+- [x] T-032 (P2) poller fallback server
+  - Evidence: 40 tests pass, detection + evidence + pagination
+- [x] T-040 (P2) gateway aggregation/cursor/health
+  - Evidence: 23 tests pass, multi-source merge + cursor + health tracking
+- [x] T-044 (P1/P3) pane signature classifier v1
+  - Evidence: 27 tests pass, deterministic/heuristic/none + weights + guardrails
+- [x] T-045 (P3) signature hysteresis/no-agent demotion
+  - Evidence: 25 tests pass, idle/running/demotion windows + flap suppression
+- [x] T-042 (P3) pane-first binding state machine
+  - Evidence: 34 tests pass, 4-state FSM + generation tracking + tombstone grace + representative selection
+- [x] T-050 (P3) daemon v5 projection + client API
+  - Evidence: 25 tests pass, list_panes/list_sessions/changes_since + resolver integration
+- [x] T-046 (P3) signature fields API exposure
+  - Evidence: 9 new tests (34 total daemon), classifier integration + API contract + snapshot tests
+- [x] T-060 (P4) supervisor + UI semantics
+  - Evidence: 19 tests pass, restart backoff/holddown + startup order + UI labels (agents/unmanaged)
 - [x] T-034 (P2) [US-001][US-004] source-specific test scripts を整備
   - Evidence: `scripts/tests/test-source-{codex,claude,poller}.sh` を追加し、`just preflight-online` / `just test-source-*` を実行
   - Notes: testは `/tmp/agtmux-e2e-*` の隔離git workspaceで実行し、完了時に tmux session/workspace/process を cleanup

@@ -6,6 +6,37 @@
 
 ---
 
+## 2026-02-26
+### Current objective
+- T-107: Detection accuracy + activity_state display (MVP)
+
+### What changed (and why)
+- **Capture-based detection (4th signal)**: `PaneMeta.capture_lines` + `ProviderDetectDef.capture_tokens` + `DetectResult.capture_match` を追加し、`detect()` で capture content をスキャンする第4シグナル (WEIGHT_POLLER_MATCH=0.78) を実装。
+- **Capture tokens tightened (review adoption)**: `╭` → `╭ Claude Code` (lazygit/btop 等の TUI と衝突回避)、bare `codex` 削除 → `codex>` のみ (git log 等での偽陽性回避)。
+- **Stale title suppression**: title_match のみ + shell cmd + no capture → `None`。Shell list: zsh/bash/fish/sh/dash/nu/pwsh/tcsh/csh。Case-insensitive + basename 抽出。
+- **Per-pane activity_state + provider**: `PaneRuntimeState` に `activity_state: ActivityState` + `provider: Option<Provider>` 追加。`project_pane()` で投影。`changed` 条件に追加。
+- **capture_match → poller_match 配線**: payload に `capture_match` を追加、`extract_signature_inputs()` で OR 合成。
+- **list-panes 出力拡張**: `build_pane_list()` に `activity_state` + `provider` フィールド追加。
+- **docs 更新**: 40_design.md (Detection Accuracy Hardening 更新)、60_tasks.md (T-107 DONE)。
+
+### Review
+- **Claude review (GO_WITH_CONDITIONS)**: 9 findings. High: capture token specificity (F1), payload data flow gap (F4). Adopted: F1, F2, F3, F4, F5, F7, F8. Deferred: F6 (provider hysteresis → post-MVP), F9 (capture_only_guard → depends on token specificity).
+- **Codex review**: 6 findings. All aligned with Claude review. Extra finding: `changed` condition must include activity_state/provider — adopted.
+- **Decision**: 2/2 GO (both reviewers completed). All High findings addressed in implementation.
+
+### Evidence / Gates
+- Tests: `just verify` PASS (525 tests = 514 existing + 11 new)
+  - detect.rs: +9 tests (capture_match_claude, capture_match_codex, stale_title_shell_suppressed, stale_title_with_path_shell, stale_title_case_insensitive_shell, title_and_capture_corroborated, stale_title_not_suppressed_with_capture, cmd_basename_normalization, known_shells_list)
+  - source.rs: +2 tests (poll_pane_capture_match_node_cmd, poll_pane_stale_title_shell_suppressed)
+- Lint: `cargo clippy --all-targets` PASS
+- Format: `cargo fmt --check` PASS
+
+### Next
+- E2E verification: `agtmux daemon` + `agtmux list-panes` で実環境確認
+- Waiting on user? no
+
+---
+
 ## 2026-02-25
 ### Current objective
 - v5 blueprint 用 docs を、テンプレ準拠の構造 (`00`〜`90`) で再編し、v4実装知見を反映する。
@@ -398,3 +429,102 @@
 - Next action:
   - `MVP Track` の依存順に T-010 -> T-020 -> T-030/T-031/T-032 -> T-040 -> T-050 で実装着手
 - Waiting on user? no
+
+---
+
+## 2026-02-25
+### Current objective
+- 全 MVP タスク完了後のランタイム統合: pure logic crate を実際に動く CLI にする。
+
+### What changed (and why)
+- `20_spec.md` に MVP runtime policy を追加（single-process, spawn_blocking, in-memory, UDS 0700）。
+- `30_architecture.md` に C-015（agtmux-tmux-v5）、C-016（agtmux-runtime）コンポーネントと Runtime Topology (MVP) を追加。
+- `40_design.md` に Section 9「Runtime Integration (MVP)」を新設。tmux crate 設計、poll loop、cursor contract fix、memory management、UDS JSON-RPC server、CLI subcommands、signal handling、logging 仕様を固定。
+- `50_plan.md` Phase 2 deliverables/exit criteria に runtime integration を追加。
+- `60_tasks.md` に T-100〜T-106（runtime integration タスク群）を追加。
+- `80_decisions/ADR-20260225-mvp-single-process-runtime.md` を新規作成。
+- `90_index.md` に runtime integration 導線と ADR 参照を追加。
+- Codex + Opus subagent の plan review を実施し、以下を採択:
+  - (High) cursor re-delivery bug fix (T-100a)
+  - (High) unmanaged pane visibility via synthetic events (T-103)
+  - (High) 3-layer test strategy (T-106)
+  - (Medium) memory compaction、signal handling、logging、socket security、pane generation tracking、v4 pattern reuse 等
+
+### Evidence / Gates
+- User decision:
+  - 2026-02-25 ユーザー要求（「実際にCLIを動かせるところまで進めたい」「docsを正としたい」）
+- Review:
+  - Codex review: 6 findings (2 High, 4 Medium) → 全採択
+  - Opus subagent review: 25 findings (3 High, 15 Medium, 7 Low) → High/Medium 全採択
+- Tests:
+  - 未実行（本作業は docs 更新のみ）
+
+### Learnings (repo-specific)
+- 既存 source の `next_cursor` は caught up 時に `None` を返す設計だが、gateway は `Some` 時のみ cursor 更新するため、runtime 統合時に re-delivery loop が発生する。T-100a で先行修正が必要。
+- poller は非 agent pane に対してイベントを生成しないため、daemon は unmanaged pane を追跡できない。poll loop で synthetic event 生成が必要。
+- 単一プロセスでも 1s polling × pane数 でメモリが単調増加するため、MVP でも最小 compaction が必須。
+
+### Next
+- Next action:
+  - T-100 DONE（本セッション）→ T-100a cursor contract fix → T-101a tmux crate 着手
+- Waiting on user? no
+
+---
+
+## 2026-02-26
+### Current objective
+- CLI 実稼働（T-100a ～ T-105 完了）
+
+### Completed
+- **T-100a**: cursor contract fix — 3 sources が caught up 時も `Some(current_pos)` を返すよう修正。Gateway は常に cursor を上書き。2 新テスト追加。471 tests pass.
+- **T-101a**: `agtmux-tmux-v5` crate 新規作成 — TmuxCommandRunner trait (mock-injectable), TmuxExecutor (sync subprocess), tab-delimited list_panes parser, TmuxPaneInfo, TmuxError (thiserror). 10 parser unit tests.
+- **T-101b**: capture_pane, inspect_pane_processes, PaneGenerationTracker, to_pane_snapshot. 13 tests.
+- **T-102**: `agtmux-runtime` crate 新規作成 — `[[bin]] name="agtmux"`, clap derive CLI (daemon/status/list-panes/tmux-status), tracing + tracing-subscriber (AGTMUX_LOG env), signal handling (ctrl_c).
+- **T-103**: poll loop — tmux → poller → gateway → daemon pipeline. unmanaged pane tracking via last_panes + build_pane_list merge. Error recovery (log+skip on capture failure).
+- **T-104**: UDS JSON-RPC server — UnixListener (connection-per-request), socket dir 0700 + file 0600, stale socket detection. 3 methods: list_panes, list_sessions, list_source_health. Client CLI.
+- **T-105**: CLI polish — tmux-status single-line output (`A:4 U:13`), socket targeting (--tmux-socket, AGTMUX_TMUX_SOCKET_PATH/NAME env), --poll-interval-ms.
+
+### Key decisions
+- Tab-delimited format string (instead of v4 colon-delimited) — avoids complex right-split parser for colons in pane_title.
+- Unmanaged pane tracking via `last_panes` + `build_pane_list` merge (instead of synthetic events to daemon) — cleaner because daemon projection's resolver/tier logic doesn't apply to unmanaged panes.
+- `default_socket_path()` uses `$XDG_RUNTIME_DIR` or `$USER` instead of libc getuid — avoids external dependency.
+
+### Gate evidence
+- `just verify` PASS — 498 tests, 0 failures, fmt + clippy (strict) + test.
+- E2E smoke: `agtmux daemon` starts, polls 17 live tmux panes (4 agents, 13 unmanaged). `agtmux status` / `list-panes` / `tmux-status` all connect and display data.
+- Workspace: 8 crates (6 lib + 1 tmux-io + 1 runtime bin).
+
+### Learnings
+- `gen` is a reserved keyword in Rust edition 2024 — must use `generation` or `r#gen`.
+- `Arc<TmuxExecutor>` + `Arc::clone` for each `spawn_blocking` call is the clean pattern for sharing sync executors across async tasks.
+
+### Next
+- T-106 (P1) test strategy + quality gates for runtime crates
+- Waiting on user? no
+
+---
+
+## 2026-02-26 (cont.)
+### Current objective
+- T-106: test strategy + quality gates for runtime crates
+
+### Completed
+- **T-106**: runtime test strategy implemented
+  - Refactored `poll_tick`/`run_poll_loop` to generic `R: TmuxCommandRunner + 'static` (was concrete `TmuxExecutor`)
+  - Created `FakeTmuxBackend` implementing `TmuxCommandRunner` with configurable list-panes output, per-pane capture data, error injection
+  - 12 integration tests in poll_loop.rs: claude/codex agent detection, unmanaged pane tracking, mixed agents+unmanaged, empty tmux, list-panes failure, capture failure recovery, gateway cursor, no-redelivery, generation tracker, large batch (20 panes), multiple sessions
+  - 4 unit tests in server.rs for `build_pane_list`: empty state, all unmanaged, managed+unmanaged merge, no-duplicate for managed pane
+  - E2E smoke script: `scripts/tests/test-e2e-status.sh` (start daemon → wait socket → run status → verify output + tmux-status pattern)
+  - justfile: `test-e2e-status`, `run-daemon`, `run-status` recipes added
+
+### Gate evidence
+- `just verify` PASS — 514 tests (up from 498), 0 failures
+- `just test-e2e-status` PASS — daemon starts, status returns `Panes: 17 total (4 agents, 13 unmanaged)`, tmux-status returns `A:4 U:13`
+
+### Learnings
+- `PanePresence::Unmanaged` serializes to lowercase `"unmanaged"` (serde default), not `"Unmanaged"`
+- UDS server `set_permissions` on socket parent dir fails if parent is `/tmp/` (no ownership) — E2E test socket path must include a dedicated subdirectory
+
+### Summary
+- All MVP tasks (T-100 through T-106) complete. CLI runs, 514 tests pass, E2E smoke verified.
+- Waiting on user? yes — next steps (post-MVP hardening, persistence, multi-process extraction)

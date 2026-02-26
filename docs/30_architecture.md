@@ -44,6 +44,11 @@
   - SLO window判定、alert発火、snapshot/restore 実行状態を管理
 - C-014 `[Post-MVP]`: `source registry manager`（logical component）
   - source endpoint の登録/失効/復帰（`pending/active/stale/revoked`）を管理
+- C-015 `[MVP]`: `agtmux-tmux-v5`
+  - tmux backend IO（subprocess executor, pane listing, capture, process inspection, pane generation tracking）。Pure IO boundary, no business logic.
+- C-016 `[MVP]`: `agtmux-runtime`
+  - single binary runtime wiring all MVP components. Contains CLI, async poll loop, UDS JSON-RPC server.
+  - MVP runs as single process; multi-process extraction is Post-MVP.
 
 ## Data Flow (key flows)
 - Flow-001 `[MVP]`: 新規 agent session 起動（managed + deterministic）
@@ -104,6 +109,21 @@
 
 source-* --pull--> gateway --pull--> daemon --push--> clients
 ```
+
+### Runtime Topology (MVP — single process)
+```
+[agtmux-runtime (single binary, `agtmux`)]
+  |- agtmux-tmux-v5 (IO: list-panes, capture-pane, ps hints, pane generation tracker)
+  |- agtmux-source-poller (logic: PaneSnapshot -> SourceEventV2)
+  |- agtmux-gateway (logic: source aggregation -> daemon pull)
+  |- agtmux-daemon-v5 (logic: projection -> list_panes/list_sessions/changes_since)
+  '- UDS JSON-RPC server (list_panes, list_sessions, list_source_health)
+         |
+     [CLI client: agtmux status / agtmux list-panes / agtmux tmux-status]
+```
+- MVP は全コンポーネントを単一プロセス内で直結（in-process function call）。
+- UDS JSON-RPC は CLI client ↔ daemon 間のみ。コンポーネント間 IPC は Post-MVP。
+- Initial bootstrap は poller-only。deterministic source IO adapter は post-bootstrap で追加。
 
 ## Storage / State
 - Section gate:

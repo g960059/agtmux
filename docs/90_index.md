@@ -50,6 +50,12 @@
   - `docs/20_spec.md` (FR-018〜FR-020, FR-034〜FR-047)
   - `docs/40_design.md` (Appendix)
 
+## Where to find X (continued)
+- Runtime integration (MVP single-process):
+  - `docs/40_design.md` (Main -> 9) Runtime Integration)
+  - `docs/30_architecture.md` (C-015, C-016, Runtime Topology MVP)
+  - `docs/80_decisions/ADR-20260225-mvp-single-process-runtime.md`
+
 ## Decisions
 - `docs/80_decisions/ADR-2026-02-25-v5-mvp-source-policy.md`
 - `docs/80_decisions/ADR-20260225-cursor-binding-latency.md`
@@ -57,6 +63,7 @@
 - `docs/80_decisions/ADR-20260225-operational-guards.md`
 - `docs/80_decisions/ADR-20260225-runtime-control-contracts.md`
 - `docs/80_decisions/ADR-20260225-core-first-mode-b.md`
+- `docs/80_decisions/ADR-20260225-mvp-single-process-runtime.md`
 
 ## How to run (local-first)
 - quality gates:

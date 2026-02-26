@@ -167,6 +167,11 @@
   - test/quality の実行入口は root `justfile` に集約する（内部で strict cargo flags を維持）
   - v4 の provider TOML・fixtures・accuracy gate 定義を再利用する
   - tmux backend は既存機能互換（socket指定/環境変数解決含む）
+- MVP runtime policy:
+  - MVP runtime は single-process binary（multi-process extraction は Post-MVP）
+  - tmux integration は sync subprocess calls を `spawn_blocking` で wrap して使用
+  - State は MVP で in-memory only（SQLite persistence は Post-MVP）
+  - UDS socket directory は mode `0700` + per-UID path isolation を MVP から適用
 - Compatibility policy:
   - 原則「最小 fallback」。互換維持は `status/tui/tmux-status` の主要体験を優先。
   - 破壊的変更は ADR + migration note 必須。

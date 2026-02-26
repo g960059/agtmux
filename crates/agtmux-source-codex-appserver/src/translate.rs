@@ -1,0 +1,138 @@
+//! Translates raw Codex appserver lifecycle events into [`SourceEventV2`].
+
+use agtmux_core_v5::types::{EvidenceTier, Provider, SourceEventV2, SourceKind};
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+
+/// Raw Codex lifecycle event (as received from Codex CLI local API).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CodexRawEvent {
+    /// Unique event ID from Codex.
+    pub id: String,
+    /// Event type: "session.start", "session.end", "task.running", "task.idle", "task.error".
+    pub event_type: String,
+    /// Session identifier.
+    pub session_id: String,
+    /// Timestamp when the event occurred.
+    pub timestamp: DateTime<Utc>,
+    /// Optional pane ID (from Codex session metadata).
+    pub pane_id: Option<String>,
+    /// Arbitrary payload data.
+    pub payload: serde_json::Value,
+}
+
+/// Translate a single Codex raw event to a [`SourceEventV2`].
+///
+/// Translation rules:
+/// - `provider` = [`Provider::Codex`]
+/// - `source_kind` = [`SourceKind::CodexAppserver`]
+/// - `tier` = [`EvidenceTier::Deterministic`]
+/// - `event_id` = `"codex-app-{raw.id}"`
+/// - `session_key` = `raw.session_id`
+/// - `observed_at` = `raw.timestamp`
+/// - `event_type` = `raw.event_type`
+/// - `confidence` = `1.0` (deterministic source)
+/// - `pane_id` = `raw.pane_id`
+pub fn translate(raw: &CodexRawEvent) -> SourceEventV2 {
+    SourceEventV2 {
+        event_id: format!("codex-app-{}", raw.id),
+        provider: Provider::Codex,
+        source_kind: SourceKind::CodexAppserver,
+        tier: EvidenceTier::Deterministic,
+        observed_at: raw.timestamp,
+        session_key: raw.session_id.clone(),
+        pane_id: raw.pane_id.clone(),
+        pane_generation: None,
+        pane_birth_ts: None,
+        source_event_id: Some(raw.id.clone()),
+        event_type: raw.event_type.clone(),
+        payload: raw.payload.clone(),
+        confidence: 1.0,
+    }
+}
+
+/// Translate a batch of raw events, assigning sequential event IDs.
+///
+/// Each translated event retains its own `event_id` derived from the raw event;
+/// `cursor_offset` is provided for caller bookkeeping but does not alter the
+/// event IDs (the source server uses it for cursor tracking).
+pub fn translate_batch(raw_events: &[CodexRawEvent], _cursor_offset: u64) -> Vec<SourceEventV2> {
+    raw_events.iter().map(translate).collect()
+}
+
+// ─── Tests ────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn make_raw(id: &str, event_type: &str, pane_id: Option<&str>) -> CodexRawEvent {
+        CodexRawEvent {
+            id: id.to_string(),
+            event_type: event_type.to_string(),
+            session_id: "sess-abc".to_string(),
+            timestamp: Utc::now(),
+            pane_id: pane_id.map(String::from),
+            payload: json!({"key": "value"}),
+        }
+    }
+
+    #[test]
+    fn single_event_translation_correctness() {
+        let raw = make_raw("evt-1", "session.start", Some("%1"));
+        let translated = translate(&raw);
+
+        assert_eq!(translated.event_id, "codex-app-evt-1");
+        assert_eq!(translated.provider, Provider::Codex);
+        assert_eq!(translated.source_kind, SourceKind::CodexAppserver);
+        assert_eq!(translated.tier, EvidenceTier::Deterministic);
+        assert_eq!(translated.session_key, "sess-abc");
+        assert_eq!(translated.observed_at, raw.timestamp);
+        assert_eq!(translated.event_type, "session.start");
+        assert!((translated.confidence - 1.0).abs() < f64::EPSILON);
+        assert_eq!(translated.pane_id, Some("%1".to_string()));
+        assert_eq!(translated.source_event_id, Some("evt-1".to_string()));
+        assert_eq!(translated.payload, json!({"key": "value"}));
+        assert!(translated.pane_generation.is_none());
+        assert!(translated.pane_birth_ts.is_none());
+    }
+
+    #[test]
+    fn batch_translation_with_cursor_offset() {
+        let events = vec![
+            make_raw("a1", "session.start", Some("%1")),
+            make_raw("a2", "task.running", Some("%2")),
+            make_raw("a3", "session.end", None),
+        ];
+        let batch = translate_batch(&events, 42);
+        assert_eq!(batch.len(), 3);
+        assert_eq!(batch[0].event_id, "codex-app-a1");
+        assert_eq!(batch[1].event_id, "codex-app-a2");
+        assert_eq!(batch[2].event_id, "codex-app-a3");
+    }
+
+    #[test]
+    fn event_type_preservation() {
+        let types = [
+            "session.start",
+            "session.end",
+            "task.running",
+            "task.idle",
+            "task.error",
+        ];
+        for ty in types {
+            let raw = make_raw("x", ty, None);
+            let translated = translate(&raw);
+            assert_eq!(translated.event_type, ty);
+        }
+    }
+
+    #[test]
+    fn deterministic_tier_and_confidence() {
+        let raw = make_raw("d1", "task.running", None);
+        let translated = translate(&raw);
+        assert_eq!(translated.tier, EvidenceTier::Deterministic);
+        assert!((translated.confidence - 1.0).abs() < f64::EPSILON);
+    }
+}

@@ -245,6 +245,117 @@ pub struct SourceCursorState {
   - deterministic: weighted F1 >= 0.88
   - poller fallback: weighted F1 >= 0.85 and waiting recall >= 0.85
 
+### 9) Runtime Integration (MVP)
+
+#### Architecture
+- MVP は single-process binary (`agtmux`) で全コンポーネントを in-process 結合する。
+- コンポーネント間 UDS は使わず直接関数呼び出し:
+  `tmux-v5 -> poller.poll_batch() -> poller.pull_events() -> gateway.ingest_source_response() -> gateway.pull_events() -> daemon.apply_events()`
+- UDS JSON-RPC server は CLI client 通信にのみ使用する。
+- Multi-process extraction（supervisor + 5 child processes per C-001）は Post-MVP。
+- Initial bootstrap は poller-only。Codex/Claude deterministic source adapter は health 表示用に登録するが、IO adapter 実装までイベントは生成しない。
+
+#### tmux Integration (`agtmux-tmux-v5`)
+- `TmuxCommandRunner` trait: mock injection 可能なテスト境界（v4 パターンを移植）
+- `TmuxExecutor`: sync `std::process::Command` wrapper（`TmuxCommandRunner` を実装）
+  - Socket targeting 優先順: `--tmux-socket` > `AGTMUX_TMUX_SOCKET_PATH` > `AGTMUX_TMUX_SOCKET_NAME` > `TMUX` env > default
+- `list_panes()`: `tmux list-panes -a -F` を v4 format string で parse
+  - `Vec<TmuxPaneInfo>` を返す（session_name, window_id, window_name, current_path, width, height, active 等の full metadata）
+- `capture_pane()`: `tmux capture-pane -p -t {pane_id} -S -{lines}` を wrap
+- `inspect_pane_processes()`: ps ベースの provider hint 抽出（claude/codex in argv）
+- `PaneGenerationTracker`: `pane_id -> (generation, birth_ts)` を追跡し、pane 再利用時に generation をインクリメント
+- `to_pane_snapshot()`: TmuxPaneInfo + capture + process_hint + generation -> `PaneSnapshot` に変換
+- `tokio::task::spawn_blocking` 経由で呼び出し（sync subprocess）
+- Error handling: `TmuxError`（`thiserror`）; 個別 capture 失敗は log + skip
+
+#### Poll Loop
+- `tokio::time::interval(Duration::from_millis(poll_ms))`（default 1000ms, `--poll-interval-ms` で設定可能）
+- 毎 tick:
+  1. `spawn_blocking(|| tmux.list_panes())` — 失敗時: warning log, tick skip, continue
+  2. 各 pane: `spawn_blocking(|| tmux.capture_pane(pane_id, 50))` — 失敗時: pane skip
+  3. 各 pane: `spawn_blocking(|| inspect_pane_processes(pane_id))`
+  4. `Vec<PaneSnapshot>` を `to_pane_snapshot()` で構築（generation tracking 付き）
+  5. `poller.poll_batch(&snapshots)` — agent pane はイベント生成
+  6. non-agent pane（`poll_pane` が None）: synthetic "unmanaged" event を生成し daemon が全 pane を追跡（FR-009）
+  7. `poller.pull_events(&request, now)` -> `PullEventsResponse`
+  8. `gateway.ingest_source_response(SourceKind::Poller, response)`
+  9. `gateway.pull_events(&gw_request)` -> `GatewayPullResponse`
+  10. `daemon.apply_events(gw_response.events, now)` — `Vec<>` ownership move
+  11. Compact: poller buffer trim, gateway committed cursor advance, daemon change log trim
+
+#### Cursor Contract Fix（事前要件）
+- 現行バグ: source は caught up 時に `next_cursor: None` を返すが、gateway は `Some` の時のみ cursor 更新する。結果、毎 tick 同じイベントが再配信される。
+- Fix: source は caught up 時も現在位置を `Some(cursor)` として返す。gateway は常に tracker cursor を上書きする。
+
+#### Memory Management (MVP)
+- Poll loop は daemon apply 後に毎回 compact する:
+  - Poller: 処理済みイベントを buffer から除去
+  - Gateway: committed cursor を advance し buffer prefix を truncate
+  - Daemon: 最終 serve 済み version より古い changes を trim
+- Compaction なしでは 1s polling で pane あたり ~3.6K events/hour → 数時間で OOM。
+
+#### UDS JSON-RPC Server
+- Socket path: `/tmp/agtmux-$UID/agtmuxd.sock`（default, `--socket-path` で override 可）
+- Directory: mode `0700` で作成; socket file は mode `0600`
+- Stale socket detection: startup 時に connect 試行; 失敗なら remove して rebind
+- Cleanup: graceful shutdown 時に socket file を remove
+- Protocol: newline-delimited JSON（1行1 JSON object）, connection-per-request
+- Minimal hand-rolled 実装（jsonrpc-core 依存なし）; 3 method のみ
+- Methods:
+  - `list_panes` -> serialized `Vec<PaneRuntimeState>`
+  - `list_sessions` -> serialized `Vec<SessionRuntimeState>`
+  - `list_source_health` -> serialized `Vec<(SourceKind, SourceHealthReport)>`
+
+#### CLI Subcommands
+- 全 subcommand が `--socket-path` (`-s`) を受け付ける（default `/tmp/agtmux-$UID/agtmuxd.sock`）
+- `agtmux daemon` — daemon 起動（poll loop + UDS server, foreground）
+  - `--poll-interval-ms`（default 1000）
+  - `--tmux-socket`（tmux backend socket path）
+- `agtmux status` — UDS 接続して summary 表示（pane count, agent count, source health）
+- `agtmux list-panes` — UDS 接続して pane states 表示（JSON or table）
+- `agtmux tmux-status` — tmux status-bar 用 single-line output
+
+#### Signal Handling
+- `tokio::signal::ctrl_c()` + SIGTERM を `tokio::select!` で処理
+- Signal 受信時: poll loop 停止 → UDS listener close → socket file remove → exit 0
+
+#### Logging
+- `tracing` + `tracing-subscriber`（`AGTMUX_LOG` / `RUST_LOG` env var）
+- Default: daemon mode は `info`、CLI client mode は `warn`
+
+#### Persistence
+- MVP: in-memory only。daemon restart 時は projection を scratch から再構築。
+- SQLite persistence は Post-MVP。
+
+#### Detection Accuracy Hardening (MVP)
+
+##### 問題
+Poller のヒューリスティック検出は `pane_title` / `current_cmd` / `process_hint` の3シグナルのみで判定するため:
+1. **偽陽性**: tmux の `pane_title` は agent 終了後も残存 → stale title が検出を誤発火
+2. **偽陰性**: Claude Code / Codex は `current_cmd = "node"` で動作し、`pane_title` もエージェント名を含まない場合がある
+
+##### Capture-based detection (第4シグナル)
+- `PaneMeta` に `capture_lines: Vec<String>` を追加し、`detect()` で capture 内容を provider-specific tokens でスキャン
+- Weight: `WEIGHT_POLLER_MATCH` (0.78) — title_match (0.66) より高く、cmd_match (0.86) より低い
+- MVP capture tokens（レビュー採択: 偽陽性低減のため十分に specific なトークンを使用）:
+  - Claude: `["claude code", "╭ Claude Code"]`（bare `╭` は lazygit/btop 等の TUI と衝突するため不採用）
+  - Codex: `["codex>"]`（bare `codex` は git log 等で偽陽性のため不採用）
+- `ProviderDetectDef` に `capture_tokens: &'static [&'static str]` を追加
+- `DetectResult` に `capture_match: bool` を追加し、event payload に `"capture_match"` として伝搬
+- `extract_signature_inputs()` で payload の `capture_match` を読み取り `poller_match` に OR 合成
+
+##### Stale title 抑制
+- title_match のみ（process_hint/cmd_match/capture_match いずれも false）かつ `current_cmd` が shell の場合、検出結果を `None` に抑制
+- Shell list: `zsh`/`bash`/`fish`/`sh`/`dash`/`nu`/`pwsh`/`tcsh`/`csh`/`ksh`/`ash`（レビュー採択: nushell/PowerShell Core/tcsh/ksh/ash 追加）
+- 比較は case-insensitive + basename 抽出 + login-shell prefix 除去（`/usr/local/bin/fish` → `fish`, `-zsh` → `zsh`）
+- Rationale: 実際にエージェントが動いている場合は capture content にエージェント固有パターンが出るため、title_match + shell cmd のみでは stale title の可能性が高い
+
+##### Per-pane activity_state + provider
+- `PaneRuntimeState` に `activity_state: ActivityState` と `provider: Option<Provider>` を追加（レビュー採択: Option で unmanaged pane の "未検出" を表現）
+- `project_pane()` で `event.event_type` → `parse_activity_state()` で投影
+- `list_panes` API 応答に `activity_state` と `provider` フィールドを追加
+- 既存の session-level activity_state に加え、pane-level でも Running/Idle/WaitingApproval 等が参照可能に
+
 ## Appendix (Post-MVP Hardening; non-blocking for Phase 1-2)
 
 ### A1) Cursor two-watermark + ack delivery

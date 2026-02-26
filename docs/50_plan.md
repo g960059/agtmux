@@ -27,7 +27,7 @@
   - signature classifier（weights/guard/hysteresis）が PASS
   - related stories: US-001, US-002
 
-## Phase 2: MVP Runtime Path (sources + gateway + daemon)
+## Phase 2: MVP Runtime Path (sources + gateway + daemon + runtime)
 - Deliverables:
   - `agtmux-source-codex-appserver`
   - `agtmux-source-claude-hooks`
@@ -35,10 +35,17 @@
   - gateway basic pull aggregation（single committed cursor）
   - daemon projection + client API (`list_panes/list_sessions/state_changed/summary_changed`)
   - pane-first binding basic flow + handshake title priority
+  - Cursor contract fix（source は caught up 時も `Some(cursor)` を返す）
+  - `agtmux-tmux-v5` crate（tmux IO boundary + pane generation tracking）
+  - `agtmux-runtime` binary crate（CLI + daemon + UDS server）
+  - Poll loop wiring: tmux -> poller -> gateway -> daemon（unmanaged pane tracking + compaction 付き）
 - Exit criteria:
   - provider priority/suppress/fallback integration tests PASS
   - codex/claude online tests は `just preflight-online` 後に PASS
   - poller fallback quality gate (`weighted F1>=0.85`, `waiting recall>=0.85`) PASS
+  - `agtmux daemon` starts, polls tmux, populates projection（managed + unmanaged panes）
+  - `agtmux status` connects via UDS and displays pane/session info
+  - `just verify` passes with all 8 crates
   - related stories: US-001, US-002, US-003, US-004
 
 ## Phase 3: Hardening Wave 1 (only if needed)
