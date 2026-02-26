@@ -7,10 +7,25 @@
 4. `docs/40_design.md` (`Main (MVP Slice)` のみ読む)
 5. `docs/50_plan.md` (Phase 1-2)
 
-## Hardening Later (Post-MVP)
+## Phase 3 Hardening (COMPLETE — 585 tests)
+- `docs/50_plan.md` (Phase 3 section)
+- `docs/60_tasks.md` (T-115〜T-118 DONE)
+- `docs/70_progress.md` (Phase 3 plan, Codex review, implementation records)
+- Wired into runtime: LatencyWindow, CursorWatermarks, SourceRegistry, TrustGuard (warn-only)
+
+## Codex App Server Integration (T-113a — 597 tests)
+- **API reference (MUST READ before Codex work)**: `docs/codex-appserver-api-reference.md`
+- **Design/implementation strategy**: `docs/40_design.md` (Section 9 → Codex App Server Integration)
+- `docs/60_tasks.md` (T-113a DONE, T-119 TODO)
+- `docs/70_progress.md` (implementation records)
+- Primary: `CodexAppServerClient` (JSON-RPC 2.0 over stdio, `codex app-server`)
+- Fallback: capture-based NDJSON extraction from `codex exec --json` output
+- External API ref: https://developers.openai.com/codex/app-server/
+
+## Hardening Later (Post-MVP Phase 4+)
 - `docs/20_spec.md` の `[Post-MVP]` FR
 - `docs/40_design.md` の `Appendix (Post-MVP Hardening)`
-- `docs/60_tasks.md` の `Post-MVP Backlog`
+- TrustGuard enforce mode, persistence, multi-process extraction
 
 ## Entry points
 - Docs router: `docs/00_router.md`

@@ -231,6 +231,8 @@ pub struct PaneRuntimeState {
     pub activity_state: ActivityState,
     /// Detected provider for this pane (None if unmanaged or not yet determined).
     pub provider: Option<Provider>,
+    /// Session key that owns this pane (for title resolution and session lookup).
+    pub session_key: String,
     pub updated_at: DateTime<Utc>,
 }
 

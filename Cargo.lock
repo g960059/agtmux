@@ -38,6 +38,8 @@ dependencies = [
  "agtmux-core-v5",
  "agtmux-daemon-v5",
  "agtmux-gateway",
+ "agtmux-source-claude-hooks",
+ "agtmux-source-codex-appserver",
  "agtmux-source-poller",
  "agtmux-tmux-v5",
  "anyhow",

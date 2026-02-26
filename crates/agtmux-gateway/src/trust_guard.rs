@@ -97,6 +97,16 @@ impl TrustGuard {
         self.runtime_nonce = new_nonce;
     }
 
+    /// Get the runtime nonce.
+    pub fn nonce(&self) -> &str {
+        &self.runtime_nonce
+    }
+
+    /// Get the expected peer UID.
+    pub fn expected_uid(&self) -> u32 {
+        self.expected_uid
+    }
+
     /// Full admission check: peer_uid → registry → nonce.
     ///
     /// Checks are short-circuit: first failing check returns immediately.

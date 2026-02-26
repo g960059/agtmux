@@ -7,8 +7,11 @@ use clap::Parser;
 
 mod cli;
 mod client;
+#[allow(dead_code)] // Skeleton module — wired into poll_tick once Codex protocol is finalized
+mod codex_poller;
 mod poll_loop;
 mod server;
+mod setup_hooks;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -39,6 +42,10 @@ async fn main() -> anyhow::Result<()> {
         cli::Command::TmuxStatus => {
             let socket_path = args.socket_path.unwrap_or_else(cli::default_socket_path);
             client::cmd_tmux_status(&socket_path).await?;
+        }
+        cli::Command::SetupHooks(opts) => {
+            let path = setup_hooks::apply_hooks(&opts)?;
+            println!("hooks written to {}", path.display());
         }
     }
 

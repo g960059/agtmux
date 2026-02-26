@@ -13,6 +13,8 @@ resolver = "2"
 
 [workspace.dependencies]
 agtmux-core-v5 = { path = "crates/agtmux-core-v5" }
+agtmux-source-codex-appserver = { path = "crates/agtmux-source-codex-appserver" }
+agtmux-source-claude-hooks = { path = "crates/agtmux-source-claude-hooks" }
 agtmux-source-poller = { path = "crates/agtmux-source-poller" }
 agtmux-gateway = { path = "crates/agtmux-gateway" }
 agtmux-daemon-v5 = { path = "crates/agtmux-daemon-v5" }
@@ -20,8 +22,8 @@ agtmux-tmux-v5 = { path = "crates/agtmux-tmux-v5" }
 chrono = { version = "0.4", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "net", "signal", "sync", "time", "macros", "io-util"] }
-clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "signal", "sync", "time", "macros", "io-util", "process"] }
+clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2"

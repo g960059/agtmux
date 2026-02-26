@@ -8,6 +8,253 @@
 
 ## 2026-02-26 (cont.)
 ### Current objective
+- Codex App Server 公式 API ドキュメントの永続化
+
+### Completed
+- **Codex API reference 永続化**: コンパクション時に公式 API 情報が失われ、独自実装に逸脱する問題を解決
+  - `docs/codex-appserver-api-reference.md` 新規作成: 公式 API の全メソッド・通知・スキーマ・実装方針・既知問題を記録
+  - `docs/40_design.md`: Codex App Server Integration セクション追加 (architecture diagram, primary/fallback path, poll_tick Step 6a)
+  - `docs/00_router.md`: External API References セクション追加 (Codex 実装時の必読指示)
+  - `docs/90_index.md`: API reference への導線追加
+  - `CLAUDE.md`: Codex API reference 必読指示追加
+  - 調査で判明した現実装の問題点: `jsonrpc: "2.0"` フィールド欠落、`used_appserver` フラグバグ、再接続なし
+
+### Key decisions
+- 公式 API 仕様は `docs/codex-appserver-api-reference.md` に永続化し、コンパクション耐性を確保する
+- 独自プロトコルの新規実装は禁止。capture fallback は既存のみ維持。
+
+---
+
+## 2026-02-26 (cont.)
+### Current objective
+- T-119: Codex App Server → pane_id correlation
+
+### Completed
+- **T-119**: pane_id correlation via per-cwd `thread/list` queries
+  - `PaneCwdInfo` struct: pane_id, cwd, generation, birth_ts, has_codex_hint
+  - `build_cwd_pane_map()`: deduplicates by cwd, Codex process_hint wins disambiguation
+  - `poll_threads(&[PaneCwdInfo])`: issues per-cwd `thread/list` requests with API `cwd` filter param
+  - `CodexRawEvent` extended with `pane_generation`/`pane_birth_ts` fields, passthrough in `translate()`
+  - poll_loop builds PaneCwdInfo from `last_panes` + `generation_tracker` + `snapshots`
+  - `FakeTmuxBackend.with_pane_cwd()` for testing with specific pane cwds
+  - 5 new tests: 4 cwd map disambiguation + 1 translate passthrough
+  - `just verify` PASS (599 tests)
+
+---
+
+## 2026-02-26 (cont.)
+### Current objective
+- T-120: Codex App Server protocol fix + reliability hardening
+
+### Completed
+- **T-120**: Protocol compliance + reliability + health propagation (B1-B6, C1)
+  - **B1**: `"jsonrpc": "2.0"` on all outgoing messages (initialize, initialized, thread/list)
+  - **B2**: `"params": {}` on initialized notification, `"capabilities": {}` on initialize
+  - **B3**: `used_appserver` flag based on `is_alive()` not event count → no spurious capture fallback
+  - **B4**: Reconnection with exponential backoff (`2^min(failures,6)` ticks). `codex_appserver_had_connection` flag ensures poll_tick only reconnects previously-alive clients; initial spawn happens in `run_daemon`.
+  - **B5**: `poll_threads()` called outside mutex (take/put pattern) → DaemonState lock not held during 5s timeout
+  - **B6**: `CodexSourceState.set_appserver_connected(bool)` → health `Healthy` (connected) / `Degraded` (capture fallback)
+  - **C1**: Deleted `discover_appserver`, `poll_codex_appserver`, `CodexPollerConfig`, `--codex-appserver-addr` CLI option (5 legacy tests removed)
+  - **Protocol fixes**: `result.data` (not `.threads`), `status.type` (object format), `updated_at` (not `lastUpdated`), thread/status/changed handles both object and string status
+  - **Files**: `codex_poller.rs`, `poll_loop.rs`, `cli.rs`, `source.rs` (codex-appserver)
+  - **Tests**: 594 total (net -3 from 597: -5 legacy + 1 split→2 + 1 health test)
+  - `just verify` PASS
+
+---
+
+## 2026-02-26 (cont.)
+### Current objective
+- Phase 3b: Codex App Server 実働線の計画策定 (T-120, T-119)
+
+### 計画内容
+
+現状の Codex App Server → CLI パイプラインを調査し、以下の問題を特定:
+
+**実働線が機能しない根本原因**: App Server から取得した thread event に `pane_id` が設定されない → daemon の `project_pane()` がスキップされる → Codex pane は poller heuristic のまま CLI に表示される。
+
+**Protocol/Reliability bugs (T-120)**:
+- B1: `"jsonrpc": "2.0"` フィールドが全メッセージに欠落 (仕様違反)
+- B2: `initialized` notification に `"params": {}` 未設定
+- B3: `used_appserver` フラグが events.is_empty() で判定 → idle 時に不要な capture fallback
+- B4: App Server プロセス終了後の再接続なし
+- B5: `poll_threads().await` 中に DaemonState mutex 保持 (5s timeout で全 API ブロック)
+- B6: `codex_source` が常に Healthy を返す (App Server 死亡を検知不能)
+- C1: legacy dead code (`discover_appserver`, `poll_codex_appserver`) が混乱の元
+
+**Feature gap (T-119)**:
+- `thread/list` response の `cwd` と tmux pane の `current_path` をマッチングし `pane_id` を付与
+- `pane_generation` + `pane_birth_ts` も PaneGenerationTracker から取得して設定
+- マッチング戦略: cwd 正規化比較、複数 pane は Codex process hint 優先、複数 thread は active 優先
+
+**実装順序**: T-120 (protocol fix) → T-119 (pane correlation)
+**Exit criteria**: `agtmux list-panes` で Codex pane が `signature_class: deterministic` 表示
+
+### Docs updated
+- `40_design.md`: pane_id correlation 設計追加、マッチング戦略記述
+- `50_plan.md`: Phase 3b 追加
+- `60_tasks.md`: T-120 新規、T-119 スコープ更新 (P2→P1、blocked_by T-120)
+
+---
+
+## 2026-02-26 (cont.)
+### Current objective
+- T-113a: Codex App Server integration (deterministic evidence from official API)
+
+### Completed
+- **T-113a**: Codex App Server integration: stdio client + capture fallback
+  - **Primary path**: `CodexAppServerClient` in `codex_poller.rs`.
+    - Spawns `codex app-server` as child process with stdio transport.
+    - JSON-RPC 2.0 handshake: `initialize` → response → `initialized` notification.
+    - `poll_threads()`: calls `thread/list` (limit=50, sorted by lastUpdated), emits events for status changes.
+    - Notification translation: `turn/started` → `turn.started`, `turn/completed` → `turn.{status}`, `thread/status/changed` → `thread.{status}`.
+    - Timeout: spawn 10s, poll 5s, notification drain 10ms.
+    - Graceful degradation: if `codex` binary not found or handshake fails → `None`, capture fallback activates.
+    - API reference: https://developers.openai.com/codex/app-server/
+  - **Fallback path**: `parse_codex_capture_events()` + `CodexCaptureTracker`.
+    - Parses NDJSON from tmux capture lines for `codex exec --json` output.
+    - Content-based fingerprint dedup (`std::hash::DefaultHasher`) prevents re-ingestion across ticks.
+    - `retain_panes()` cleans up departed pane tracking.
+  - **poll_tick Step 6a integration**: tries app-server first (`poll_threads`), falls back to capture if app-server unavailable or returns no events.
+  - **DaemonState additions**: `codex_appserver_client: Option<CodexAppServerClient>`, `codex_capture_tracker: CodexCaptureTracker`.
+  - **tokio "process" feature** added to workspace Cargo.toml.
+  - 12 new tests: 4 notification parsing, 1 app-server spawn graceful, 4 capture parsing, 3 poll_loop integration.
+  - `just verify` PASS — 597 tests.
+
+### Design note: Codex App Server API
+The Codex App Server (https://developers.openai.com/codex/app-server/) provides JSON-RPC 2.0 over stdio/WebSocket:
+- **Transport**: stdio (default, newline-delimited JSON) / WebSocket (experimental)
+- **Handshake**: `initialize` → `initialized`
+- **Key methods**: `thread/list`, `thread/read`, `turn/start`, `turn/interrupt`
+- **Notifications**: `turn/started`, `turn/completed`, `thread/status/changed`, item events
+- **Thread runtime status**: notLoaded, idle, systemError, active
+- Future: WebSocket connection to external app-server for richer IDE integration.
+
+### Gate evidence
+- `just verify` PASS — 597 tests, 0 failures, fmt + clippy clean
+
+### Next
+- T-119: Codex App Server → pane_id correlation (thread.cwd ↔ tmux pane cwd matching)
+- Waiting on user? yes — commit / 次のフェーズ決定
+
+---
+
+## 2026-02-26 (cont.)
+### Current objective
+- Phase 3: Post-MVP Hardening — Wire pure-logic crates into runtime (T-115〜T-118)
+
+### Plan (Codex plan review: Go with changes, confidence Medium)
+
+Implementation order: T-118 → T-116 → T-117 → T-115 ("observability first" + "lifecycle before admission")
+
+| Task | Module | Key change | Tests |
+|------|--------|------------|-------|
+| T-118 | LatencyWindow | poll_tick SLO evaluation + `latency_status` API + path escaping fix | 5 |
+| T-116 | CursorWatermarks | gateway cursor pipeline (advance_fetched/commit via watermarks) | 4 |
+| T-117 | SourceRegistry | source.hello/heartbeat/staleness + list_source_registry API | 6 |
+| T-115 | TrustGuard | UDS admission gate (warn-only) + daemon.info + source.ingest schema extension | 5 |
+
+Codex review findings (all adopted):
+- **F1 [Critical]**: source.ingest payload lacks source_id/nonce → schema extended with optional fields, fallback to source_kind
+- **F2 [High]**: T-115 admission before T-117 registry → reordered (registry first)
+- **F3 [High]**: Gateway 0-fallback → InvalidCursorTracker fires on runtime parse failure only (defensive)
+- **F4 [High]**: evaluate(&mut self) → cache `last_latency_eval` in DaemonState, API returns cached value
+- **F5 [Medium]**: path escaping only spaces → `shell_quote()` handles quotes/backslashes
+
+### Completed
+- **T-118**: LatencyWindow → poll tick metrics + path escaping fix (F2/F4/F5)
+  - `DaemonState` に `latency_window: LatencyWindow` + `last_latency_eval: Option<LatencyEvaluation>` 追加。
+  - poll_tick Step 12: `tick_start.elapsed()` → `record()` → `evaluate()` → breach/degraded logging → cached eval。
+  - `latency_status` JSON-RPC method: cached `last_latency_eval` を返す (read-only, evaluate() を呼ばない)。
+  - `shell_quote()`: 空白/引用符/バックスラッシュを含むパスを single-quote エスケープ。
+  - 5 new tests (2 poll_loop latency, 1 server latency_status, 2 setup_hooks escaping)。
+
+- **T-116**: CursorWatermarks → gateway cursor pipeline
+  - `DaemonState` に `cursor_watermarks: CursorWatermarks` + `invalid_cursor_tracker: InvalidCursorTracker` 追加。
+  - poll_tick Step 9a: gateway `next_cursor` → `parse_gw_cursor()` → `advance_fetched()` + `record_valid()`。NonMonotonic → `record_invalid()` → RetryFromCommitted/FullResync 回復。
+  - poll_tick Step 11a: commit_cursor 前に `cursor_watermarks.commit()` で committed 追跡。
+  - 4 new tests (advance, commit_equals_fetched, monotonic, caught_up)。
+
+- **T-117**: SourceRegistry → connection lifecycle
+  - `DaemonState` に `source_registry: SourceRegistry` 追加。
+  - `source.hello` JSON-RPC: protocol version check → `handle_hello()` → Accepted/Rejected。
+  - `source.heartbeat` JSON-RPC: `heartbeat(source_id, now_ms)` → `{acknowledged: bool}`。
+  - `list_source_registry` JSON-RPC: serialized entries。
+  - poll_tick Step 11b: `check_staleness(now_ms)` → stale source logging。
+  - 6 new tests (hello accepted/rejected, heartbeat ack/unknown, staleness, list_registry)。
+
+- **T-115**: TrustGuard → UDS admission gate (warn-only)
+  - `DaemonState` に `trust_guard: TrustGuard` 追加。初期化: UID via `getuid()`, nonce=`{PID}-{nanos}`, 3 sources pre-registered (poller/codex_appserver/claude_hooks)。
+  - `source.ingest` に warn-only admission gate 追加: `source_id`/`nonce` optional fields、未登録 or nonce 不一致 → `tracing::warn` のみ (Phase 1)。
+  - `daemon.info` JSON-RPC method: nonce + version + pid。
+  - `trust_guard.rs` に `nonce()`/`expected_uid()` accessor 追加。
+  - 5 new tests (admits registered, warns unregistered, warns wrong nonce, daemon.info, pre-register 3)。
+
+### Gate evidence
+- `just verify` PASS — 585 tests, 0 failures, fmt + clippy clean
+- Phase 3 Post-MVP Hardening **complete** (T-118 → T-116 → T-117 → T-115 全 4 タスク完了)
+
+### Key decisions
+- `getuid()` は `unsafe extern "C" { safe fn getuid() -> u32; }` (Rust 2024 edition) で直接呼び出し（libc crate 不要）。
+- TrustGuard は Phase 1 = warn-only。Phase 2 (enforce) は後続タスク。
+- `source.ingest` の `source_id`/`nonce` は optional — 未提供時は `source_kind` フォールバック + nonce check skip。
+
+### Next
+- Phase 3 完了。次のフェーズ: Persistence (SQLite), Multi-process extraction, TrustGuard enforce mode。
+- Waiting on user? yes — commit / 次のフェーズ決定
+
+---
+
+## 2026-02-26 (cont.)
+### Current objective
+- T-111〜T-114: Deterministic source IO adapters + CLI title quality wiring
+
+### Completed
+- **T-111**: DaemonState 拡張 + deterministic source pipeline 配線
+  - codex/claude source crate に `compact()` + `compact_offset` を追加（poller パターン移植）。
+  - `DaemonState` に `codex_source: CodexSourceState`, `claude_source: ClaudeSourceState` 追加。
+  - `poll_tick` に steps 8a/8b (codex/claude pull_events → gateway ingest) + compaction 追加。
+  - Gateway を 3-source (`Poller`, `CodexAppserver`, `ClaudeHooks`) で初期化。
+  - 11 new tests (6 source compact + 5 poll_loop integration)。
+- **T-112**: UDS `source.ingest` エンドポイント + Claude hook adapter
+  - `handle_connection` に `source.ingest` handler 追加（`claude_hooks`/`codex_appserver` dispatch、-32602 error handling）。
+  - `scripts/agtmux-claude-hook.sh`: stdin JSON → jq 整形 → socat UDS 送信（fire-and-forget）。
+  - `agtmux setup-hooks`: `.claude/settings.json` に 5 hook types (PreToolUse/PostToolUse/Notification/Stop/SubagentStop) を生成。
+  - 9 new tests (4 UDS handler + 5 setup_hooks)。
+- **T-113**: Codex appserver poller skeleton
+  - `codex_poller.rs`: `discover_appserver()` (config override > env > well-known), `poll_codex_appserver()` (socket existence check, protocol TBD)。
+  - `--codex-appserver-addr` CLI option (env: `CODEX_APPSERVER_ADDR`)。
+  - 4 tests。Protocol 実装は Codex API ドキュメント確認後に調整。
+- **T-114**: Deterministic session key 配線 + CLI title quality
+  - `PaneRuntimeState` に `session_key: String` フィールド追加。
+  - `build_pane_list()` で `evidence_mode == Deterministic` 時に `deterministic_session_key` を `TitleInput` に渡す → `DeterministicBinding` quality。
+  - `build_summary_changed()` に `deterministic`/`heuristic` カウント追加。
+  - 2 new tests。
+
+### Review (Codex)
+- 2 findings:
+  - **F1 [High] REJECT (false positive)**: Claims `if let Ok(addr) = std::env::var(...) && !addr.is_empty()` doesn't compile — but this is valid Rust 2024 let chains syntax. `just verify` passes with 565 tests, confirming compilation.
+  - **F2 [Medium] DEFER**: `generate_hooks_config` doesn't quote/escape script paths with spaces. Low risk for MVP (standard install paths don't contain spaces). Can address in post-MVP hardening.
+
+### Gate evidence
+- `just verify` PASS — 565 tests, 0 failures, fmt + clippy clean
+
+### Key decisions
+- Deterministic event timestamps must be fresh (< 3s) for resolver to accept them as `Fresh` tier — tests use `Utc::now()` instead of fixed timestamps.
+- `handshake_confirmed` / `canonical_session_name` are Post-MVP (T-042 dependency + provider session file parser needed).
+- Codex appserver protocol is a skeleton — discovery + socket check only, actual polling deferred until Codex API is documented.
+
+### Learnings
+- Rust 2024 edition makes `std::env::set_var`/`remove_var` unsafe — test code cannot manipulate env vars without unsafe blocks.
+- `clap::Arg::env` requires the `"env"` feature flag on the clap dependency.
+
+### Next
+- T-111〜T-114 batch complete. All findings evaluated (1 rejected, 1 deferred).
+- Waiting on user? yes — commit / next tasks
+
+---
+
+## 2026-02-26 (cont.)
+### Current objective
 - T-108: Runtime hardening batch (API completeness, memory compaction, SIGTERM)
 
 ### Completed

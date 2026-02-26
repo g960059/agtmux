@@ -23,6 +23,28 @@
 - [ ] (none)
 
 ## DONE (keep short)
+- [x] T-119 (P1) Codex App Server → pane_id correlation (thread.cwd ↔ tmux pane cwd matching)
+  - Evidence: Per-cwd `thread/list` queries (API `cwd` filter param). `PaneCwdInfo` struct + `build_cwd_pane_map()` for disambiguation (Codex process_hint wins). `CodexRawEvent` extended with `pane_generation`/`pane_birth_ts`, passthrough in `translate()`. `poll_threads()` accepts `&[PaneCwdInfo]`, poll_loop builds from `last_panes`+`generation_tracker`+`snapshots`. `FakeTmuxBackend.with_pane_cwd()` for testing. 5 new tests (4 cwd map + 1 translate passthrough). `just verify` PASS (599 tests).
+- [x] T-120 (P1) Codex App Server protocol fix + reliability hardening
+  - Evidence: B1: `"jsonrpc": "2.0"` on all messages. B2: `"params": {}` on initialized, `"capabilities": {}` on initialize. B3: `used_appserver` based on `is_alive()`. B4: reconnection with exponential backoff (`2^min(failures,6)` ticks), `codex_appserver_had_connection` flag (poll_tick only reconnects dead clients, initial spawn in `run_daemon`). B5: `poll_threads()` outside mutex (take/put pattern). B6: `CodexSourceState.set_appserver_connected()` → health `Healthy`/`Degraded`. C1: deleted `discover_appserver`, `poll_codex_appserver`, `CodexPollerConfig`, `--codex-appserver-addr`. Protocol: `result.data` (not `.threads`), `status.type` (object), `updated_at` (not `lastUpdated`). `just verify` PASS (594 tests).
+- [x] T-113a (P1) [MVP] Codex App Server integration: stdio client + capture fallback
+  - Evidence: `CodexAppServerClient` (JSON-RPC 2.0 over stdio): spawn `codex app-server`, initialize handshake, `thread/list` polling, `turn/started`/`turn/completed`/`thread/status/changed` notification → `CodexRawEvent`. Capture-based fallback: `parse_codex_capture_events()` extracts NDJSON from tmux capture for `codex exec --json` output. `CodexCaptureTracker` for cross-tick dedup. poll_tick Step 6a: app-server (primary) → capture (fallback). API ref: https://developers.openai.com/codex/app-server/. 12 new tests. `just verify` PASS (597 tests).
+- [x] T-118 (P2) [Post-MVP] LatencyWindow → poll tick metrics + path escaping fix
+  - Evidence: `LatencyWindow` + `last_latency_eval` wired into DaemonState. poll_tick Step 12: tick timing → SLO evaluation → breach/degraded logging → cached eval. `latency_status` JSON-RPC method (read-only, Codex F4). `shell_quote()` for path escaping in setup_hooks (Codex F5). 5 new tests. `just verify` PASS (570 tests).
+- [x] T-115 (P2) [Post-MVP] TrustGuard → UDS admission gate (warn-only)
+  - Evidence: `TrustGuard` wired into DaemonState (UID via getuid(), nonce=PID+nanos, 3 sources pre-registered). `source.ingest` schema extended (optional source_id/nonce), warn-only admission (unregistered/nonce mismatch → log, continue). `daemon.info` JSON-RPC method (nonce, version, pid). 5 new tests. `just verify` PASS (585 tests).
+- [x] T-117 (P2) [Post-MVP] SourceRegistry → connection lifecycle
+  - Evidence: `SourceRegistry` wired into DaemonState. `source.hello` (protocol check + lifecycle), `source.heartbeat`, `list_source_registry` JSON-RPC methods. poll_tick Step 11b: staleness check. 6 new tests. `just verify` PASS (580 tests).
+- [x] T-116 (P2) [Post-MVP] CursorWatermarks → gateway cursor pipeline
+  - Evidence: `CursorWatermarks` + `InvalidCursorTracker` wired into DaemonState. Step 9a: `advance_fetched()` on gateway pull → `record_valid()` / recovery (RetryFromCommitted/FullResync). Step 11a: `commit()` on gateway commit_cursor. `parse_gw_cursor()` helper. 4 new tests. `just verify` PASS (574 tests).
+- [x] T-114 (P1) [MVP] Deterministic session key wiring + CLI title quality
+  - Evidence: `PaneRuntimeState.session_key` added, `build_pane_list()` passes `deterministic_session_key` for deterministic panes → `DeterministicBinding` title quality. `summary_changed` includes `deterministic`/`heuristic` counts. 2 new tests. `just verify` PASS (565 tests).
+- [x] T-113 (P1) [MVP] Codex appserver poller skeleton
+  - Evidence: `codex_poller.rs` with `discover_appserver()` (config + env), `poll_codex_appserver()` (socket check, protocol TBD). `--codex-appserver-addr` CLI option (env: `CODEX_APPSERVER_ADDR`). 4 tests. `just verify` PASS (563 tests).
+- [x] T-112 (P1) [MVP] UDS source.ingest + Claude hook adapter + setup-hooks CLI
+  - Evidence: `source.ingest` JSON-RPC handler (claude_hooks, codex_appserver dispatch). `scripts/agtmux-claude-hook.sh` (fire-and-forget, jq+socat). `agtmux setup-hooks` CLI (project/user scope, 5 hook types). 9 new tests (4 server + 5 setup_hooks). `just verify` PASS (558 tests).
+- [x] T-111 (P1) [MVP] DaemonState expansion + deterministic source pipeline wiring
+  - Evidence: codex/claude `compact()` + `compact_offset` added. DaemonState expanded with `codex_source`/`claude_source`. poll_tick steps 8a/8b + compaction. Gateway registers 3 sources. 11 new tests (6 source compact + 5 poll_loop). `just verify` PASS (549 tests).
 - [x] T-110 (P1) [MVP] Push event methods: state_changed + summary_changed
   - Evidence: `state_changed` returns version-based changes with pane/session state. `summary_changed` returns managed/unmanaged counts and change flags. Both accept `since_version` param. 4 new tests. `just verify` PASS (536 tests).
 - [x] T-109 (P1) [MVP] Title resolver wiring into list_panes API

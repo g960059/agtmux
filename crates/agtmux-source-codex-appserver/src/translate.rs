@@ -15,8 +15,12 @@ pub struct CodexRawEvent {
     pub session_id: String,
     /// Timestamp when the event occurred.
     pub timestamp: DateTime<Utc>,
-    /// Optional pane ID (from Codex session metadata).
+    /// Optional pane ID (from cwd correlation or capture source).
     pub pane_id: Option<String>,
+    /// Pane generation (from PaneGenerationTracker, set during cwd correlation).
+    pub pane_generation: Option<u64>,
+    /// Pane birth timestamp (from PaneGenerationTracker, set during cwd correlation).
+    pub pane_birth_ts: Option<DateTime<Utc>>,
     /// Arbitrary payload data.
     pub payload: serde_json::Value,
 }
@@ -42,8 +46,8 @@ pub fn translate(raw: &CodexRawEvent) -> SourceEventV2 {
         observed_at: raw.timestamp,
         session_key: raw.session_id.clone(),
         pane_id: raw.pane_id.clone(),
-        pane_generation: None,
-        pane_birth_ts: None,
+        pane_generation: raw.pane_generation,
+        pane_birth_ts: raw.pane_birth_ts,
         source_event_id: Some(raw.id.clone()),
         event_type: raw.event_type.clone(),
         payload: raw.payload.clone(),
@@ -74,6 +78,8 @@ mod tests {
             session_id: "sess-abc".to_string(),
             timestamp: Utc::now(),
             pane_id: pane_id.map(String::from),
+            pane_generation: None,
+            pane_birth_ts: None,
             payload: json!({"key": "value"}),
         }
     }
@@ -126,6 +132,24 @@ mod tests {
             let translated = translate(&raw);
             assert_eq!(translated.event_type, ty);
         }
+    }
+
+    #[test]
+    fn pane_generation_and_birth_ts_passthrough() {
+        let now = Utc::now();
+        let raw = CodexRawEvent {
+            id: "g1".to_string(),
+            event_type: "thread.active".to_string(),
+            session_id: "thr-1".to_string(),
+            timestamp: now,
+            pane_id: Some("%5".to_string()),
+            pane_generation: Some(3),
+            pane_birth_ts: Some(now),
+            payload: json!({}),
+        };
+        let translated = translate(&raw);
+        assert_eq!(translated.pane_generation, Some(3));
+        assert_eq!(translated.pane_birth_ts, Some(now));
     }
 
     #[test]

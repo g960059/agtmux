@@ -309,6 +309,7 @@ impl DaemonProjection {
             signature_inputs: sig_inputs_compact,
             activity_state: pane_activity_state,
             provider: pane_provider,
+            session_key: event.session_key.clone(),
             updated_at: now,
         };
 

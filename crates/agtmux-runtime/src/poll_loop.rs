@@ -8,9 +8,17 @@ use chrono::Utc;
 use tokio::sync::Mutex;
 use tokio::time::{Duration, interval};
 
-use agtmux_core_v5::types::{GatewayPullRequest, PullEventsRequest, SourceKind};
+use agtmux_core_v5::types::{GatewayPullRequest, Provider, PullEventsRequest, SourceKind};
 use agtmux_daemon_v5::projection::DaemonProjection;
+use agtmux_gateway::cursor_hardening::{
+    CursorRecoveryAction, CursorWatermarks, InvalidCursorTracker,
+};
 use agtmux_gateway::gateway::Gateway;
+use agtmux_gateway::latency_window::{LatencyEvaluation, LatencyWindow};
+use agtmux_gateway::source_registry::SourceRegistry;
+use agtmux_gateway::trust_guard::TrustGuard;
+use agtmux_source_claude_hooks::source::SourceState as ClaudeSourceState;
+use agtmux_source_codex_appserver::source::SourceState as CodexSourceState;
 use agtmux_source_poller::source::{PollerSourceState, poll_pane};
 use agtmux_tmux_v5::{
     PaneGenerationTracker, TmuxCommandRunner, TmuxExecutor, TmuxPaneInfo, capture_pane, list_panes,
@@ -18,28 +26,99 @@ use agtmux_tmux_v5::{
 };
 
 use crate::cli::DaemonOpts;
+use crate::codex_poller::{
+    CodexAppServerClient, CodexCaptureTracker, PaneCwdInfo, parse_codex_capture_events,
+};
 use crate::server;
 
 /// Shared daemon state protected by a mutex.
 pub struct DaemonState {
     pub poller: PollerSourceState,
+    pub codex_source: CodexSourceState,
+    pub claude_source: ClaudeSourceState,
     pub gateway: Gateway,
     pub daemon: DaemonProjection,
     pub generation_tracker: PaneGenerationTracker,
     pub gateway_cursor: Option<String>,
     /// Latest tmux pane list (for unmanaged pane display).
     pub last_panes: Vec<TmuxPaneInfo>,
+    /// UDS trust admission guard (peer UID, source registry, nonce).
+    pub trust_guard: TrustGuard,
+    /// Source connection registry (hello/heartbeat/staleness lifecycle).
+    pub source_registry: SourceRegistry,
+    /// Two-watermark cursor tracking (fetched vs committed) for gateway cursor.
+    pub cursor_watermarks: CursorWatermarks,
+    /// Invalid cursor streak tracker — triggers recovery after consecutive failures.
+    pub invalid_cursor_tracker: InvalidCursorTracker,
+    /// Rolling p95 latency window (SLO: 3000ms = freshness boundary).
+    pub latency_window: LatencyWindow,
+    /// Cached latency evaluation from the last poll_tick (for read-only API access).
+    pub last_latency_eval: Option<LatencyEvaluation>,
+    /// Tracks Codex JSON events already ingested from tmux capture (dedup).
+    pub codex_capture_tracker: CodexCaptureTracker,
+    /// Codex App Server client (JSON-RPC over stdio). `None` if not available.
+    pub codex_appserver_client: Option<CodexAppServerClient>,
+    /// True if App Server was ever connected (triggers reconnection on death).
+    pub codex_appserver_had_connection: bool,
+    /// Consecutive failed reconnection attempts (for exponential backoff).
+    pub codex_reconnect_failures: u32,
 }
 
 impl DaemonState {
     pub fn new() -> Self {
+        // Generate a runtime nonce: PID + monotonic nanoseconds
+        let nonce = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+
+        // Get current process UID for trust guard (UDS peer credential check)
+        #[cfg(unix)]
+        let uid = {
+            // SAFETY: getuid() has no arguments, no side effects, and cannot fail.
+            unsafe extern "C" {
+                safe fn getuid() -> u32;
+            }
+            getuid()
+        };
+        #[cfg(not(unix))]
+        let uid = 0u32;
+
+        let mut trust_guard = TrustGuard::new(uid, nonce);
+        trust_guard.register_source("poller");
+        trust_guard.register_source("codex_appserver");
+        trust_guard.register_source("claude_hooks");
+
         Self {
             poller: PollerSourceState::new(),
-            gateway: Gateway::with_sources(&[SourceKind::Poller], Utc::now()),
+            codex_source: CodexSourceState::new(),
+            claude_source: ClaudeSourceState::new(),
+            gateway: Gateway::with_sources(
+                &[
+                    SourceKind::Poller,
+                    SourceKind::CodexAppserver,
+                    SourceKind::ClaudeHooks,
+                ],
+                Utc::now(),
+            ),
             daemon: DaemonProjection::new(),
             generation_tracker: PaneGenerationTracker::new(),
             gateway_cursor: None,
             last_panes: Vec::new(),
+            trust_guard,
+            source_registry: SourceRegistry::new(),
+            cursor_watermarks: CursorWatermarks::new(),
+            invalid_cursor_tracker: InvalidCursorTracker::new(),
+            latency_window: LatencyWindow::new(3000),
+            last_latency_eval: None,
+            codex_capture_tracker: CodexCaptureTracker::new(),
+            codex_appserver_client: None, // Spawned asynchronously in run_daemon
+            codex_appserver_had_connection: false,
+            codex_reconnect_failures: 0,
         }
     }
 }
@@ -48,6 +127,18 @@ impl DaemonState {
 pub async fn run_daemon(opts: DaemonOpts, socket_path: &str) -> anyhow::Result<()> {
     let executor = Arc::new(build_executor(&opts));
     let state = Arc::new(Mutex::new(DaemonState::new()));
+
+    // Attempt initial Codex App Server connection.
+    // If codex binary is not found or handshake fails, this is None — fallback path is used.
+    // If connected, set had_connection so poll_tick will reconnect on death.
+    {
+        let client = CodexAppServerClient::spawn().await;
+        let mut st = state.lock().await;
+        if client.is_some() {
+            st.codex_appserver_had_connection = true;
+        }
+        st.codex_appserver_client = client;
+    }
 
     // Start UDS server
     let server_state = Arc::clone(&state);
@@ -119,6 +210,13 @@ fn build_executor(opts: &DaemonOpts) -> TmuxExecutor {
     executor
 }
 
+/// Parse a gateway cursor string `"gw:{position}"` into a numeric position.
+fn parse_gw_cursor(cursor: &str) -> Option<u64> {
+    cursor
+        .strip_prefix("gw:")
+        .and_then(|s| s.parse::<u64>().ok())
+}
+
 async fn run_poll_loop<R: TmuxCommandRunner + 'static>(
     executor: Arc<R>,
     state: Arc<Mutex<DaemonState>>,
@@ -139,6 +237,7 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
     executor: &Arc<R>,
     state: &Arc<Mutex<DaemonState>>,
 ) -> anyhow::Result<()> {
+    let tick_start = std::time::Instant::now();
     let now = Utc::now();
 
     // 1. List panes (blocking subprocess)
@@ -204,6 +303,115 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
         );
     }
 
+    // 6a. Codex deterministic evidence: App Server (primary) or capture extraction (fallback).
+    //
+    // B5 fix: poll_threads() is called OUTSIDE the mutex to avoid blocking
+    // all DaemonState access during the 5s App Server timeout.
+    let appserver_poll_result = {
+        let mut client_taken = st.codex_appserver_client.take();
+        let alive = client_taken.as_mut().is_some_and(|c| c.is_alive());
+        if alive {
+            // T-119: Build pane cwd info for thread ↔ pane correlation
+            let pane_cwds: Vec<PaneCwdInfo> = st
+                .last_panes
+                .iter()
+                .map(|pane| {
+                    let gen_info = st.generation_tracker.get(&pane.pane_id);
+                    let has_codex_hint = snapshots.iter().any(|s| {
+                        s.pane_id == pane.pane_id && s.process_hint.as_deref() == Some("codex")
+                    });
+                    PaneCwdInfo {
+                        pane_id: pane.pane_id.clone(),
+                        cwd: pane.current_path.clone(),
+                        generation: gen_info.map(|(g, _)| g),
+                        birth_ts: gen_info.map(|(_, ts)| ts),
+                        has_codex_hint,
+                    }
+                })
+                .collect();
+
+            // Release mutex before async I/O
+            drop(st);
+            let events = if let Some(ref mut client) = client_taken {
+                client.poll_threads(&pane_cwds).await
+            } else {
+                Vec::new()
+            };
+            st = state.lock().await;
+            st.codex_appserver_client = client_taken;
+            st.codex_reconnect_failures = 0; // connection healthy
+            Some(events)
+        } else if client_taken.is_some() || st.codex_appserver_had_connection {
+            // Process exited — attempt reconnection with exponential backoff (B4)
+            tracing::info!("codex app-server process exited, attempting reconnect");
+            drop(client_taken); // drop dead process
+            let backoff_ticks = 2u32.saturating_pow(st.codex_reconnect_failures.min(6)); // max ~64 ticks
+            if st.codex_reconnect_failures == 0 || st.codex_reconnect_failures % backoff_ticks == 0
+            {
+                drop(st);
+                let new_client = CodexAppServerClient::spawn().await;
+                st = state.lock().await;
+                if new_client.is_some() {
+                    tracing::info!("codex app-server reconnected");
+                    st.codex_reconnect_failures = 0;
+                    st.codex_appserver_had_connection = true;
+                } else {
+                    st.codex_reconnect_failures = st.codex_reconnect_failures.saturating_add(1);
+                }
+                st.codex_appserver_client = new_client;
+            } else {
+                st.codex_reconnect_failures = st.codex_reconnect_failures.saturating_add(1);
+                st.codex_appserver_client = None;
+            }
+            None // no events this tick
+        } else {
+            // No client ever connected and none was established by run_daemon.
+            // poll_tick does NOT attempt initial spawn — that's run_daemon's job.
+            // This avoids spawning codex in tests or when the binary is unavailable.
+            None
+        }
+    };
+
+    // B3 fix: used_appserver is true when client is alive (regardless of event count)
+    let used_appserver = appserver_poll_result.is_some();
+    if let Some(events) = appserver_poll_result {
+        if !events.is_empty() {
+            tracing::debug!("codex app-server: {} events from thread/list", events.len());
+            for event in events {
+                st.codex_source.ingest(event);
+            }
+        }
+    }
+
+    // Fallback: parse Codex NDJSON from tmux capture text (only when App Server unavailable)
+    if !used_appserver {
+        let active_pane_ids: Vec<&str> = panes.iter().map(|p| p.pane_id.as_str()).collect();
+        st.codex_capture_tracker.retain_panes(&active_pane_ids);
+
+        for snapshot in &snapshots {
+            if let Some(result) = poll_pane(snapshot)
+                && result.provider == Provider::Codex
+            {
+                let new_events = parse_codex_capture_events(
+                    &snapshot.capture_lines,
+                    &snapshot.pane_id,
+                    &mut st.codex_capture_tracker,
+                );
+                for event in new_events {
+                    tracing::debug!(
+                        "codex capture event: {} (pane={})",
+                        event.event_type,
+                        snapshot.pane_id
+                    );
+                    st.codex_source.ingest(event);
+                }
+            }
+        }
+    }
+
+    // B6: propagate App Server connectivity to codex source health
+    st.codex_source.set_appserver_connected(used_appserver);
+
     // 7. Pull events from poller
     let poller_cursor = st
         .gateway
@@ -219,6 +427,36 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
     st.gateway
         .ingest_source_response(SourceKind::Poller, poller_response);
 
+    // 8a. Pull events from codex source (populated via source.ingest UDS)
+    let codex_cursor = st
+        .gateway
+        .source_cursor(SourceKind::CodexAppserver)
+        .map(String::from);
+    let codex_response = st.codex_source.pull_events(
+        &PullEventsRequest {
+            cursor: codex_cursor,
+            limit: 500,
+        },
+        now,
+    );
+    st.gateway
+        .ingest_source_response(SourceKind::CodexAppserver, codex_response);
+
+    // 8b. Pull events from claude source (populated via source.ingest UDS)
+    let claude_cursor = st
+        .gateway
+        .source_cursor(SourceKind::ClaudeHooks)
+        .map(String::from);
+    let claude_response = st.claude_source.pull_events(
+        &PullEventsRequest {
+            cursor: claude_cursor,
+            limit: 500,
+        },
+        now,
+    );
+    st.gateway
+        .ingest_source_response(SourceKind::ClaudeHooks, claude_response);
+
     // 9. Pull from gateway
     let gw_request = GatewayPullRequest {
         cursor: st.gateway_cursor.clone(),
@@ -226,8 +464,42 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
     };
     let gw_response = st.gateway.pull_events(&gw_request);
 
-    // Update gateway cursor for next tick
-    st.gateway_cursor.clone_from(&gw_response.next_cursor);
+    // 9a. Track fetched position via watermarks
+    if let Some(ref next_cursor) = gw_response.next_cursor
+        && let Some(pos) = parse_gw_cursor(next_cursor)
+    {
+        match st.cursor_watermarks.advance_fetched(pos) {
+            Ok(()) => {
+                st.invalid_cursor_tracker.record_valid();
+            }
+            Err(e) => {
+                tracing::warn!("cursor watermark advance_fetched error: {e}");
+                match st.invalid_cursor_tracker.record_invalid() {
+                    CursorRecoveryAction::RetryFromCommitted => {
+                        let committed = st.cursor_watermarks.committed;
+                        tracing::info!("cursor recovery: retry from committed={committed}");
+                        st.gateway_cursor = if committed > 0 {
+                            Some(format!("gw:{committed}"))
+                        } else {
+                            None
+                        };
+                    }
+                    CursorRecoveryAction::FullResync => {
+                        tracing::error!("cursor recovery: full resync (streak exceeded)");
+                        st.gateway_cursor = None;
+                        st.cursor_watermarks = CursorWatermarks::new();
+                    }
+                }
+                // Skip normal cursor update on error — recovery cursor is already set
+                // Continue to apply any events already pulled
+            }
+        }
+    }
+
+    // Update gateway cursor for next tick (normal path)
+    if st.invalid_cursor_tracker.streak() == 0 {
+        st.gateway_cursor.clone_from(&gw_response.next_cursor);
+    }
 
     // 10. Apply to daemon
     if !gw_response.events.is_empty() {
@@ -243,10 +515,60 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
     {
         st.poller.compact(seq);
     }
+    // Codex: trim events up to the gateway's source cursor.
+    if let Some(codex_cursor) = st.gateway.source_cursor(SourceKind::CodexAppserver)
+        && let Some(seq_str) = codex_cursor.strip_prefix("codex-app:")
+        && let Ok(seq) = seq_str.parse::<u64>()
+    {
+        st.codex_source.compact(seq);
+    }
+    // Claude: trim events up to the gateway's source cursor.
+    if let Some(claude_cursor) = st.gateway.source_cursor(SourceKind::ClaudeHooks)
+        && let Some(seq_str) = claude_cursor.strip_prefix("claude-hooks:")
+        && let Ok(seq) = seq_str.parse::<u64>()
+    {
+        st.claude_source.compact(seq);
+    }
     // Gateway: trim events up to the daemon's committed cursor.
     if let Some(gw_cursor) = st.gateway_cursor.clone() {
+        // 11a. Track committed position via watermarks
+        if let Some(pos) = parse_gw_cursor(&gw_cursor)
+            && let Err(e) = st.cursor_watermarks.commit(pos)
+        {
+            tracing::warn!("cursor watermark commit error: {e}");
+        }
         st.gateway.commit_cursor(&gw_cursor);
     }
+
+    // 11b. Check source staleness
+    let now_ms_staleness = now.timestamp_millis() as u64;
+    let stale_sources = st.source_registry.check_staleness(now_ms_staleness);
+    for source_id in &stale_sources {
+        tracing::warn!("source stale: {source_id}");
+    }
+
+    // 12. Record tick latency and evaluate SLO
+    let tick_ms = tick_start.elapsed().as_millis() as u64;
+    let now_ms = now.timestamp_millis() as u64;
+    st.latency_window.record(tick_ms, now_ms);
+    let eval = st.latency_window.evaluate(now_ms);
+    match &eval {
+        LatencyEvaluation::Breached {
+            p95_ms,
+            consecutive,
+            ..
+        } => {
+            tracing::warn!("SLO breach: p95={p95_ms}ms, consecutive={consecutive}");
+        }
+        LatencyEvaluation::Degraded {
+            p95_ms,
+            consecutive,
+        } => {
+            tracing::error!("SLO DEGRADED: p95={p95_ms}ms, consecutive={consecutive}");
+        }
+        _ => {}
+    }
+    st.last_latency_eval = Some(eval);
 
     Ok(())
 }
@@ -280,10 +602,21 @@ mod tests {
             }
         }
 
-        fn with_pane(mut self, pane_id: &str, session: &str, cmd: &str, capture: &str) -> Self {
+        fn with_pane(self, pane_id: &str, session: &str, cmd: &str, capture: &str) -> Self {
+            self.with_pane_cwd(pane_id, session, cmd, capture, "/home")
+        }
+
+        fn with_pane_cwd(
+            mut self,
+            pane_id: &str,
+            session: &str,
+            cmd: &str,
+            capture: &str,
+            cwd: &str,
+        ) -> Self {
             // Append a list-panes line in tab-delimited format
             let line =
-                format!("$0\t{session}\t@0\tdev\t{pane_id}\t{cmd}\t/home\t{cmd}\t200\t50\t1\t1");
+                format!("$0\t{session}\t@0\tdev\t{pane_id}\t{cmd}\t{cwd}\t{cmd}\t200\t50\t1\t1");
             if !self.list_panes_output.is_empty() {
                 self.list_panes_output.push('\n');
             }
@@ -577,5 +910,362 @@ mod tests {
         let st = state.lock().await;
         let managed = st.daemon.list_panes();
         assert_eq!(managed.len(), 2, "agents from both sessions managed");
+    }
+
+    // ── Deterministic source integration tests ──────────────────────
+
+    #[tokio::test]
+    async fn poll_tick_pulls_from_claude_source() {
+        use agtmux_source_claude_hooks::translate::ClaudeHookEvent;
+
+        let backend = Arc::new(FakeTmuxBackend::new().with_pane("%0", "main", "zsh", "$ ls"));
+        let state = new_state();
+
+        // Pre-ingest a Claude hook event (use Utc::now() so resolver sees it as fresh)
+        {
+            let mut st = state.lock().await;
+            st.claude_source.ingest(ClaudeHookEvent {
+                hook_id: "h-001".to_string(),
+                hook_type: "tool_start".to_string(),
+                session_id: "claude-sess-1".to_string(),
+                timestamp: Utc::now(),
+                pane_id: Some("%0".to_string()),
+                data: serde_json::json!({}),
+            });
+        }
+
+        poll_tick(&backend, &state).await.expect("tick");
+
+        let st = state.lock().await;
+        // The claude hook event should have flowed through gateway to daemon
+        let managed = st.daemon.list_panes();
+        assert!(
+            !managed.is_empty(),
+            "claude hook event should create managed pane"
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_tick_pulls_from_codex_source() {
+        use agtmux_source_codex_appserver::translate::CodexRawEvent;
+
+        let backend = Arc::new(FakeTmuxBackend::new().with_pane("%0", "main", "zsh", "$ ls"));
+        let state = new_state();
+
+        // Pre-ingest a Codex appserver event
+        {
+            let mut st = state.lock().await;
+            st.codex_source.ingest(CodexRawEvent {
+                id: "cx-001".to_string(),
+                event_type: "task.running".to_string(),
+                session_id: "codex-sess-1".to_string(),
+                timestamp: Utc::now(),
+                pane_id: Some("%0".to_string()),
+                pane_generation: None,
+                pane_birth_ts: None,
+                payload: serde_json::json!({}),
+            });
+        }
+
+        poll_tick(&backend, &state).await.expect("tick");
+
+        let st = state.lock().await;
+        let managed = st.daemon.list_panes();
+        assert!(
+            !managed.is_empty(),
+            "codex appserver event should create managed pane"
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_tick_mixed_poller_and_deterministic() {
+        use agtmux_source_claude_hooks::translate::ClaudeHookEvent;
+
+        let backend = Arc::new(
+            FakeTmuxBackend::new()
+                .with_pane("%0", "main", "claude", "╭ Claude Code") // detected by poller
+                .with_pane("%1", "main", "zsh", "$ ls"), // only via hooks
+        );
+        let state = new_state();
+
+        // Pre-ingest a Claude hook event for pane %1 (use Utc::now() for freshness)
+        {
+            let mut st = state.lock().await;
+            st.claude_source.ingest(ClaudeHookEvent {
+                hook_id: "h-002".to_string(),
+                hook_type: "session_start".to_string(),
+                session_id: "claude-sess-2".to_string(),
+                timestamp: Utc::now(),
+                pane_id: Some("%1".to_string()),
+                data: serde_json::json!({}),
+            });
+        }
+
+        poll_tick(&backend, &state).await.expect("tick");
+
+        let st = state.lock().await;
+        let managed = st.daemon.list_panes();
+        // %0 via poller + %1 via hooks = 2 managed panes
+        assert_eq!(
+            managed.len(),
+            2,
+            "both poller and deterministic events should create managed panes"
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_tick_compacts_deterministic_sources() {
+        use agtmux_source_claude_hooks::translate::ClaudeHookEvent;
+
+        let backend = Arc::new(FakeTmuxBackend::new().with_pane("%0", "main", "zsh", "$ ls"));
+        let state = new_state();
+
+        // Pre-ingest events (use Utc::now() for freshness)
+        {
+            let mut st = state.lock().await;
+            let now = Utc::now();
+            for i in 0..3 {
+                st.claude_source.ingest(ClaudeHookEvent {
+                    hook_id: format!("h-{i}"),
+                    hook_type: "tool_start".to_string(),
+                    session_id: "claude-sess-1".to_string(),
+                    timestamp: now,
+                    pane_id: Some("%0".to_string()),
+                    data: serde_json::json!({}),
+                });
+            }
+            assert_eq!(st.claude_source.buffered_len(), 3);
+        }
+
+        // First tick: pulls events and compacts
+        poll_tick(&backend, &state).await.expect("tick 1");
+
+        {
+            let st = state.lock().await;
+            assert_eq!(
+                st.claude_source.buffered_len(),
+                0,
+                "compaction should trim consumed events"
+            );
+        }
+
+        // Second tick: no new events, should be clean
+        poll_tick(&backend, &state).await.expect("tick 2");
+    }
+
+    #[tokio::test]
+    async fn gateway_registers_all_three_sources() {
+        let state = new_state();
+        let st = state.lock().await;
+        let health = st.gateway.list_source_health();
+        assert_eq!(health.len(), 3, "poller + codex + claude registered");
+    }
+
+    // ── T-118: Latency window integration tests ──────────────────────
+
+    #[tokio::test]
+    async fn poll_tick_records_latency_sample() {
+        let backend = Arc::new(FakeTmuxBackend::new().with_pane("%0", "main", "zsh", "$ ls"));
+        let state = new_state();
+
+        poll_tick(&backend, &state).await.expect("tick");
+
+        let st = state.lock().await;
+        assert!(
+            st.latency_window.sample_count() >= 1,
+            "tick should record at least 1 latency sample"
+        );
+        assert!(
+            st.last_latency_eval.is_some(),
+            "tick should cache latency evaluation"
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_tick_latency_accumulates() {
+        let backend = Arc::new(FakeTmuxBackend::new().with_pane("%0", "main", "zsh", "$ ls"));
+        let state = new_state();
+
+        for _ in 0..5 {
+            poll_tick(&backend, &state).await.expect("tick");
+        }
+
+        let st = state.lock().await;
+        assert!(
+            st.latency_window.sample_count() >= 5,
+            "5 ticks should record at least 5 latency samples, got {}",
+            st.latency_window.sample_count()
+        );
+    }
+
+    // ── T-116: Cursor watermarks integration tests ──────────────────
+
+    #[tokio::test]
+    async fn poll_tick_cursor_watermarks_advance_on_events() {
+        let backend = Arc::new(FakeTmuxBackend::new().with_pane(
+            "%0",
+            "main",
+            "claude",
+            "╭ Claude Code\n│ Working...",
+        ));
+        let state = new_state();
+
+        poll_tick(&backend, &state).await.expect("tick");
+
+        let st = state.lock().await;
+        assert!(
+            st.cursor_watermarks.fetched > 0,
+            "fetched watermark should advance after events, got {}",
+            st.cursor_watermarks.fetched
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_tick_cursor_watermarks_commit_after_apply() {
+        let backend = Arc::new(FakeTmuxBackend::new().with_pane(
+            "%0",
+            "main",
+            "claude",
+            "╭ Claude Code\n│ Working...",
+        ));
+        let state = new_state();
+
+        poll_tick(&backend, &state).await.expect("tick");
+
+        let st = state.lock().await;
+        assert_eq!(
+            st.cursor_watermarks.committed, st.cursor_watermarks.fetched,
+            "committed should equal fetched after single tick (all events applied)"
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_tick_cursor_watermarks_monotonic_across_ticks() {
+        let backend = Arc::new(FakeTmuxBackend::new().with_pane(
+            "%0",
+            "main",
+            "claude",
+            "╭ Claude Code\n│ Working...",
+        ));
+        let state = new_state();
+
+        poll_tick(&backend, &state).await.expect("tick 1");
+        let fetched_after_1 = {
+            let st = state.lock().await;
+            st.cursor_watermarks.fetched
+        };
+
+        poll_tick(&backend, &state).await.expect("tick 2");
+        let fetched_after_2 = {
+            let st = state.lock().await;
+            st.cursor_watermarks.fetched
+        };
+
+        assert!(
+            fetched_after_2 >= fetched_after_1,
+            "fetched should be monotonically non-decreasing: {} -> {}",
+            fetched_after_1,
+            fetched_after_2
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_tick_cursor_caught_up_steady_state() {
+        let backend = Arc::new(FakeTmuxBackend::new().with_pane("%0", "main", "zsh", "$ ls"));
+        let state = new_state();
+
+        // Two ticks with no agent events — no gateway events generated
+        poll_tick(&backend, &state).await.expect("tick 1");
+        poll_tick(&backend, &state).await.expect("tick 2");
+
+        let st = state.lock().await;
+        assert!(
+            st.cursor_watermarks.is_caught_up(),
+            "cursor should be caught up in steady state (fetched={}, committed={})",
+            st.cursor_watermarks.fetched,
+            st.cursor_watermarks.committed
+        );
+    }
+
+    // ── Codex capture JSON extraction integration tests ──────────────
+
+    #[tokio::test]
+    async fn poll_tick_codex_json_capture_ingested() {
+        // Codex pane with --json output: NDJSON events visible in capture
+        let backend = Arc::new(FakeTmuxBackend::new().with_pane(
+            "%0",
+            "main",
+            "codex --model o3",
+            "{\"type\":\"message.created\",\"id\":\"m1\"}\n{\"type\":\"turn.completed\",\"id\":\"t1\"}\nwait_result=idle",
+        ));
+        let state = new_state();
+
+        poll_tick(&backend, &state).await.expect("tick");
+
+        let st = state.lock().await;
+        // Codex JSON events should have been parsed from capture and ingested.
+        // Both heuristic (poller) and deterministic (codex_source) evidence
+        // flow through the gateway to the daemon.
+        let managed = st.daemon.list_panes();
+        assert!(
+            !managed.is_empty(),
+            "codex pane with JSON events should be managed"
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_tick_codex_json_dedup_across_ticks() {
+        let backend = Arc::new(FakeTmuxBackend::new().with_pane(
+            "%0",
+            "main",
+            "codex --model o3",
+            "{\"type\":\"turn.completed\",\"id\":\"t1\"}",
+        ));
+        let state = new_state();
+
+        poll_tick(&backend, &state).await.expect("tick 1");
+        let codex_cursor_after_1 = {
+            let st = state.lock().await;
+            st.gateway
+                .source_cursor(SourceKind::CodexAppserver)
+                .map(String::from)
+        };
+
+        poll_tick(&backend, &state).await.expect("tick 2");
+        let codex_cursor_after_2 = {
+            let st = state.lock().await;
+            st.gateway
+                .source_cursor(SourceKind::CodexAppserver)
+                .map(String::from)
+        };
+
+        // Cursor should not advance on the second tick because the same
+        // JSON event was already ingested — dedup prevents re-ingestion.
+        assert_eq!(
+            codex_cursor_after_1, codex_cursor_after_2,
+            "codex source cursor should not advance on duplicate capture"
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_tick_codex_no_json_still_detected_by_poller() {
+        // Codex pane without --json output (no NDJSON in capture)
+        let backend = Arc::new(FakeTmuxBackend::new().with_pane(
+            "%0",
+            "main",
+            "codex --model o3",
+            "Codex is thinking...\nProcessing request...",
+        ));
+        let state = new_state();
+
+        poll_tick(&backend, &state).await.expect("tick");
+
+        let st = state.lock().await;
+        // Poller heuristic should still detect this as a Codex agent pane
+        let managed = st.daemon.list_panes();
+        assert!(
+            !managed.is_empty(),
+            "codex pane without JSON should still be detected by poller"
+        );
     }
 }

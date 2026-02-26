@@ -48,21 +48,38 @@
   - `just verify` passes with all 8 crates
   - related stories: US-001, US-002, US-003, US-004
 
-## Phase 3: Hardening Wave 1 (only if needed)
-- Scope (default deferred):
-  - cursor two-watermark + ack idempotency + retry
-  - invalid_cursor numeric recovery
-  - binding concurrency hardening（single-writer/CAS）
-  - latency rolling-window evaluator
-- Promotion rule:
-  - 実装/運用で再現した課題に紐づくものだけ着手
+## Phase 3: Post-MVP Hardening — Pure-logic crate wiring ✅ COMPLETE
+- Deliverables (all wired into runtime):
+  - T-118: LatencyWindow → poll_tick SLO evaluation + `latency_status` API + path escaping fix
+  - T-116: CursorWatermarks + InvalidCursorTracker → gateway cursor pipeline (advance_fetched/commit + recovery)
+  - T-117: SourceRegistry → `source.hello`/`source.heartbeat`/`list_source_registry` + staleness check
+  - T-115: TrustGuard → UDS admission gate (warn-only) + `daemon.info` + source.ingest schema extension
+- Implementation order: T-118 → T-116 → T-117 → T-115 ("observability first" + "lifecycle before admission")
+- Codex plan review: Go with changes (5 findings, all adopted — see 70_progress.md)
+- Exit criteria:
+  - `just verify` PASS (585 tests = 565 MVP + 20 Phase 3)
+  - 4 pure-logic crates (66 existing tests) wired into runtime with 20 integration tests
+  - TrustGuard warn-only (enforce deferred to Phase 4)
 
-## Phase 4: Hardening Wave 2 (ops/security)
+## Phase 3b: Codex App Server 実働線 ✅ COMPLETE
+- Goal: Codex App Server → CLI の deterministic pane 表示を end-to-end で動作させる
+- Implementation order: T-120 → T-119
+- Deliverables:
+  - T-120: Protocol fix + reliability (jsonrpc compliance, reconnection, mutex fix, health, dead code cleanup)
+  - T-119: pane_id correlation (thread.cwd ↔ tmux pane cwd → pane-level deterministic detection)
+- Exit criteria:
+  - `codex app-server` を起動中に `agtmux list-panes` で Codex pane が `signature_class: deterministic` と表示される
+  - App Server プロセス kill 後、backoff 再接続で自動復旧する
+  - `just verify` PASS
+  - `just test-source-codex` で App Server 経由の evidence flow が確認できる
+
+## Phase 4: Hardening Wave 2 (ops/security) — TODO
 - Scope (default deferred):
-  - UDS trust boundary（peer credential, nonce）
-  - source registry lifecycle（pending/active/stale/revoked）
+  - TrustGuard enforce mode (promote warn-only → -32403 error on rejection)
   - supervisor strict readiness/backoff/hold-down
   - ops guardrail manager + `list_alerts`
+  - Persistence (SQLite) for DaemonState
+  - Multi-process extraction (separate source servers)
 
 ## Phase 5: Migration / Cutover
 - Deliverables:

@@ -56,6 +56,11 @@
 
 #### Deterministic sources (MVP fixed)
 - Codex: `agtmux-source-codex-appserver`
+  - **Protocol**: 公式 Codex App Server API (JSON-RPC 2.0 over stdio)
+  - **API reference**: `docs/codex-appserver-api-reference.md` (実装前に必読)
+  - **Primary path**: `CodexAppServerClient` が `codex app-server` を spawn し、`thread/list` ポーリング + notification 受信
+  - **Fallback path**: App Server 利用不可時のみ、tmux capture から `codex exec --json` の NDJSON を parse
+  - **T-119**: `thread/list` の `cwd` パラメータで tmux pane cwd とマッチングし thread ↔ pane 対応を確立
 - Claude: `agtmux-source-claude-hooks`
 
 #### Reuse strategy (from v4)
@@ -153,8 +158,9 @@ pub struct SourceCursorState {
   4. それ以外は heuristic tier を採用
   5. fresh deterministic 再到達で即時 re-promotion
 - Source rank policy (MVP):
-  - Codex: `appserver > poller`
+  - Codex: `appserver (official API) > capture fallback > poller`
   - Claude: `hooks > poller`
+  - Note: Codex appserver は公式 API (`docs/codex-appserver-api-reference.md`) を使用。独自プロトコルは禁止。
 - Presence rule:
   - deterministic/heuristic 切替は `presence` を変更しない
   - `presence=managed` は agent session がある限り維持
@@ -326,6 +332,85 @@ pub struct SourceCursorState {
 #### Persistence
 - MVP: in-memory only。daemon restart 時は projection を scratch から再構築。
 - SQLite persistence は Post-MVP。
+
+#### Codex App Server Integration (MVP)
+
+> **MUST READ**: `docs/codex-appserver-api-reference.md` — 公式APIリファレンス。独自プロトコルの実装は禁止。
+
+##### Architecture: Primary (App Server) + Fallback (Capture)
+
+```
+codex app-server (stdio)              tmux capture-pane
+    |                                      |
+    v                                      v
+CodexAppServerClient                 parse_codex_capture_events()
+  - spawn + initialize handshake       - NDJSON parse
+  - thread/list polling                - fingerprint dedup
+  - notification → CodexRawEvent       - CodexRawEvent
+    |                                      |
+    +------- codex_source.ingest() --------+
+                    |
+                    v
+              Gateway → Daemon
+```
+
+##### Primary path: CodexAppServerClient (`codex_poller.rs`)
+
+1. **Spawn**: `codex app-server` を child process として起動 (stdin/stdout piped)
+2. **Handshake**: `initialize` → response → `initialized` (10s timeout)
+   - `clientInfo`: `{ name: "agtmux", title: "agtmux v5", version: "0.1.0" }`
+   - 全メッセージに `"jsonrpc": "2.0"` フィールド必須
+3. **Polling**: 毎 tick で `thread/list` (limit=50, sortKey=updated_at) を呼び出し
+   - Thread status 変化 (idle → active, active → idle 等) を検出
+   - `cwd` フィルタで特定 pane の thread のみ取得可能 (T-119)
+4. **Notification 処理**: `thread/list` response 前に到着する notification を drain
+   - `turn/started` → `CodexRawEvent { event_type: "turn.started" }`
+   - `turn/completed` → `CodexRawEvent { event_type: "turn.{status}" }` (completed/interrupted/failed)
+   - `thread/status/changed` → `CodexRawEvent { event_type: "thread.{type}" }` (idle/active/systemError)
+5. **Graceful degradation**: spawn 失敗 or handshake 失敗 → `None`, fallback path へ
+
+##### Fallback path: Capture-based NDJSON extraction
+
+App Server が利用不可の場合のみ使用 (`codex` 未インストール、認証失敗等):
+1. Poller が Codex と判定した pane の tmux capture lines をスキャン
+2. `{"type": "..."}` 形式の JSON lines を parse し `CodexRawEvent` に変換
+3. `CodexCaptureTracker` で content-based fingerprint dedup (cross-tick)
+
+##### poll_tick Step 6a
+
+```
+if app_server.is_alive():
+    events = app_server.poll_threads()
+    → codex_source.ingest(events)
+    [app_server alive → capture skip]
+else:
+    app_server = None  // clear dead client
+    → capture fallback for Codex-detected panes
+```
+
+##### pane_id correlation (T-119 → T-120)
+
+App Server の thread は `cwd` を持つが `pane_id` を持たない。tmux pane も `current_path` (cwd) を持つ。
+この対応を取ることで、Codex thread の event に `pane_id` を付与し、pane-level deterministic 検出を実現する。
+
+```
+thread/list response:
+  [{ id: "thr_abc", status: { type: "active" }, cwd: "/Users/me/project" }]
+
+tmux list-panes:
+  [{ pane_id: "%5", current_path: "/Users/me/project" }]
+
+→ cwd match → CodexRawEvent.pane_id = "%5"
+→ translate() → SourceEventV2.pane_id = Some("%5")
+→ daemon project_pane() が実行される
+→ list_panes で signature_class: Deterministic, evidence_mode: Deterministic
+```
+
+マッチング戦略:
+- `thread/list` の `cwd` と `PaneSnapshot.current_path` を正規化して比較
+- 同一 cwd に複数 pane がある場合: Codex process hint がある pane を優先
+- 同一 cwd に複数 thread がある場合: status=active な thread を優先、同率なら updatedAt 最新
+- マッチしない thread: `pane_id = None` のまま (session-level のみ投影)
 
 #### Detection Accuracy Hardening (MVP)
 

@@ -23,6 +23,8 @@ pub enum Command {
     ListPanes,
     /// Single-line output for tmux status bar
     TmuxStatus,
+    /// Configure Claude Code hooks for agtmux integration
+    SetupHooks(SetupHooksOpts),
 }
 
 #[derive(clap::Args)]
@@ -34,6 +36,17 @@ pub struct DaemonOpts {
     /// tmux socket path
     #[arg(long)]
     pub tmux_socket: Option<String>,
+}
+
+#[derive(clap::Args)]
+pub struct SetupHooksOpts {
+    /// Scope: "project" writes to .claude/settings.json, "user" writes to ~/.claude/settings.json
+    #[arg(long, default_value = "project")]
+    pub scope: String,
+
+    /// Path to the hook script (auto-detected if omitted)
+    #[arg(long)]
+    pub hook_script: Option<String>,
 }
 
 /// Default socket path using $USER for per-user isolation.

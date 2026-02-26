@@ -18,6 +18,9 @@ pub struct SourceState {
     events: Vec<ClaudeHookEvent>,
     /// Monotonically increasing sequence number.
     seq: u64,
+    /// Offset from compaction: number of events drained from the front.
+    /// Cursors are always absolute; `compact_offset` adjusts the index.
+    compact_offset: u64,
 }
 
 impl SourceState {
@@ -32,6 +35,22 @@ impl SourceState {
         self.seq += 1;
     }
 
+    /// Truncate events that have been consumed (absolute cursor <= `up_to_seq`).
+    pub fn compact(&mut self, up_to_seq: u64) {
+        let local_pos = up_to_seq.saturating_sub(self.compact_offset);
+        #[expect(clippy::cast_possible_truncation)]
+        let drain_count = (local_pos as usize).min(self.events.len());
+        if drain_count > 0 {
+            self.events.drain(..drain_count);
+            self.compact_offset += drain_count as u64;
+        }
+    }
+
+    /// Number of events currently buffered.
+    pub fn buffered_len(&self) -> usize {
+        self.events.len()
+    }
+
     /// Pull translated events according to cursor and limit.
     ///
     /// The cursor format is `"claude-hooks:{seq}"` where seq is the 0-based
@@ -42,14 +61,17 @@ impl SourceState {
         request: &PullEventsRequest,
         now: DateTime<Utc>,
     ) -> PullEventsResponse {
-        let start = request
+        let abs_start = request
             .cursor
             .as_deref()
             .and_then(|c| c.strip_prefix(CURSOR_PREFIX))
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(0)
-            .min(self.events.len()); // Clamp to avoid out-of-range panic
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
 
+        // Convert absolute cursor to index into current (possibly compacted) buffer
+        #[expect(clippy::cast_possible_truncation)]
+        let local_start = abs_start.saturating_sub(self.compact_offset) as usize;
+        let start = local_start.min(self.events.len());
         let limit = request.limit as usize;
         let end = self.events.len().min(start.saturating_add(limit));
 
@@ -58,10 +80,9 @@ impl SourceState {
             .map(translate::translate)
             .collect();
 
-        // Always return current position so the gateway can overwrite its
-        // tracker cursor.  Returning None when caught-up would cause the
-        // gateway to keep the old cursor and re-deliver the same events.
-        let next_cursor = Some(format!("{CURSOR_PREFIX}{end}"));
+        // Cursor is always absolute (compact_offset + buffer position)
+        let abs_end = self.compact_offset + end as u64;
+        let next_cursor = Some(format!("{CURSOR_PREFIX}{abs_end}"));
 
         PullEventsResponse {
             events,
@@ -211,5 +232,72 @@ mod tests {
         let resp_with = state.pull_events(&req, now());
         assert_eq!(resp_with.source_health.status, SourceHealthStatus::Healthy);
         assert_eq!(resp_with.heartbeat_ts, now());
+    }
+
+    // ── Compaction tests ────────────────────────────────────────────
+
+    #[test]
+    fn compact_trims_consumed_events() {
+        let mut state = SourceState::new();
+        for i in 0..5 {
+            state.ingest(make_event(&format!("e{i}"), "tool_start"));
+        }
+        assert_eq!(state.buffered_len(), 5);
+
+        state.compact(3);
+        assert_eq!(state.buffered_len(), 2);
+    }
+
+    #[test]
+    fn compact_cursors_remain_valid() {
+        let mut state = SourceState::new();
+        for i in 0..5 {
+            state.ingest(make_event(&format!("e{i}"), "tool_start"));
+        }
+
+        // Pull first 3
+        let req = PullEventsRequest {
+            cursor: None,
+            limit: 3,
+        };
+        let resp1 = state.pull_events(&req, now());
+        assert_eq!(resp1.events.len(), 3);
+        let cursor = resp1.next_cursor.as_deref().expect("has cursor");
+        assert_eq!(cursor, "claude-hooks:3");
+
+        // Compact those 3
+        state.compact(3);
+        assert_eq!(state.buffered_len(), 2);
+
+        // Pull remaining with old cursor
+        let req2 = PullEventsRequest {
+            cursor: Some(cursor.to_owned()),
+            limit: 10,
+        };
+        let resp2 = state.pull_events(&req2, now());
+        assert_eq!(resp2.events.len(), 2);
+        assert_eq!(resp2.next_cursor, Some("claude-hooks:5".to_string()));
+    }
+
+    #[test]
+    fn compact_repeated_absolute_no_over_drain() {
+        let mut state = SourceState::new();
+        for i in 0..6 {
+            state.ingest(make_event(&format!("e{i}"), "tool_start"));
+        }
+
+        state.compact(3);
+        assert_eq!(state.buffered_len(), 3);
+
+        state.compact(5);
+        assert_eq!(state.buffered_len(), 1);
+
+        let req = PullEventsRequest {
+            cursor: Some("claude-hooks:5".to_owned()),
+            limit: 10,
+        };
+        let resp = state.pull_events(&req, now());
+        assert_eq!(resp.events.len(), 1);
+        assert_eq!(resp.next_cursor, Some("claude-hooks:6".to_string()));
     }
 }

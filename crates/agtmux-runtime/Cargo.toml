@@ -9,6 +9,8 @@ path = "src/main.rs"
 
 [dependencies]
 agtmux-core-v5.workspace = true
+agtmux-source-codex-appserver.workspace = true
+agtmux-source-claude-hooks.workspace = true
 agtmux-source-poller.workspace = true
 agtmux-gateway.workspace = true
 agtmux-daemon-v5.workspace = true
