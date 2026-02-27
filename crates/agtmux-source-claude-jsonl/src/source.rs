@@ -137,7 +137,9 @@ impl ClaudeJsonlSourceState {
             for line_str in &new_lines {
                 match serde_json::from_str::<ClaudeJsonlLine>(line_str) {
                     Ok(parsed) => {
-                        events.push(translate::translate(&parsed, &ctx));
+                        if let Some(event) = translate::translate(&parsed, &ctx) {
+                            events.push(event);
+                        }
                     }
                     Err(e) => {
                         warn!(

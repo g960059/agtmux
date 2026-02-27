@@ -445,8 +445,12 @@ fn parse_activity_state(event_type: &str) -> ActivityState {
         "activity.running" | "lifecycle.running" | "activity.start" | "lifecycle.start" => {
             ActivityState::Running
         }
+        // Claude JSONL: user_input means the user just sent a message (agent will act)
+        "activity.user_input" => ActivityState::Running,
         "activity.idle" | "lifecycle.idle" | "activity.end" | "activity.stop" | "lifecycle.end"
         | "lifecycle.stop" => ActivityState::Idle,
+        // Claude JSONL: tool_complete means a tool finished (agent is deciding next step)
+        "activity.tool_complete" => ActivityState::Idle,
         "activity.waiting_input" | "lifecycle.waiting_input" => ActivityState::WaitingInput,
         "activity.waiting_approval" | "lifecycle.waiting_approval" => {
             ActivityState::WaitingApproval
@@ -700,6 +704,16 @@ mod tests {
             ActivityState::Error
         );
         assert_eq!(parse_activity_state("unknown.type"), ActivityState::Unknown);
+
+        // Claude JSONL namespace
+        assert_eq!(
+            parse_activity_state("activity.user_input"),
+            ActivityState::Running
+        );
+        assert_eq!(
+            parse_activity_state("activity.tool_complete"),
+            ActivityState::Idle
+        );
 
         // Codex App Server namespace
         assert_eq!(

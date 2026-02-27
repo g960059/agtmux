@@ -30,11 +30,14 @@ pub struct TranslateContext {
 }
 
 /// Translate a parsed JSONL line into a [`SourceEventV2`].
-pub fn translate(line: &ClaudeJsonlLine, ctx: &TranslateContext) -> SourceEventV2 {
-    let event_type = normalize_event_type(&line.line_type);
+///
+/// Returns `None` for metadata-only line types that do not represent
+/// activity state changes (e.g. `system`, `file-history-snapshot`).
+pub fn translate(line: &ClaudeJsonlLine, ctx: &TranslateContext) -> Option<SourceEventV2> {
+    let event_type = normalize_event_type(&line.line_type)?;
     let event_id = format!("claude-jsonl-{}", line.uuid.as_deref().unwrap_or("unknown"));
 
-    SourceEventV2 {
+    Some(SourceEventV2 {
         event_id,
         provider: Provider::Claude,
         source_kind: SourceKind::ClaudeJsonl,
@@ -50,17 +53,24 @@ pub fn translate(line: &ClaudeJsonlLine, ctx: &TranslateContext) -> SourceEventV
             "line_type": line.line_type,
         }),
         confidence: 1.0,
-    }
+    })
 }
 
 /// Map JSONL line types to normalized event_type strings.
-fn normalize_event_type(line_type: &str) -> String {
+///
+/// Returns `None` for metadata-only types that should not produce events
+/// (e.g. `system`, `file-history-snapshot`, `queue-operation`).
+fn normalize_event_type(line_type: &str) -> Option<String> {
     match line_type {
-        "user" => "activity.user_input".to_owned(),
-        "tool_use" => "activity.running".to_owned(),
-        "tool_result" => "activity.tool_complete".to_owned(),
-        "assistant" => "activity.idle".to_owned(),
-        _ => "activity.unknown".to_owned(),
+        "user" => Some("activity.user_input".to_owned()),
+        "tool_use" => Some("activity.running".to_owned()),
+        "tool_result" => Some("activity.tool_complete".to_owned()),
+        "assistant" => Some("activity.idle".to_owned()),
+        // Progress events indicate a tool is still executing (e.g. long-running bash).
+        // Claude Code emits these ~1/sec during tool execution.
+        "progress" => Some("activity.running".to_owned()),
+        // Metadata types that don't represent activity state changes — skip.
+        _ => None,
     }
 }
 
@@ -98,7 +108,7 @@ mod tests {
     #[test]
     fn translate_user_event() {
         let line = sample_line("user");
-        let ev = translate(&line, &ctx());
+        let ev = translate(&line, &ctx()).expect("user should produce an event");
 
         assert_eq!(ev.event_id, "claude-jsonl-uuid-001");
         assert_eq!(ev.provider, Provider::Claude);
@@ -114,36 +124,47 @@ mod tests {
     #[test]
     fn translate_tool_use_event() {
         let line = sample_line("tool_use");
-        let ev = translate(&line, &ctx());
+        let ev = translate(&line, &ctx()).expect("tool_use should produce an event");
         assert_eq!(ev.event_type, "activity.running");
     }
 
     #[test]
     fn translate_tool_result_event() {
         let line = sample_line("tool_result");
-        let ev = translate(&line, &ctx());
+        let ev = translate(&line, &ctx()).expect("tool_result should produce an event");
         assert_eq!(ev.event_type, "activity.tool_complete");
     }
 
     #[test]
     fn translate_assistant_event() {
         let line = sample_line("assistant");
-        let ev = translate(&line, &ctx());
+        let ev = translate(&line, &ctx()).expect("assistant should produce an event");
         assert_eq!(ev.event_type, "activity.idle");
     }
 
     #[test]
-    fn translate_unknown_event_type() {
-        let line = sample_line("some_future_type");
-        let ev = translate(&line, &ctx());
-        assert_eq!(ev.event_type, "activity.unknown");
+    fn translate_progress_event() {
+        let line = sample_line("progress");
+        let ev = translate(&line, &ctx()).expect("progress should produce an event");
+        assert_eq!(ev.event_type, "activity.running");
+    }
+
+    #[test]
+    fn translate_metadata_types_skipped() {
+        for line_type in &["system", "file-history-snapshot", "queue-operation"] {
+            let line = sample_line(line_type);
+            assert!(
+                translate(&line, &ctx()).is_none(),
+                "{line_type} should be skipped"
+            );
+        }
     }
 
     #[test]
     fn translate_no_uuid_uses_unknown() {
         let mut line = sample_line("user");
         line.uuid = None;
-        let ev = translate(&line, &ctx());
+        let ev = translate(&line, &ctx()).expect("user should produce an event");
         assert_eq!(ev.event_id, "claude-jsonl-unknown");
         assert!(ev.source_event_id.is_none());
     }

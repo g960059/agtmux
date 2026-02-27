@@ -474,11 +474,6 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
             let jsonl_events =
                 ClaudeJsonlSourceState::poll_files(&mut st.claude_jsonl_watchers, &discoveries);
             for event in jsonl_events {
-                tracing::debug!(
-                    "claude jsonl event: {} (pane={:?})",
-                    event.event_type,
-                    event.pane_id
-                );
                 st.claude_jsonl_source.ingest(event);
             }
         }
