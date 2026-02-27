@@ -176,7 +176,8 @@ impl DaemonProjection {
             }
 
             // B3: Determine winning provider for this group (cross-provider arbitration).
-            let winning_provider = self.select_winning_provider(&group_key, &output.accepted_events);
+            let winning_provider =
+                self.select_winning_provider(&group_key, &output.accepted_events);
 
             // Update pane states from accepted events (dedup same pane_id).
             // Only project events from the winning provider to avoid nondeterministic overwrite.
@@ -2185,7 +2186,7 @@ mod tests {
         let codex_real = codex_det_event("c1", "codex-sess", "%1", t);
         proj.apply_events(vec![codex_real], t);
         assert_eq!(
-            proj.get_pane("%1").unwrap().provider,
+            proj.get_pane("%1").expect("pane %1 must exist").provider,
             Some(agtmux_core_v5::types::Provider::Codex),
         );
 
@@ -2198,7 +2199,7 @@ mod tests {
 
         // Claude real activity is most recent → pane switches to Claude
         assert_eq!(
-            proj.get_pane("%1").unwrap().provider,
+            proj.get_pane("%1").expect("pane %1 must exist").provider,
             Some(agtmux_core_v5::types::Provider::Claude),
             "pane provider should switch to Claude after Claude real activity"
         );
@@ -2214,7 +2215,7 @@ mod tests {
         let claude_real = claude_det_event("cl1", "claude-sess", "%1", t);
         proj.apply_events(vec![claude_real], t);
         assert_eq!(
-            proj.get_pane("%1").unwrap().provider,
+            proj.get_pane("%1").expect("pane %1 must exist").provider,
             Some(agtmux_core_v5::types::Provider::Claude),
         );
 
@@ -2227,7 +2228,7 @@ mod tests {
 
         // Codex real activity is most recent → pane switches to Codex
         assert_eq!(
-            proj.get_pane("%1").unwrap().provider,
+            proj.get_pane("%1").expect("pane %1 must exist").provider,
             Some(agtmux_core_v5::types::Provider::Codex),
             "pane provider should switch to Codex after Codex real activity"
         );
@@ -2248,7 +2249,7 @@ mod tests {
 
         // Claude has more recent real activity → Claude wins
         assert_eq!(
-            proj.get_pane("%1").unwrap().provider,
+            proj.get_pane("%1").expect("pane %1 must exist").provider,
             Some(agtmux_core_v5::types::Provider::Claude),
             "provider with more recent real activity should win"
         );
@@ -2264,7 +2265,7 @@ mod tests {
         let codex_real = codex_det_event("c1", "codex-sess", "%1", t);
         proj.apply_events(vec![codex_real], t);
         assert_eq!(
-            proj.get_pane("%1").unwrap().provider,
+            proj.get_pane("%1").expect("pane %1 must exist").provider,
             Some(agtmux_core_v5::types::Provider::Codex),
         );
 
@@ -2278,7 +2279,7 @@ mod tests {
 
         // No new real activity: keep Codex (established via last_real_activity from Step 1)
         assert_eq!(
-            proj.get_pane("%1").unwrap().provider,
+            proj.get_pane("%1").expect("pane %1 must exist").provider,
             Some(agtmux_core_v5::types::Provider::Codex),
             "heartbeat-only tick should not switch provider"
         );

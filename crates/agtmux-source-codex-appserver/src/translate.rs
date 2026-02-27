@@ -183,7 +183,10 @@ mod tests {
     #[test]
     fn translate_real_event_flag_false() {
         let raw = make_raw("re-1", "task.running", Some("%3"));
-        assert!(!raw.is_heartbeat, "make_raw should default is_heartbeat=false");
+        assert!(
+            !raw.is_heartbeat,
+            "make_raw should default is_heartbeat=false"
+        );
         let translated = translate(&raw);
         assert!(
             !translated.is_heartbeat,

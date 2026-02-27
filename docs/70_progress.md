@@ -7,6 +7,59 @@
 ---
 
 ## 2026-02-26 (cont.)
+### T-124: Same-CWD Multi-Pane Codex Binding — Planning
+
+### Problem
+- `build_cwd_pane_map`: `HashMap<CWD, PaneCwdInfo>` — CWD ごと 1 pane のみ保持。同一 CWD 複数 pane が unmanaged に。
+- ライブテスト: vm agtmux v4 の 4 pane が全て `/agtmux=v4` CWD → 1 pane のみ managed
+- Fix 1 (適用済み commit db024a9): `MAX_CWD_QUERIES_PER_TICK` 8 → 40
+
+### Design decisions
+- `build_cwd_pane_groups`: `HashMap<CWD, Vec<PaneCwdInfo>>` — 全 pane をグループ化
+- pane ソート: `has_codex_hint desc, pane_id asc` — 実際の Codex pane を優先割り当て
+- thread ソート: `thread_id asc` — 安定割り当て
+- stable assignment: cache-first + VecDeque unclaimed
+- **H1 (Codex review)**: cache hit に `pane_id + generation + birth_ts` 一致チェック追加。pane 再利用時に古い binding を invalidate
+- **H2 (Codex review)**: tick-scope `assigned_in_tick: HashSet<String>` — 同一 thread が複数 CWD クエリに出現しても先着固定（cwd filter 異常対策）
+- **H3 (Codex review)**: pane ソートを `has_codex_hint desc, pane_id asc` に変更（元案は `pane_id asc` のみ）
+- Global query (`cwd=None`) は `&[]` 渡し → 新規割り当てなし、既存 binding の heartbeat のみ
+
+### `has_codex_hint: bool` → `process_hint: Option<String>` 置き換え決定
+- `has_codex_hint` は旧 1-pick-per-CWD アルゴリズム向けの情報損失 shortcut
+- T-124 の多 pane 割り当てでは 3-tier sort が必要: codex(0) > neutral(1) > competing-agent(2)
+- `process_hint: Option<String>` を `PaneCwdInfo` に直接保持する設計に変更
+- Gemini 等が将来 `inspect_pane_processes()` に追加されても struct 変更なしで tier 2 に自動分類
+
+### Codex review 結果
+- 判定: **Go with changes** (確信度: Medium)
+- 3 High リスク → 全採用 (H1/H2/H3)
+- Medium リスク (stale binding TTL, event_id collision) → 将来 hardening で対応
+
+---
+
+## 2026-02-26 (cont.)
+### T-124: Same-CWD Multi-Pane Codex Binding — Completed
+
+### Implementation
+- `build_cwd_pane_map` (HashMap<CWD, PaneCwdInfo>) → `build_cwd_pane_groups` (HashMap<CWD, Vec<PaneCwdInfo>>): keeps ALL panes per CWD, sorted by 3-tier pane_tier() + pane_id
+- `has_codex_hint: bool` → `process_hint: Option<String>` in `PaneCwdInfo` (codex_poller.rs + poll_loop.rs); `pane_tier()` free function: codex=0, neutral(None)=1, competing-agent=2
+- `process_thread_list_response` new signature: `pane_infos: &[PaneCwdInfo]`, `assigned_in_tick: &mut HashSet<String>`
+- H1: `cached_pane_ids` only marks generation-valid bindings as "claimed" → stale bindings release their pane into unclaimed
+- H2: `assigned_in_tick` guards against same thread reassignment across CWD queries in same tick
+- Global query (`cwd=None`) → `&[]` → no new assignments, only heartbeat continuity
+- Bug fix discovered in test: `cached_pane_ids` must exclude generation-invalid bindings, not just absent bindings
+- 14 new tests: 4 `build_cwd_pane_groups_*` + 6 `process_thread_list_*` (4 as `#[tokio::test]` using `make_test_client()` backed by `cat` subprocess)
+- Also fixed: 7 `.unwrap()` → `.expect()` in projection.rs test code (clippy::unwrap_used)
+- 645 tests total (up from 631), `just verify` PASS
+
+### Key decisions
+- `process_hint: Option<String>` propagated directly from `PaneSnapshot` → `PaneCwdInfo` (no bool lossy conversion)
+- Gemini/Copilot future agents auto-classify to tier 2 without struct changes
+- `make_test_client()` uses `cat` subprocess (tokio::process) to satisfy opaque tokio Child/ChildStdin/ChildStdout types without actual Codex binary dependency
+
+---
+
+## 2026-02-26 (cont.)
 ### T-123: Provider Switching — Generic Cross-Provider Arbitration
 
 ### Completed

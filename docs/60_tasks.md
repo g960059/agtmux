@@ -23,6 +23,8 @@
 - [ ] (none)
 
 ## DONE (keep short)
+- [x] T-124 (P1) [MVP] Same-CWD Multi-Pane Codex Binding
+  - Evidence: `build_cwd_pane_map` → `build_cwd_pane_groups` (`HashMap<CWD, Vec<PaneCwdInfo>>`). `has_codex_hint: bool` → `process_hint: Option<String>` (3-tier: codex=0/neutral=1/competing=2). `process_thread_list_response` accepts `&[PaneCwdInfo]` + `assigned_in_tick`. H1: generation+birth_ts cache validation. H2: tick-scope dedup. `MAX_CWD_QUERIES_PER_TICK` 8→40. poll_loop.rs updated. 14 new tests (4 groups + 6 assignment + 4 tokio::test). `just verify` PASS (645 tests).
 - [x] T-123 (P1) [MVP] Provider Switching — Generic Cross-Provider Arbitration
   - Evidence: `is_heartbeat: bool` added to `SourceEventV2` (serde default=false) + `CodexRawEvent`. Codex poller computes `is_heartbeat=true` when status/pane unchanged and time elapsed ≥2s; all notifications/capture events `is_heartbeat=false`. `DaemonProjection.last_real_activity: HashMap<pane_id, HashMap<Provider, DateTime>>` tracks last non-heartbeat Det event per provider. `select_winning_provider()` picks most-recently-active Det provider; no conflict if ≤1 Det provider. `tick_freshness` clears stale pane entries. Covers Codex→Claude, Claude→Codex, Any→zsh, future Gemini. 10 new tests (8 projection + 2 translate). `just verify` PASS (641 tests).
 - [x] T-122 (P1) [MVP] Claude JSONL deterministic source (`agtmux-source-claude-jsonl`)

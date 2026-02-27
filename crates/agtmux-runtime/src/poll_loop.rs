@@ -325,15 +325,15 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
                 .iter()
                 .map(|pane| {
                     let gen_info = st.generation_tracker.get(&pane.pane_id);
-                    let has_codex_hint = snapshots.iter().any(|s| {
-                        s.pane_id == pane.pane_id && s.process_hint.as_deref() == Some("codex")
-                    });
                     PaneCwdInfo {
                         pane_id: pane.pane_id.clone(),
                         cwd: pane.current_path.clone(),
                         generation: gen_info.map(|(g, _)| g),
                         birth_ts: gen_info.map(|(_, ts)| ts),
-                        has_codex_hint,
+                        process_hint: snapshots
+                            .iter()
+                            .find(|s| s.pane_id == pane.pane_id)
+                            .and_then(|s| s.process_hint.clone()),
                     }
                 })
                 .collect();

@@ -13,7 +13,7 @@
 //! The poll_loop tries the app-server first. If spawning fails (no `codex` binary,
 //! auth issues, etc.), the capture-based fallback is used automatically.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
@@ -35,8 +35,10 @@ pub struct PaneCwdInfo {
     pub generation: Option<u64>,
     /// Pane birth timestamp from PaneGenerationTracker.
     pub birth_ts: Option<chrono::DateTime<Utc>>,
-    /// Whether this pane has a Codex process hint (used for disambiguation).
-    pub has_codex_hint: bool,
+    /// The agent CLI detected in this pane's current command, if any.
+    /// Examples: `Some("codex")`, `Some("claude")`, `None` for neutral shells.
+    /// Used for 3-tier assignment priority: codex(0) > neutral(1) > competing-agent(2).
+    pub process_hint: Option<String>,
 }
 
 /// Correlated pane identity for a Codex thread.
@@ -61,22 +63,39 @@ struct LastThreadState {
 /// `agtmux_core_v5::resolver::FRESH_THRESHOLD_SECS` (3s).
 const HEARTBEAT_INTERVAL_SECS: i64 = 2;
 
-/// Build a cwd → best-matching pane map for thread/list correlation.
+/// Assignment priority tier for a pane based on its process hint.
+/// Lower value = higher priority for Codex thread assignment.
+/// - 0: Running Codex → preferred
+/// - 1: Neutral shell (zsh, bash, etc.) → acceptable
+/// - 2: Running a competing agent (claude, gemini, …) → deprioritized
+///   (those panes have their own deterministic sources; T-123 arbitration resolves conflicts)
+fn pane_tier(p: &PaneCwdInfo) -> u8 {
+    match p.process_hint.as_deref() {
+        Some("codex") => 0,
+        None => 1,
+        _ => 2,
+    }
+}
+
+/// Build a cwd → pane-group map for multi-pane Codex thread assignment.
 ///
-/// When multiple panes share the same cwd, prefer the one with `has_codex_hint`.
-/// If still tied, the first one wins (stable ordering from tmux list-panes).
-fn build_cwd_pane_map(pane_cwds: &[PaneCwdInfo]) -> HashMap<String, PaneCwdInfo> {
-    let mut map: HashMap<String, PaneCwdInfo> = HashMap::new();
+/// All panes sharing the same cwd are collected into a `Vec`, sorted by
+/// assignment priority (tier 0→2) then `pane_id` for deterministic ordering.
+/// Every pane in the group is eligible for assignment; threads are round-robined
+/// across the group in `process_thread_list_response`.
+fn build_cwd_pane_groups(pane_cwds: &[PaneCwdInfo]) -> HashMap<String, Vec<PaneCwdInfo>> {
+    let mut map: HashMap<String, Vec<PaneCwdInfo>> = HashMap::new();
     for info in pane_cwds {
-        match map.get(&info.cwd) {
-            Some(existing) if existing.has_codex_hint && !info.has_codex_hint => {
-                // Existing pane has codex hint, keep it
-            }
-            _ => {
-                // New entry, or current pane is better (has codex hint or first)
-                map.insert(info.cwd.clone(), info.clone());
-            }
+        if !info.cwd.is_empty() {
+            map.entry(info.cwd.clone()).or_default().push(info.clone());
         }
+    }
+    for panes in map.values_mut() {
+        panes.sort_by(|a, b| {
+            pane_tier(a)
+                .cmp(&pane_tier(b))
+                .then_with(|| a.pane_id.cmp(&b.pane_id))
+        });
     }
     map
 }
@@ -247,21 +266,19 @@ impl CodexAppServerClient {
             }
         }
 
-        // Build cwd → pane mapping for correlation.
-        // Unique cwds to query; when multiple panes share a cwd, prefer the one
-        // with a Codex process_hint (set by the caller).
-        let cwd_pane_map = build_cwd_pane_map(pane_cwds);
+        // Build cwd → Vec<PaneCwdInfo> groups (all panes per CWD, sorted by tier).
+        let cwd_pane_groups = build_cwd_pane_groups(pane_cwds);
 
-        // Step 1: Per-cwd queries for pane correlation (threads get pane_id set).
-        // Prioritize codex candidates and cap the number of requests per tick.
-        let mut query_plan: Vec<PaneCwdInfo> = cwd_pane_map
-            .into_values()
-            .filter(|p| !p.cwd.is_empty())
-            .collect();
-        query_plan.sort_by(|a, b| {
-            b.has_codex_hint
-                .cmp(&a.has_codex_hint)
-                .then_with(|| a.pane_id.cmp(&b.pane_id))
+        // Step 1: Per-cwd queries. CWDs with actual Codex panes are queried first.
+        let mut query_plan: Vec<(String, Vec<PaneCwdInfo>)> = cwd_pane_groups.into_iter().collect();
+        query_plan.sort_by(|(cwd_a, panes_a), (cwd_b, panes_b)| {
+            let has_codex_a = panes_a
+                .iter()
+                .any(|p| p.process_hint.as_deref() == Some("codex"));
+            let has_codex_b = panes_b
+                .iter()
+                .any(|p| p.process_hint.as_deref() == Some("codex"));
+            has_codex_b.cmp(&has_codex_a).then_with(|| cwd_a.cmp(cwd_b))
         });
         if query_plan.len() > MAX_CWD_QUERIES_PER_TICK {
             tracing::debug!(
@@ -270,37 +287,45 @@ impl CodexAppServerClient {
                 MAX_CWD_QUERIES_PER_TICK
             );
         }
-        for pane_info in query_plan.into_iter().take(MAX_CWD_QUERIES_PER_TICK) {
+
+        // H2: tick-scope dedup — prevents same thread being assigned in multiple CWD queries
+        // (guards against cwd filter returning broader results than expected).
+        let mut assigned_in_tick: HashSet<String> = HashSet::new();
+
+        for (cwd, pane_group) in query_plan.into_iter().take(MAX_CWD_QUERIES_PER_TICK) {
             match self
-                .send_thread_list_timed(Some(&pane_info.cwd), THREAD_LIST_REQUEST_TIMEOUT)
+                .send_thread_list_timed(Some(&cwd), THREAD_LIST_REQUEST_TIMEOUT)
                 .await
             {
                 Ok(response) => {
                     self.process_thread_list_response(
                         &response,
-                        Some(&pane_info),
+                        &pane_group,
+                        &mut assigned_in_tick,
                         now,
                         &mut events,
                     );
                 }
                 Err(e) => {
-                    tracing::debug!(
-                        "codex thread/list cwd query failed (cwd={}): {e}",
-                        pane_info.cwd
-                    );
+                    tracing::debug!("codex thread/list cwd query failed (cwd={cwd}): {e}");
                 }
             }
         }
 
-        // Step 2: Global query to catch threads at cwds that don't match any pane.
-        // For known threads, cached pane bindings are reused.
-        // Threads already seen in Step 1 are deduplicated by last_thread_states.
+        // Step 2: Global query — empty pane slice means no new assignments.
+        // Existing bindings are reused for heartbeat continuity.
         match self
             .send_thread_list_timed(None, THREAD_LIST_REQUEST_TIMEOUT)
             .await
         {
             Ok(response) => {
-                self.process_thread_list_response(&response, None, now, &mut events);
+                self.process_thread_list_response(
+                    &response,
+                    &[],
+                    &mut assigned_in_tick,
+                    now,
+                    &mut events,
+                );
             }
             Err(e) => {
                 tracing::debug!("codex thread/list global query failed: {e}");
@@ -351,11 +376,17 @@ impl CodexAppServerClient {
     }
 
     /// Process a `thread/list` response, emitting events for status changes.
-    /// If `pane_info` is provided, sets pane_id/generation/birth_ts on events.
+    ///
+    /// `pane_infos` is the sorted pane group for this CWD (tier 0→2, pane_id asc).
+    /// Pass `&[]` for the global query — no new pane assignments are made.
+    ///
+    /// `assigned_in_tick` prevents the same thread from being re-assigned by a
+    /// subsequent CWD query in the same tick (cwd filter anomaly guard).
     fn process_thread_list_response(
         &mut self,
         response: &serde_json::Value,
-        pane_info: Option<&PaneCwdInfo>,
+        pane_infos: &[PaneCwdInfo],
+        assigned_in_tick: &mut HashSet<String>,
         now: chrono::DateTime<Utc>,
         events: &mut Vec<CodexRawEvent>,
     ) {
@@ -367,41 +398,110 @@ impl CodexAppServerClient {
             return;
         };
 
-        for thread in threads {
+        // Sort threads by thread_id for deterministic, stable assignment across ticks.
+        let mut sorted_threads: Vec<&serde_json::Value> = threads.iter().collect();
+        sorted_threads.sort_by_key(|t| t["id"].as_str().unwrap_or(""));
+
+        // Panes already claimed by cache entries IN THIS RESPONSE.
+        // Only threads present in this response count — exited threads release their pane.
+        // Additionally, only count a binding as "claimed" if the pane generation still matches
+        // the current pane group; a stale binding must not block the pane from being unclaimed.
+        let cached_pane_ids: HashSet<String> = sorted_threads
+            .iter()
+            .filter_map(|t| {
+                let tid = t["id"].as_str()?;
+                let binding = self.thread_pane_bindings.get(tid)?;
+                // For global query (pane_infos empty): trust all existing bindings.
+                let generation_valid = pane_infos.is_empty()
+                    || pane_infos.iter().any(|p| {
+                        p.pane_id == binding.pane_id
+                            && p.generation == binding.pane_generation
+                            && p.birth_ts == binding.pane_birth_ts
+                    });
+                if generation_valid {
+                    Some(binding.pane_id.clone())
+                } else {
+                    None // stale binding — leave pane available as unclaimed
+                }
+            })
+            .collect();
+
+        // Unclaimed panes: group members not held by any live thread's cache.
+        let mut unclaimed: VecDeque<ThreadPaneBinding> = pane_infos
+            .iter()
+            .filter(|p| !cached_pane_ids.contains(&p.pane_id))
+            .map(|p| ThreadPaneBinding {
+                pane_id: p.pane_id.clone(),
+                pane_generation: p.generation,
+                pane_birth_ts: p.birth_ts,
+            })
+            .collect();
+
+        for thread in sorted_threads {
             let thread_id = thread["id"].as_str().unwrap_or("");
             // Status is an object { type: "idle" } per the API reference.
-            // However, the real App Server (v0.104.0+) may omit `status` from
-            // `thread/list` results — it's only guaranteed in `thread/status/changed`
-            // notifications and `thread/read`. Default to "idle" when absent:
-            // a listed thread is at least available/loaded.
+            // The real App Server (v0.104.0+) may omit `status` from `thread/list` —
+            // default to "idle" (a listed thread is at least available/loaded).
             let status = thread
                 .get("status")
                 .and_then(|s| s.get("type"))
                 .and_then(|t| t.as_str())
                 .unwrap_or("idle");
 
-            // Skip notLoaded threads — they're historical (on disk, not in memory)
-            // and don't represent active agents. See codex-appserver-api-reference.md.
+            // Skip notLoaded threads (historical, not active agents).
             if status == "notLoaded" {
                 continue;
             }
-
             if thread_id.is_empty() {
                 continue;
             }
 
-            let observed_binding = pane_info.map(|p| ThreadPaneBinding {
-                pane_id: p.pane_id.clone(),
-                pane_generation: p.generation,
-                pane_birth_ts: p.birth_ts,
-            });
-            if let Some(binding) = observed_binding.clone() {
-                self.thread_pane_bindings
-                    .insert(thread_id.to_string(), binding);
+            // H2: tick-scope dedup — skip threads already assigned earlier in this tick.
+            if assigned_in_tick.contains(thread_id) {
+                continue;
             }
 
-            // Keep existing pane association when current observation is global (pane-less).
-            let effective_pane_id = observed_binding
+            // Determine pane binding for this thread:
+            // H1: validate cached binding by pane generation + birth_ts to detect reuse.
+            let assigned_binding =
+                if let Some(cached) = self.thread_pane_bindings.get(thread_id).cloned() {
+                    // For global query (pane_infos empty): trust existing binding as-is.
+                    // For CWD queries: verify the pane instance hasn't been recycled.
+                    let pane_still_valid = pane_infos.is_empty()
+                        || pane_infos.iter().any(|p| {
+                            p.pane_id == cached.pane_id
+                                && p.generation == cached.pane_generation
+                                && p.birth_ts == cached.pane_birth_ts
+                        });
+                    if pane_still_valid {
+                        Some(cached)
+                    } else {
+                        // Pane was recycled — invalidate stale binding, try unclaimed.
+                        self.thread_pane_bindings.remove(thread_id);
+                        let b = unclaimed.pop_front();
+                        if let Some(ref binding) = b {
+                            self.thread_pane_bindings
+                                .insert(thread_id.to_string(), binding.clone());
+                        }
+                        b
+                    }
+                } else if !pane_infos.is_empty() {
+                    // No cache: assign next available pane in group order.
+                    let b = unclaimed.pop_front();
+                    if let Some(ref binding) = b {
+                        self.thread_pane_bindings
+                            .insert(thread_id.to_string(), binding.clone());
+                    }
+                    b
+                } else {
+                    // Global query: no new assignments.
+                    None
+                };
+
+            assigned_in_tick.insert(thread_id.to_string());
+
+            // effective_pane_id: new assignment, or fall back to last known state.
+            let effective_pane_id = assigned_binding
                 .as_ref()
                 .map(|b| b.pane_id.clone())
                 .or_else(|| {
@@ -409,6 +509,7 @@ impl CodexAppServerClient {
                         .get(thread_id)
                         .and_then(|s| s.pane_id.clone())
                 });
+
             // Emit when status/pane changed, or heartbeat interval elapsed.
             let should_emit = match self.last_thread_states.get(thread_id) {
                 None => true,
@@ -422,10 +523,8 @@ impl CodexAppServerClient {
             if should_emit {
                 // Heartbeat: emit triggered by elapsed time only (no status/pane change).
                 let is_heartbeat = match self.last_thread_states.get(thread_id) {
-                    None => false, // first discovery = real event
-                    Some(prev) => {
-                        prev.status == status && prev.pane_id == effective_pane_id
-                    }
+                    None => false,
+                    Some(prev) => prev.status == status && prev.pane_id == effective_pane_id,
                 };
 
                 self.last_thread_states.insert(
@@ -438,7 +537,7 @@ impl CodexAppServerClient {
                 );
 
                 let event_binding =
-                    observed_binding.or_else(|| self.thread_pane_bindings.get(thread_id).cloned());
+                    assigned_binding.or_else(|| self.thread_pane_bindings.get(thread_id).cloned());
 
                 let event_type = match status {
                     "active" => "thread.active",
@@ -879,96 +978,231 @@ mod tests {
         assert!(events0.is_empty(), "%0 should still be deduped");
     }
 
-    // ── T-119: cwd correlation tests ─────────────────────────────────
+    // ── T-119/T-124: cwd correlation + multi-pane assignment tests ───
 
-    #[test]
-    fn build_cwd_pane_map_single_pane() {
-        let infos = vec![PaneCwdInfo {
-            pane_id: "%0".to_string(),
-            cwd: "/home/user/project".to_string(),
-            generation: Some(1),
-            birth_ts: None,
-            has_codex_hint: false,
-        }];
-        let map = build_cwd_pane_map(&infos);
-        assert_eq!(map.len(), 1);
-        assert_eq!(map["/home/user/project"].pane_id, "%0");
+    fn make_pane(pane_id: &str, cwd: &str, hint: Option<&str>) -> PaneCwdInfo {
+        make_pane_with_gen(pane_id, cwd, hint, Some(1), None)
+    }
+
+    fn make_pane_with_gen(
+        pane_id: &str,
+        cwd: &str,
+        hint: Option<&str>,
+        generation: Option<u64>,
+        birth_ts: Option<chrono::DateTime<Utc>>,
+    ) -> PaneCwdInfo {
+        PaneCwdInfo {
+            pane_id: pane_id.to_string(),
+            cwd: cwd.to_string(),
+            generation,
+            birth_ts,
+            process_hint: hint.map(String::from),
+        }
     }
 
     #[test]
-    fn build_cwd_pane_map_disambiguates_by_codex_hint() {
-        let now = Utc::now();
-        let infos = vec![
-            PaneCwdInfo {
-                pane_id: "%0".to_string(),
-                cwd: "/home/user/project".to_string(),
-                generation: Some(1),
-                birth_ts: Some(now),
-                has_codex_hint: false,
-            },
-            PaneCwdInfo {
-                pane_id: "%1".to_string(),
-                cwd: "/home/user/project".to_string(),
-                generation: Some(2),
-                birth_ts: Some(now),
-                has_codex_hint: true,
-            },
-        ];
-        let map = build_cwd_pane_map(&infos);
+    fn build_cwd_pane_groups_single_pane() {
+        let infos = vec![make_pane("%0", "/home/user/project", None)];
+        let map = build_cwd_pane_groups(&infos);
         assert_eq!(map.len(), 1);
+        assert_eq!(map["/home/user/project"].len(), 1);
+        assert_eq!(map["/home/user/project"][0].pane_id, "%0");
+    }
+
+    #[test]
+    fn build_cwd_pane_groups_different_cwds() {
+        let infos = vec![
+            make_pane("%0", "/project-a", None),
+            make_pane("%1", "/project-b", None),
+        ];
+        let map = build_cwd_pane_groups(&infos);
+        assert_eq!(map.len(), 2);
+        assert_eq!(map["/project-a"][0].pane_id, "%0");
+        assert_eq!(map["/project-b"][0].pane_id, "%1");
+    }
+
+    #[test]
+    fn build_cwd_pane_groups_multiple_panes_same_cwd() {
+        // 3 panes at same CWD: codex, zsh (None), claude — group should hold all 3
+        let infos = vec![
+            make_pane("%3", "/proj", Some("claude")),
+            make_pane("%1", "/proj", None),
+            make_pane("%2", "/proj", Some("codex")),
+        ];
+        let map = build_cwd_pane_groups(&infos);
+        assert_eq!(map.len(), 1);
+        let group = &map["/proj"];
+        assert_eq!(group.len(), 3, "all 3 panes must be in the group");
+        // tier sort: codex(%2,tier0) → neutral(%1,tier1) → claude(%3,tier2)
+        assert_eq!(group[0].pane_id, "%2", "codex pane first (tier 0)");
+        assert_eq!(group[1].pane_id, "%1", "neutral pane second (tier 1)");
+        assert_eq!(group[2].pane_id, "%3", "competing-agent pane last (tier 2)");
+    }
+
+    #[test]
+    fn build_cwd_pane_groups_tier_sort() {
+        // Verify 3-tier: codex(0) < neutral(1) < competing-agent(2), tiebreak by pane_id
+        let infos = vec![
+            make_pane("%5", "/x", Some("gemini")), // tier 2
+            make_pane("%3", "/x", None),           // tier 1
+            make_pane("%1", "/x", Some("codex")),  // tier 0
+            make_pane("%4", "/x", Some("claude")), // tier 2
+            make_pane("%2", "/x", None),           // tier 1
+        ];
+        let map = build_cwd_pane_groups(&infos);
+        let group = &map["/x"];
+        assert_eq!(group[0].pane_id, "%1"); // codex, tier 0
+        assert_eq!(group[1].pane_id, "%2"); // None, tier 1, pane_id "%2" < "%3"
+        assert_eq!(group[2].pane_id, "%3"); // None, tier 1
+        assert_eq!(group[3].pane_id, "%4"); // claude, tier 2, pane_id "%4" < "%5"
+        assert_eq!(group[4].pane_id, "%5"); // gemini, tier 2
+    }
+
+    // ── process_thread_list_response: stable multi-pane assignment ────
+
+    /// Creates a minimal `CodexAppServerClient` backed by a `cat` subprocess.
+    /// The subprocess is never actually communicated with in these tests;
+    /// we only exercise the pure-Rust assignment logic.
+    async fn make_test_client() -> CodexAppServerClient {
+        let mut child = Command::new("cat")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("cat must be available on the test host");
+        let stdin = child.stdin.take().expect("stdin piped");
+        let stdout = BufReader::new(child.stdout.take().expect("stdout piped"));
+        CodexAppServerClient {
+            _child: child,
+            stdin,
+            stdout,
+            next_id: 1,
+            last_thread_states: HashMap::new(),
+            thread_pane_bindings: HashMap::new(),
+        }
+    }
+
+    fn make_thread_list_response(thread_ids: &[&str]) -> serde_json::Value {
+        let threads: Vec<serde_json::Value> = thread_ids
+            .iter()
+            .map(|id| serde_json::json!({"id": id, "status": {"type": "idle"}}))
+            .collect();
+        serde_json::json!({"result": {"data": threads}})
+    }
+
+    #[tokio::test]
+    async fn process_thread_list_multiple_threads_stable_assignment() {
+        let mut client = make_test_client().await;
+        let now = Utc::now();
+        let panes = vec![
+            make_pane("%1", "/proj", Some("codex")),
+            make_pane("%2", "/proj", None),
+        ];
+        let resp = make_thread_list_response(&["t-a", "t-b"]);
+        let mut tick = HashSet::new();
+        let mut events = Vec::new();
+
+        client.process_thread_list_response(&resp, &panes, &mut tick, now, &mut events);
+
+        // t-a (first in thread_id sort) → %1 (first in pane group), t-b → %2
+        assert_eq!(client.thread_pane_bindings["t-a"].pane_id, "%1");
+        assert_eq!(client.thread_pane_bindings["t-b"].pane_id, "%2");
+        assert_eq!(events.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn process_thread_list_stable_assignment_across_ticks() {
+        let mut client = make_test_client().await;
+        let now = Utc::now();
+        let panes = vec![
+            make_pane_with_gen("%1", "/proj", Some("codex"), Some(1), None),
+            make_pane_with_gen("%2", "/proj", None, Some(1), None),
+        ];
+        let resp = make_thread_list_response(&["t-a", "t-b"]);
+
+        // Tick 1
+        let mut tick1 = HashSet::new();
+        client.process_thread_list_response(&resp, &panes, &mut tick1, now, &mut Vec::new());
+        assert_eq!(client.thread_pane_bindings["t-a"].pane_id, "%1");
+        assert_eq!(client.thread_pane_bindings["t-b"].pane_id, "%2");
+
+        // Tick 2 — same panes (generation matches) → same assignment
+        let now2 = now + chrono::Duration::seconds(3);
+        let mut tick2 = HashSet::new();
+        let mut events2 = Vec::new();
+        client.process_thread_list_response(&resp, &panes, &mut tick2, now2, &mut events2);
         assert_eq!(
-            map["/home/user/project"].pane_id, "%1",
-            "pane with codex hint should win"
+            client.thread_pane_bindings["t-a"].pane_id, "%1",
+            "assignment must be stable across ticks"
+        );
+        assert_eq!(client.thread_pane_bindings["t-b"].pane_id, "%2");
+    }
+
+    #[tokio::test]
+    async fn process_thread_list_freed_pane_reassigned_to_new_thread() {
+        let mut client = make_test_client().await;
+        let now = Utc::now();
+        let panes = vec![
+            make_pane_with_gen("%1", "/proj", Some("codex"), Some(1), None),
+            make_pane_with_gen("%2", "/proj", None, Some(1), None),
+        ];
+
+        // Tick 1: t-a → %1, t-b → %2
+        let resp1 = make_thread_list_response(&["t-a", "t-b"]);
+        let mut tick1 = HashSet::new();
+        client.process_thread_list_response(&resp1, &panes, &mut tick1, now, &mut Vec::new());
+
+        // Tick 2: t-a exits, t-c appears. t-b keeps %2; t-c should get %1 (freed).
+        let now2 = now + chrono::Duration::seconds(3);
+        let resp2 = make_thread_list_response(&["t-b", "t-c"]);
+        let mut tick2 = HashSet::new();
+        let mut events2 = Vec::new();
+        client.process_thread_list_response(&resp2, &panes, &mut tick2, now2, &mut events2);
+
+        assert_eq!(
+            client.thread_pane_bindings["t-b"].pane_id, "%2",
+            "t-b keeps its pane"
+        );
+        assert_eq!(
+            client.thread_pane_bindings["t-c"].pane_id, "%1",
+            "t-c gets the pane freed by t-a"
         );
     }
 
-    #[test]
-    fn build_cwd_pane_map_different_cwds() {
-        let infos = vec![
-            PaneCwdInfo {
-                pane_id: "%0".to_string(),
-                cwd: "/project-a".to_string(),
-                generation: None,
-                birth_ts: None,
-                has_codex_hint: false,
-            },
-            PaneCwdInfo {
-                pane_id: "%1".to_string(),
-                cwd: "/project-b".to_string(),
-                generation: None,
-                birth_ts: None,
-                has_codex_hint: false,
-            },
-        ];
-        let map = build_cwd_pane_map(&infos);
-        assert_eq!(map.len(), 2);
-        assert_eq!(map["/project-a"].pane_id, "%0");
-        assert_eq!(map["/project-b"].pane_id, "%1");
-    }
+    #[tokio::test]
+    async fn process_thread_list_generation_mismatch_invalidates_cache() {
+        let mut client = make_test_client().await;
+        let now = Utc::now();
 
-    #[test]
-    fn build_cwd_pane_map_codex_hint_wins_regardless_of_order() {
-        // Codex hint pane listed first
-        let infos = vec![
-            PaneCwdInfo {
-                pane_id: "%1".to_string(),
-                cwd: "/shared".to_string(),
-                generation: Some(1),
-                birth_ts: None,
-                has_codex_hint: true,
-            },
-            PaneCwdInfo {
-                pane_id: "%0".to_string(),
-                cwd: "/shared".to_string(),
-                generation: Some(1),
-                birth_ts: None,
-                has_codex_hint: false,
-            },
+        // Tick 1: bind t-a → %1 (gen=1)
+        let panes_gen1 = vec![make_pane_with_gen(
+            "%1",
+            "/proj",
+            Some("codex"),
+            Some(1),
+            None,
+        )];
+        let resp = make_thread_list_response(&["t-a"]);
+        let mut tick1 = HashSet::new();
+        client.process_thread_list_response(&resp, &panes_gen1, &mut tick1, now, &mut Vec::new());
+        assert_eq!(client.thread_pane_bindings["t-a"].pane_id, "%1");
+
+        // Pane %1 is recycled (generation bumped to 2). New pane %2 added.
+        let panes_gen2 = vec![
+            make_pane_with_gen("%1", "/proj", Some("codex"), Some(2), None), // recycled
+            make_pane_with_gen("%2", "/proj", None, Some(1), None),
         ];
-        let map = build_cwd_pane_map(&infos);
+        let now2 = now + chrono::Duration::seconds(3);
+        let mut tick2 = HashSet::new();
+        let mut events2 = Vec::new();
+        client.process_thread_list_response(&resp, &panes_gen2, &mut tick2, now2, &mut events2);
+
+        // Old binding (gen=1) is invalid → should get new unclaimed pane (%1, gen=2)
+        let binding = &client.thread_pane_bindings["t-a"];
+        assert_eq!(binding.pane_id, "%1");
         assert_eq!(
-            map["/shared"].pane_id, "%1",
-            "codex hint pane should win even when listed first"
+            binding.pane_generation,
+            Some(2),
+            "binding must use new generation"
         );
     }
 }
