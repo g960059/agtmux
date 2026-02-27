@@ -48,11 +48,19 @@ B) Proposed task board update:
 
 C) Open questions ONLY if Escalation triggers.
 
+## Implementation checkpoints (context-compaction safety)
+- **Multi-phase tasks**: update `docs/70_progress.md` after **each phase completes** — do NOT defer to task close.
+  - Include: phase name, what was changed, files touched, live verification result.
+  - Rationale: context compaction mid-task loses unreported phase details; next session resumes from docs, not memory.
+- **`docs/60_tasks.md` DONE entry**: reflect all phases on task close (not just Phase 1).
+- **MEMORY.md test count**: update immediately after `just verify` PASS (before proceeding to the next step).
+
 ## Quality Gates (project-specific)
 - Format: `just fmt` must PASS (`cargo fmt --all -- --check`)
 - Typecheck/Lint: `just lint` must PASS (strict clippy deny flags)
 - Tests: `just test` must PASS (`cargo test --workspace --all-features --locked`)
 - Unified local gate: `just verify` (fmt + lint + test) must PASS before review/commit/PR.
+- **After `just verify` PASS**: update `MEMORY.md` test count (see Implementation checkpoints).
 - Online/e2e source tests MUST run `just preflight-online` before `just test-source-codex` / `just test-source-claude`.
   - Preflight must fail-closed on tmux/CLI auth/network readiness.
 - Task-specific gate suites in `docs/60_tasks.md` (contract/integration/regression) must PASS for touched scope.
