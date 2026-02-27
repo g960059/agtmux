@@ -430,6 +430,68 @@ impl DaemonProjection {
     pub fn pane_count(&self) -> usize {
         self.panes.len()
     }
+
+    /// Evaluate deterministic freshness for all tracked panes.
+    ///
+    /// Panes whose deterministic evidence has gone stale (no new events
+    /// within `DOWN_THRESHOLD_SECS`) are downgraded to heuristic evidence
+    /// mode. This prevents panes from being permanently frozen as
+    /// deterministic when their source stops emitting events.
+    ///
+    /// Returns the number of panes whose evidence mode changed.
+    pub fn tick_freshness(&mut self, now: DateTime<Utc>) -> usize {
+        let mut changed = 0;
+
+        // Find panes whose resolver state is Deterministic but freshness is not Fresh
+        let stale_keys: Vec<String> = self
+            .resolver_states
+            .iter()
+            .filter(|(_, state)| {
+                state.current_tier == EvidenceTier::Deterministic
+                    && resolver::classify_freshness(state.deterministic_last_seen, now)
+                        != resolver::Freshness::Fresh
+            })
+            .map(|(k, _)| k.clone())
+            .collect();
+
+        for key in stale_keys {
+            // Run resolver with empty events to trigger tier fallback
+            let prev_state = self.resolver_states.get(&key);
+            let output = resolver::resolve(vec![], now, prev_state, &self.source_ranks);
+            self.resolver_states
+                .insert(key.clone(), output.next_state.clone());
+
+            // Update pane evidence_mode if it changed
+            if let Some(pane) = self.panes.get_mut(&key) {
+                let new_mode = tier_to_evidence_mode(output.result.winner_tier);
+                if pane.evidence_mode != new_mode {
+                    pane.evidence_mode = new_mode;
+                    pane.updated_at = now;
+                    self.version += 1;
+                    self.changes.push(StateChange {
+                        version: self.version,
+                        session_key: String::new(),
+                        pane_id: Some(key.clone()),
+                        timestamp: now,
+                    });
+                    changed += 1;
+                }
+            }
+
+            // Update session evidence_mode if it changed
+            for session in self.sessions.values_mut() {
+                if session.evidence_mode == EvidenceMode::Deterministic {
+                    let new_mode = tier_to_evidence_mode(output.result.winner_tier);
+                    if session.evidence_mode != new_mode {
+                        session.evidence_mode = new_mode;
+                        session.updated_at = now;
+                    }
+                }
+            }
+        }
+
+        changed
+    }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────
@@ -1959,5 +2021,68 @@ mod tests {
             "deterministic_fresh_active should prevent no-agent demotion \
              when deterministic evidence is still fresh from another session"
         );
+    }
+
+    // ── tick_freshness tests ───────────────────────────────────────
+
+    #[test]
+    fn tick_freshness_downgrades_stale_pane() {
+        let now = Utc::now();
+        let mut proj = DaemonProjection::new();
+
+        // Apply a deterministic event at T0
+        let det_event = make_event(
+            "evt-det",
+            agtmux_core_v5::types::Provider::Codex,
+            SourceKind::CodexAppserver,
+            "sess-1",
+            Some("%1"),
+            "thread.idle",
+            now,
+        );
+        proj.apply_events(vec![det_event], now);
+
+        let pane = proj.get_pane("%1").expect("pane %1");
+        assert_eq!(pane.evidence_mode, EvidenceMode::Deterministic);
+
+        // Advance time past DOWN_THRESHOLD (15s + margin)
+        let later = now + TimeDelta::seconds(20);
+        let changed = proj.tick_freshness(later);
+
+        assert!(changed > 0, "should have downgraded at least one pane");
+        let pane_after = proj.get_pane("%1").expect("pane %1");
+        assert_eq!(
+            pane_after.evidence_mode,
+            EvidenceMode::Heuristic,
+            "stale deterministic pane should fall back to heuristic"
+        );
+    }
+
+    #[test]
+    fn tick_freshness_keeps_fresh_pane() {
+        let now = Utc::now();
+        let mut proj = DaemonProjection::new();
+
+        let det_event = make_event(
+            "evt-det",
+            agtmux_core_v5::types::Provider::Codex,
+            SourceKind::CodexAppserver,
+            "sess-1",
+            Some("%1"),
+            "thread.idle",
+            now,
+        );
+        proj.apply_events(vec![det_event], now);
+
+        // Only 1 second later — still fresh
+        let soon = now + TimeDelta::seconds(1);
+        let changed = proj.tick_freshness(soon);
+
+        assert_eq!(
+            changed, 0,
+            "fresh deterministic pane should not be downgraded"
+        );
+        let pane = proj.get_pane("%1").expect("pane %1");
+        assert_eq!(pane.evidence_mode, EvidenceMode::Deterministic);
     }
 }

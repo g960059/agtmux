@@ -18,7 +18,7 @@ use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
 use agtmux_source_codex_appserver::translate::CodexRawEvent;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
@@ -47,12 +47,19 @@ struct ThreadPaneBinding {
     pane_birth_ts: Option<chrono::DateTime<Utc>>,
 }
 
-/// Last emitted thread state (used for deduplication).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Last emitted thread state (used for deduplication + heartbeat).
+#[derive(Debug, Clone)]
 struct LastThreadState {
     status: String,
     pane_id: Option<String>,
+    /// When this state was last emitted (for heartbeat re-emission).
+    emitted_at: DateTime<Utc>,
 }
+
+/// Heartbeat interval: re-emit unchanged thread state to keep
+/// deterministic freshness alive. Must be shorter than
+/// `agtmux_core_v5::resolver::FRESH_THRESHOLD_SECS` (3s).
+const HEARTBEAT_INTERVAL_SECS: i64 = 2;
 
 /// Build a cwd → best-matching pane map for thread/list correlation.
 ///
@@ -402,20 +409,25 @@ impl CodexAppServerClient {
                         .get(thread_id)
                         .and_then(|s| s.pane_id.clone())
                 });
-            let next_state = LastThreadState {
-                status: status.to_string(),
-                pane_id: effective_pane_id,
+            // Emit when status/pane changed, or heartbeat interval elapsed.
+            let should_emit = match self.last_thread_states.get(thread_id) {
+                None => true,
+                Some(prev) => {
+                    prev.status != status
+                        || prev.pane_id != effective_pane_id
+                        || (now - prev.emitted_at).num_seconds() >= HEARTBEAT_INTERVAL_SECS
+                }
             };
 
-            // Emit when either status or pane association changed.
-            let changed = self
-                .last_thread_states
-                .get(thread_id)
-                .is_none_or(|prev| prev != &next_state);
-
-            if changed {
-                self.last_thread_states
-                    .insert(thread_id.to_string(), next_state);
+            if should_emit {
+                self.last_thread_states.insert(
+                    thread_id.to_string(),
+                    LastThreadState {
+                        status: status.to_string(),
+                        pane_id: effective_pane_id,
+                        emitted_at: now,
+                    },
+                );
 
                 let event_binding =
                     observed_binding.or_else(|| self.thread_pane_bindings.get(thread_id).cloned());

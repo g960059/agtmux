@@ -589,6 +589,11 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
         st.daemon.apply_events(gw_response.events, now);
     }
 
+    // 10b. Tick freshness: downgrade stale deterministic panes to heuristic.
+    // This ensures panes whose deterministic source stopped emitting events
+    // (e.g. Codex exited, Claude idle) correctly fall back to heuristic.
+    st.daemon.tick_freshness(now);
+
     // 11. Compact consumed events to prevent unbounded memory growth.
     // Poller: trim events up to the gateway's source cursor.
     if let Some(poller_cursor) = st.gateway.source_cursor(SourceKind::Poller)
