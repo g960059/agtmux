@@ -184,7 +184,18 @@ impl ClaudeJsonlSourceState {
             if !watcher.is_bootstrapped() {
                 // First poll: mark bootstrapped regardless; emit bootstrap only if no real events.
                 if !emitted_real_event {
-                    events.push(bootstrap_event(discovery, now));
+                    if discovery.cwd_candidate_count > 1 {
+                        // Multiple panes share this CWD (e.g. Codex + Claude in the same
+                        // project dir).  Emitting a full bootstrap (is_heartbeat=false) for
+                        // every pane would write last_real_activity[Claude] for ALL of them,
+                        // causing Claude to win provider arbitration even for Codex panes.
+                        // Instead, emit an ambiguous bootstrap (is_heartbeat=true) that only
+                        // refreshes deterministic_last_seen — leaving last_real_activity
+                        // untouched so select_winning_provider can resolve via actual events.
+                        events.push(ambiguous_cwd_bootstrap(discovery, now));
+                    } else {
+                        events.push(bootstrap_event(discovery, now));
+                    }
                 }
                 watcher.mark_bootstrapped();
             } else if !emitted_real_event {
@@ -229,6 +240,36 @@ fn bootstrap_event(discovery: &SessionDiscovery, now: DateTime<Utc>) -> SourceEv
         payload: serde_json::json!({}),
         confidence: 1.0,
         is_heartbeat: false, // KEY: updates last_real_activity in the projection
+    }
+}
+
+/// Build a bootstrap event for the ambiguous multi-pane case.
+///
+/// Emitted on the FIRST poll when `cwd_candidate_count > 1` (multiple panes
+/// share the same CWD) and no real events were observed.
+///
+/// Setting `is_heartbeat = true` keeps the semantics of an idle heartbeat:
+/// it refreshes `deterministic_last_seen` without writing `last_real_activity`.
+/// This prevents a false-positive Claude attribution for panes that are
+/// actually running Codex (or another agent) in the same project directory.
+/// `select_winning_provider` will correctly award that pane to the provider
+/// that has actual `last_real_activity` evidence (e.g. Codex App Server events).
+fn ambiguous_cwd_bootstrap(discovery: &SessionDiscovery, now: DateTime<Utc>) -> SourceEventV2 {
+    SourceEventV2 {
+        event_id: format!("claude-jsonl-ambi-boot-{}", discovery.pane_id),
+        provider: Provider::Claude,
+        source_kind: SourceKind::ClaudeJsonl,
+        tier: EvidenceTier::Deterministic,
+        observed_at: now,
+        session_key: discovery.session_id.clone(),
+        pane_id: Some(discovery.pane_id.clone()),
+        pane_generation: discovery.pane_generation,
+        pane_birth_ts: discovery.pane_birth_ts,
+        source_event_id: None,
+        event_type: "activity.idle".to_owned(),
+        payload: serde_json::json!({}),
+        confidence: 1.0,
+        is_heartbeat: true, // KEY: does NOT write last_real_activity
     }
 }
 
@@ -401,6 +442,7 @@ mod tests {
             jsonl_path: jsonl_path.clone(),
             pane_generation: Some(1),
             pane_birth_ts: None,
+            cwd_candidate_count: 1,
         }];
 
         let mut watchers = HashMap::new();
@@ -452,6 +494,7 @@ mod tests {
             jsonl_path: jsonl_path.clone(),
             pane_generation: Some(3),
             pane_birth_ts: None,
+            cwd_candidate_count: 1,
         }];
 
         let mut watchers = HashMap::new();
@@ -511,6 +554,7 @@ mod tests {
             jsonl_path: jsonl_path.clone(),
             pane_generation: None,
             pane_birth_ts: None,
+            cwd_candidate_count: 1,
         }];
 
         let mut watchers = HashMap::new();
@@ -548,6 +592,78 @@ mod tests {
         let events2 = ClaudeJsonlSourceState::poll_files(&mut watchers, &discoveries, now());
         assert_eq!(events2.len(), 1, "second poll emits heartbeat");
         assert!(events2[0].is_heartbeat, "subsequent poll must be heartbeat");
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// When `cwd_candidate_count > 1`, the first idle poll must emit an
+    /// ambiguous bootstrap (`is_heartbeat=true`) instead of a full bootstrap
+    /// (`is_heartbeat=false`).  This prevents Claude from winning
+    /// `select_winning_provider` for Codex panes that share the same CWD.
+    #[test]
+    fn poll_files_emits_ambiguous_bootstrap_when_cwd_has_multiple_panes() {
+        use std::fs;
+
+        let tmp = std::env::temp_dir().join("agtmux-test-ambi-boot");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).expect("test");
+
+        let jsonl_a = tmp.join("pane-a.jsonl");
+        let jsonl_b = tmp.join("pane-b.jsonl");
+        // Both watchers start at EOF (production behaviour): no new lines.
+        fs::write(
+            &jsonl_a,
+            "{\"type\":\"assistant\",\"timestamp\":\"2026-02-27T10:00:00Z\",\"uuid\":\"ua\"}\n",
+        )
+        .expect("test");
+        fs::write(
+            &jsonl_b,
+            "{\"type\":\"assistant\",\"timestamp\":\"2026-02-27T10:00:00Z\",\"uuid\":\"ub\"}\n",
+        )
+        .expect("test");
+
+        // cwd_candidate_count=2 for both panes (shared CWD scenario).
+        let discoveries = vec![
+            SessionDiscovery {
+                pane_id: "%35".to_owned(),
+                session_id: "sess-a".to_owned(),
+                jsonl_path: jsonl_a.clone(),
+                pane_generation: Some(1),
+                pane_birth_ts: None,
+                cwd_candidate_count: 2,
+            },
+            SessionDiscovery {
+                pane_id: "%297".to_owned(),
+                session_id: "sess-b".to_owned(),
+                jsonl_path: jsonl_b.clone(),
+                pane_generation: Some(1),
+                pane_birth_ts: None,
+                cwd_candidate_count: 2,
+            },
+        ];
+
+        let mut watchers = HashMap::new();
+        watchers.insert("%35".to_owned(), SessionFileWatcher::new(jsonl_a));
+        watchers.insert("%297".to_owned(), SessionFileWatcher::new(jsonl_b));
+
+        // First poll: both panes idle + cwd_candidate_count=2 → ambiguous bootstrap
+        let events = ClaudeJsonlSourceState::poll_files(&mut watchers, &discoveries, now());
+        assert_eq!(events.len(), 2, "one event per pane");
+        for ev in &events {
+            assert!(
+                ev.is_heartbeat,
+                "pane {} with shared CWD must emit ambiguous bootstrap (is_heartbeat=true)",
+                ev.pane_id.as_deref().unwrap_or("?")
+            );
+            assert_eq!(ev.event_type, "activity.idle");
+        }
+
+        // Second poll: still no new lines → regular idle heartbeat (same semantics)
+        let events2 = ClaudeJsonlSourceState::poll_files(&mut watchers, &discoveries, now());
+        assert_eq!(events2.len(), 2);
+        for ev in &events2 {
+            assert!(ev.is_heartbeat, "subsequent polls always emit heartbeat");
+        }
 
         let _ = fs::remove_dir_all(&tmp);
     }

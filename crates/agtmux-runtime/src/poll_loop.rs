@@ -427,17 +427,32 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
     // Claude.  After a daemon restart the projection is empty, so idle Claude panes (running
     // as `node`) were never discovered → no heartbeat → Codex CWD assignment won falsely.
     //
-    // We now include all panes EXCEPT those we KNOW are not Claude:
-    //   - `shell` (zsh/bash/…): tier-3 panes that never run agents.  Including them would
-    //     produce false-positive Claude attribution for any directory with an old JSONL file.
-    //   - `codex`: deterministic Codex evidence is handled by Step 6a; also including here
-    //     would produce spurious cross-provider heartbeats.
-    // All other panes (node, claude CLI, unknown runtimes) are included.
+    // T-127: positive allowlist for neutral-process panes.
+    // We include panes that fall into exactly one of these categories:
+    //   a) process_hint="claude"  → explicit Claude CLI pane (always include)
+    //   b) process_hint=None + current_cmd in CLAUDE_JSONL_RUNTIME_CMDS
+    //      → neutral runtime that can host Claude Code (node/bun/deno/python/python3)
+    //
+    // We EXCLUDE:
+    //   - process_hint="shell" (zsh/bash/…): never an agent runtime
+    //   - process_hint="codex":  handled by Step 6a
+    //   - process_hint=None + current_cmd NOT in allowlist (yazi, htop, vim, …)
+    //   - any other unknown hint: fail-closed
     {
-        // Build snapshot lookup for process_hint (same pattern as Step 6a PaneCwdInfo build)
+        /// Neutral-runtime commands that can host a Claude JSONL session.
+        /// Panes with process_hint=None are only included if current_cmd matches.
+        /// This prevents false-positive Claude attribution for terminal tools
+        /// (yazi, htop, vim, …) that happen to share a CWD with old JSONL files.
+        const CLAUDE_JSONL_RUNTIME_CMDS: &[&str] = &["node", "bun", "deno", "python", "python3"];
+
+        // Build snapshot lookup for process_hint and current_cmd.
         let snapshot_hint: std::collections::HashMap<&str, Option<&str>> = snapshots
             .iter()
             .map(|s| (s.pane_id.as_str(), s.process_hint.as_deref()))
+            .collect();
+        let snapshot_cmd: std::collections::HashMap<&str, &str> = snapshots
+            .iter()
+            .map(|s| (s.pane_id.as_str(), s.current_cmd.as_str()))
             .collect();
 
         let candidate_pane_cwds: Vec<(
@@ -448,9 +463,20 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
         )> = panes
             .iter()
             .filter(|p| {
-                // Exclude definite non-Claude panes to avoid false positives
                 let hint = snapshot_hint.get(p.pane_id.as_str()).copied().flatten();
-                !matches!(hint, Some("shell") | Some("codex"))
+                match hint {
+                    // Definite non-Claude processes: exclude
+                    Some("shell") | Some("codex") => false,
+                    // Known Claude CLI: always include
+                    Some("claude") => true,
+                    // Unknown non-None hint: fail-closed, exclude
+                    Some(_) => false,
+                    // Neutral runtime: include only if current_cmd is a known Claude runtime
+                    None => {
+                        let cmd = snapshot_cmd.get(p.pane_id.as_str()).copied().unwrap_or("");
+                        CLAUDE_JSONL_RUNTIME_CMDS.contains(&cmd)
+                    }
+                }
             })
             .map(|p| {
                 let (pane_gen, pane_birth) = st

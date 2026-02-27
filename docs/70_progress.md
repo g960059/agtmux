@@ -7,6 +7,78 @@
 ---
 
 ## 2026-02-27 (cont.)
+### T-127: Pane attribution false-positive fixes — Design Decision
+
+#### 3 bugs identified via live `agtmux list-panes`
+1. **Bug A**: `%35` (Codex/node, CWD=test-session) → `claude deterministic` (should be `codex`)
+   - Root cause: T-126 Phase 3 で `bootstrap_event(is_heartbeat=false)` を全 CWD 候補に emit。`%35` と `%297` が同一 CWD を持つため、両方に `last_real_activity[Claude]` が書き込まれる。`select_winning_provider` で T_claude ≥ T_codex → Claude wins 誤判定
+2. **Bug B**: `%391` (yazi file manager) → `claude deterministic` (should be `unmanaged`)
+   - Root cause: Step 6b フィルタが `Some("shell") | Some("codex")` のみ除外。`process_hint=None` (yazi) はフィルタを通過してしまう
+3. **Bug C**: `%287`, `%307` (zsh) → `claude heuristic` (should be `unmanaged`)
+   - Root cause: `detect()` が `process_hint=Some("shell")` をチェックしない。terminal capture に Claude-like テキストがあると誤判定
+
+#### 3 architectural approaches compared
+
+**Option 1 (Claude agent)**: `DeterministicClaimSet` per-tick in poll_loop — Codex が claim した pane_id は Step 6b から除外
+- 問題: ClaimSet は CWD→pane_id binding であり、同一 CWD に両 agent がいる場合の source 間競合を解決しない。Gemini 等の追加時に poll_loop 修正が必要
+
+**Option 2 (My — projection 2-pass)**: `is_bootstrap: bool` flag + projection 2-pass で bootstrap と heartbeat を分離
+- 問題: projection と Step 6b の間でフラグを伝達する必要あり。ordering dependency が生まれ blast radius 大
+
+**Option 3 (Codex reviewer — chosen)**: `cwd_candidate_count: usize` を source layer の `SessionDiscovery` に持たせる
+- CWD に対して pane が 1 つなら → `bootstrap_event(is_heartbeat=false)` (従来通り)
+- CWD に対して pane が 2+ なら → `ambiguous_cwd_bootstrap(is_heartbeat=true)` → `last_real_activity[Claude]` を書かない → `select_winning_provider` でそのままでは Claude が勝てない → Codex の `last_real_activity` が優先
+- 最小 blast radius (source layer のみ変更)。poll_loop / projection / gateway の変更なし。Gemini/Copilot 等が将来追加されても自動的に恩恵を受ける
+
+#### Fixes chosen
+- **Bug A**: `cwd_candidate_count` in `SessionDiscovery` + `ambiguous_cwd_bootstrap(is_heartbeat=true)` in source.rs
+- **Bug B**: `CLAUDE_RUNTIME_CMDS = ["node", "bun", "deno", "python", "python3"]` positive allowlist in Step 6b (poll_loop.rs) — `current_cmd` が allowlist にない pane は候補から除外
+- **Bug C**: `detect()` early return — `process_hint=Some("shell") → return None` (detect.rs)
+
+#### Files to change
+- `crates/agtmux-source-claude-jsonl/src/discovery.rs`: `cwd_candidate_count` フィールド追加
+- `crates/agtmux-source-claude-jsonl/src/source.rs`: `ambiguous_cwd_bootstrap()` + poll_files() 分岐
+- `crates/agtmux-runtime/src/poll_loop.rs`: `CLAUDE_RUNTIME_CMDS` allowlist
+- `crates/agtmux-source-poller/src/detect.rs`: shell early return (failing tests already written as spec)
+
+### T-127: Pane attribution false-positive fixes — Completed
+
+#### Bug C fix: detect.rs shell early return
+- `detect(meta, def)` の先頭に `if meta.process_hint.as_deref() == Some("shell") { return None; }` を追加
+- zsh/bash 等の shell pane が capture buffer に stale な agent 出力を持っていても heuristic 検出されなくなった
+- 2 failing tests (spec) が PASS に: `detect_shell_pane_never_assigned_even_with_claude_output`, `detect_shell_pane_never_assigned_codex`
+
+#### Bug B fix: poll_loop.rs CLAUDE_JSONL_RUNTIME_CMDS allowlist
+- Step 6b filter を positive allowlist 方式に変更
+- `CLAUDE_JSONL_RUNTIME_CMDS = ["node", "bun", "deno", "python", "python3"]` を定義
+- `process_hint=None` の pane は `current_cmd` が allowlist に含まれる場合のみ JSONL discovery 候補に
+- `process_hint=Some("claude")` → 常に含む、`Some("codex")|Some("shell")` → 除外、`Some(unknown)` → fail-closed で除外
+
+#### Bug A fix: discovery.rs + source.rs cwd_candidate_count
+- `SessionDiscovery.cwd_candidate_count: usize` を追加。同一 canonical CWD の候補 pane 数を事前集計
+- `discover_sessions_in_projects_dir`: canonical CWD を事前解決し `HashMap<&str, usize>` でカウント、各 `SessionDiscovery` に埋め込む
+- `source.rs poll_files()`: 初回 idle poll 時:
+  - `count == 1` → `bootstrap_event(is_heartbeat=false)` (従来通り)
+  - `count > 1` → `ambiguous_cwd_bootstrap(is_heartbeat=true)` — `last_real_activity` を書かない
+- `ambiguous_cwd_bootstrap()` 関数追加 (`idle_heartbeat` と同じ内容だが用途/コメントが明確に区別)
+
+#### Tests (4 new)
+1. `detect_shell_pane_never_assigned_even_with_claude_output` — shell pane は Claude capture があっても None (detect.rs)
+2. `detect_shell_pane_never_assigned_codex` — shell pane は Codex にも None (detect.rs)
+3. `discover_sessions_cwd_candidate_count_multi_pane` — 2 pane 同一 CWD → count=2、単独 CWD → count=1 (discovery.rs)
+4. `poll_files_emits_ambiguous_bootstrap_when_cwd_has_multiple_panes` — count=2 → is_heartbeat=true (source.rs)
+
+#### Gate evidence
+- 656 tests total (652 → 654 → 656), `just verify` PASS (fmt + lint + test)
+
+#### Files changed
+- `crates/agtmux-source-poller/src/detect.rs`: shell early return
+- `crates/agtmux-source-claude-jsonl/src/discovery.rs`: `cwd_candidate_count`, `HashMap` import, refactor
+- `crates/agtmux-source-claude-jsonl/src/source.rs`: `ambiguous_cwd_bootstrap()`, poll_files() branch
+- `crates/agtmux-runtime/src/poll_loop.rs`: `CLAUDE_JSONL_RUNTIME_CMDS` allowlist + `snapshot_cmd` lookup
+
+---
+
 ### T-126: JSONL all-pane discovery fix — Completed (3 phases)
 
 #### Root cause (confirmed)

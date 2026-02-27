@@ -80,6 +80,14 @@ pub fn mvp_provider_defs() -> Vec<ProviderDetectDef> {
 /// Returns `Some(DetectResult)` if at least one signal matches,
 /// or `None` if no signals match.
 pub fn detect(meta: &PaneMeta, def: &ProviderDetectDef) -> Option<DetectResult> {
+    // Shell panes (zsh/bash/…) must never be attributed to any agent provider.
+    // process_hint="shell" is set by inspect_pane_processes for SHELL_CMDS.
+    // Even if the terminal buffer contains stale agent output, a shell pane
+    // cannot be running an agent — the agent process has already exited.
+    if meta.process_hint.as_deref() == Some("shell") {
+        return None;
+    }
+
     let mut confidence: f64 = 0.0;
     let mut provider_hint = false;
     let mut cmd_match = false;
@@ -542,5 +550,42 @@ mod tests {
         };
         let result = detect_best(&meta);
         assert!(result.is_none(), "title-only + login shell → None");
+    }
+
+    #[test]
+    fn detect_shell_pane_never_assigned_even_with_claude_output() {
+        // A zsh pane whose buffer contains Claude output (stale from a previous command)
+        // must NOT be attributed to Claude — process_hint="shell" blocks all heuristic detection.
+        let claude_def = &mvp_provider_defs()[0];
+        let meta = PaneMeta {
+            pane_title: "✳ Claude Code".to_string(),
+            current_cmd: "zsh".to_string(),
+            process_hint: Some("shell".to_string()),
+            capture_lines: vec![
+                "╭─ Claude Code".to_string(),
+                "│ some tool output".to_string(),
+            ],
+        };
+        let result = detect(&meta, claude_def);
+        assert!(
+            result.is_none(),
+            "shell pane must never be assigned to Claude even if terminal shows Claude output"
+        );
+    }
+
+    #[test]
+    fn detect_shell_pane_never_assigned_codex() {
+        let codex_def = &mvp_provider_defs()[1];
+        let meta = PaneMeta {
+            pane_title: "openai codex".to_string(),
+            current_cmd: "bash".to_string(),
+            process_hint: Some("shell".to_string()),
+            capture_lines: vec!["codex> some output".to_string()],
+        };
+        let result = detect(&meta, codex_def);
+        assert!(
+            result.is_none(),
+            "shell pane must never be assigned to Codex"
+        );
     }
 }

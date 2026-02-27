@@ -23,6 +23,11 @@
 - [ ] (none)
 
 ## DONE (keep short)
+- [x] T-127 (P1) [MVP] Pane attribution false-positive fixes (3 bugs)
+  - Bug A: `cwd_candidate_count: usize` in `SessionDiscovery` + `ambiguous_cwd_bootstrap(is_heartbeat=true)` in source.rs。同一 CWD の複数 pane で bootstrap が `last_real_activity[Claude]` を汚染しなくなった
+  - Bug B: `CLAUDE_JSONL_RUNTIME_CMDS` positive allowlist in Step 6b filter (poll_loop.rs)。yazi/htop 等 neutral-process pane が JSONL discovery から除外された
+  - Bug C: `detect()` shell early return (detect.rs)。`process_hint="shell"` → None。zsh pane の heuristic Claude/Codex 誤帰属を防止
+  - 4 new tests: `detect_shell_pane_never_assigned_even_with_claude_output`, `detect_shell_pane_never_assigned_codex`, `discover_sessions_cwd_candidate_count_multi_pane`, `poll_files_emits_ambiguous_bootstrap_when_cwd_has_multiple_panes`. 656 tests total, `just verify` PASS.
 - [x] T-126 (P1) [MVP] Claude JSONL all-pane discovery fix (idle session detection after daemon restart)
   - 根本原因: Step 6b が `claude_pane_ids` でゲート → daemon restart 後 projection 空 → discovery なし → heartbeat なし → Codex wins (vicious cycle)
   - Phase 1: `claude_pane_ids` フィルタ廃止 → `snapshot_hint` で process_hint チェック → `Some("shell")|Some("codex")` pane を除外した全候補を `discover_sessions` に渡す (false positive 防止)

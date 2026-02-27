@@ -6,6 +6,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use tracing::warn;
@@ -42,6 +43,19 @@ pub struct SessionDiscovery {
     pub jsonl_path: PathBuf,
     pub pane_generation: Option<u64>,
     pub pane_birth_ts: Option<DateTime<Utc>>,
+    /// Number of candidate panes that share the same canonical CWD.
+    ///
+    /// Used by `poll_files` to choose between a full bootstrap event
+    /// (`is_heartbeat=false`, count == 1) and an ambiguous bootstrap
+    /// (`is_heartbeat=true`, count > 1).  When multiple panes share a CWD
+    /// — e.g. Codex and Claude running side-by-side in the same project —
+    /// emitting a full bootstrap for every pane would poison
+    /// `last_real_activity[Claude]` for Codex panes and cause false
+    /// Claude attribution.  The ambiguous bootstrap only refreshes
+    /// `deterministic_last_seen`, leaving `last_real_activity` untouched
+    /// so `select_winning_provider` can resolve the conflict via actual
+    /// activity timestamps rather than bootstrap timing.
+    pub cwd_candidate_count: usize,
 }
 
 /// Encode a path to the format used by Claude Code for project directories.
@@ -75,17 +89,32 @@ fn discover_sessions_in_projects_dir(
     pane_cwds: &[(String, String, Option<u64>, Option<DateTime<Utc>>)],
     claude_projects_dir: &Path,
 ) -> Vec<SessionDiscovery> {
+    // Resolve canonical CWD once per pane to avoid redundant filesystem calls.
+    let canonical_cwds: Vec<String> = pane_cwds
+        .iter()
+        .map(|(_, cwd, _, _)| {
+            std::fs::canonicalize(cwd)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| cwd.clone())
+        })
+        .collect();
+
+    // Count how many candidate panes share each canonical CWD.
+    // Used to distinguish single-pane vs. multi-pane CWD scenarios for
+    // bootstrap event selection (full bootstrap vs. ambiguous bootstrap).
+    let mut cwd_count: HashMap<&str, usize> = HashMap::new();
+    for c in &canonical_cwds {
+        *cwd_count.entry(c.as_str()).or_insert(0) += 1;
+    }
+
     let mut results = Vec::new();
 
-    for (pane_id, cwd, pane_gen, pane_birth) in pane_cwds {
-        // Canonicalize the CWD to resolve symlinks/worktrees
-        let canonical_cwd = match std::fs::canonicalize(cwd) {
-            Ok(p) => p.to_string_lossy().to_string(),
-            Err(_) => cwd.clone(),
-        };
-
-        let project_dir = claude_projects_dir.join(encode_path(&canonical_cwd));
-        let Some((session_id, jsonl_path)) = discover_project_session(&project_dir, &canonical_cwd)
+    for ((pane_id, _cwd, pane_gen, pane_birth), canonical_cwd) in
+        pane_cwds.iter().zip(&canonical_cwds)
+    {
+        let cwd_candidate_count = *cwd_count.get(canonical_cwd.as_str()).unwrap_or(&1);
+        let project_dir = claude_projects_dir.join(encode_path(canonical_cwd));
+        let Some((session_id, jsonl_path)) = discover_project_session(&project_dir, canonical_cwd)
         else {
             continue;
         };
@@ -96,6 +125,7 @@ fn discover_sessions_in_projects_dir(
             jsonl_path,
             pane_generation: *pane_gen,
             pane_birth_ts: *pane_birth,
+            cwd_candidate_count,
         });
     }
 
@@ -453,6 +483,58 @@ mod tests {
         assert_eq!(discoveries[0].pane_id, "%11");
         assert_eq!(discoveries[0].session_id, "fallback-session");
         assert_eq!(discoveries[0].jsonl_path, jsonl_path);
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// When two panes share the same CWD (e.g. Codex + Claude in the same project),
+    /// `cwd_candidate_count` must be 2 for both discoveries.
+    /// A single-pane CWD must have count == 1.
+    #[test]
+    fn discover_sessions_cwd_candidate_count_multi_pane() {
+        let tmp = unique_temp_dir("discover-cwd-count");
+        let claude_projects_dir = tmp.join("claude-projects");
+
+        // Two panes share the same CWD.
+        let shared_cwd = tmp.join("shared-workspace");
+        fs::create_dir_all(&shared_cwd).expect("test");
+        let shared_canonical = fs::canonicalize(&shared_cwd)
+            .expect("test")
+            .to_string_lossy()
+            .to_string();
+
+        // A third pane has a different CWD.
+        let solo_cwd = tmp.join("solo-workspace");
+        fs::create_dir_all(&solo_cwd).expect("test");
+        let solo_canonical = fs::canonicalize(&solo_cwd)
+            .expect("test")
+            .to_string_lossy()
+            .to_string();
+
+        // Create JSONL files for both CWDs.
+        for cwd_str in [&shared_canonical, &solo_canonical] {
+            let dir = claude_projects_dir.join(encode_path(cwd_str));
+            fs::create_dir_all(&dir).expect("test");
+            fs::write(dir.join("session.jsonl"), "{}\n").expect("test");
+        }
+
+        let pane_cwds = vec![
+            ("%1".to_owned(), shared_canonical.clone(), None, None),
+            ("%2".to_owned(), shared_canonical.clone(), None, None),
+            ("%3".to_owned(), solo_canonical.clone(), None, None),
+        ];
+        let discoveries = discover_sessions_in_projects_dir(&pane_cwds, &claude_projects_dir);
+
+        assert_eq!(discoveries.len(), 3);
+
+        // Both shared-CWD panes should report count == 2.
+        let d1 = discoveries.iter().find(|d| d.pane_id == "%1").expect("d1");
+        let d2 = discoveries.iter().find(|d| d.pane_id == "%2").expect("d2");
+        let d3 = discoveries.iter().find(|d| d.pane_id == "%3").expect("d3");
+
+        assert_eq!(d1.cwd_candidate_count, 2, "%1 shares CWD with %2 → count 2");
+        assert_eq!(d2.cwd_candidate_count, 2, "%2 shares CWD with %1 → count 2");
+        assert_eq!(d3.cwd_candidate_count, 1, "%3 has unique CWD → count 1");
 
         let _ = fs::remove_dir_all(&tmp);
     }
