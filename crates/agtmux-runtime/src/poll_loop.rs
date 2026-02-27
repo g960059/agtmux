@@ -421,11 +421,11 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
     st.codex_source.set_appserver_connected(used_appserver);
 
     // 6b. Claude JSONL discovery + poll
-    // For panes that poller detected as Claude, look up JSONL transcript files.
+    // For panes known to be Claude (from poller OR projection/hooks), look up JSONL transcripts.
     // CWD comes from TmuxPaneInfo (panes), not PaneSnapshot.
     {
         // Collect pane_ids that poller detected as Claude
-        let claude_pane_ids: HashSet<&str> = snapshots
+        let mut claude_pane_ids: HashSet<&str> = snapshots
             .iter()
             .filter(|s| {
                 poll_pane(s)
@@ -434,6 +434,17 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
             })
             .map(|s| s.pane_id.as_str())
             .collect();
+
+        // Also include panes that projection already knows are Claude
+        // (e.g. detected via hooks, not just poller)
+        for pane_state in st.daemon.list_panes() {
+            if pane_state.provider == Some(Provider::Claude) {
+                let pid = &pane_state.pane_instance_id.pane_id;
+                if let Some(tmux_pane) = panes.iter().find(|p| p.pane_id == *pid) {
+                    claude_pane_ids.insert(tmux_pane.pane_id.as_str());
+                }
+            }
+        }
 
         let claude_pane_cwds: Vec<(
             String,
