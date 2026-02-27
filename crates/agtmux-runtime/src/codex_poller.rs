@@ -65,14 +65,18 @@ const HEARTBEAT_INTERVAL_SECS: i64 = 2;
 
 /// Assignment priority tier for a pane based on its process hint.
 /// Lower value = higher priority for Codex thread assignment.
-/// - 0: Running Codex → preferred
-/// - 1: Neutral shell (zsh, bash, etc.) → acceptable
+/// Tier 3 panes are **never** assigned a Codex thread.
+///
+/// - 0: Running Codex CLI explicitly → highest priority
+/// - 1: Neutral runtime (node, python, …) → may host Codex/Claude, eligible
 /// - 2: Running a competing agent (claude, gemini, …) → deprioritized
 ///   (those panes have their own deterministic sources; T-123 arbitration resolves conflicts)
+/// - 3: Plain interactive shell (zsh, bash, fish, …) → ineligible; never a Codex runtime
 fn pane_tier(p: &PaneCwdInfo) -> u8 {
     match p.process_hint.as_deref() {
         Some("codex") => 0,
         None => 1,
+        Some("shell") => 3,
         _ => 2,
     }
 }
@@ -427,9 +431,10 @@ impl CodexAppServerClient {
             .collect();
 
         // Unclaimed panes: group members not held by any live thread's cache.
+        // Tier-3 panes (plain shells) are permanently ineligible for Codex thread assignment.
         let mut unclaimed: VecDeque<ThreadPaneBinding> = pane_infos
             .iter()
-            .filter(|p| !cached_pane_ids.contains(&p.pane_id))
+            .filter(|p| !cached_pane_ids.contains(&p.pane_id) && pane_tier(p) < 3)
             .map(|p| ThreadPaneBinding {
                 pane_id: p.pane_id.clone(),
                 pane_generation: p.generation,
@@ -1056,6 +1061,49 @@ mod tests {
         assert_eq!(group[2].pane_id, "%3"); // None, tier 1
         assert_eq!(group[3].pane_id, "%4"); // claude, tier 2, pane_id "%4" < "%5"
         assert_eq!(group[4].pane_id, "%5"); // gemini, tier 2
+    }
+
+    #[test]
+    fn build_cwd_pane_groups_tier_sort_with_shell() {
+        // shell (tier 3) sorts after all other tiers
+        let infos = vec![
+            make_pane("%4", "/x", Some("shell")),  // tier 3
+            make_pane("%2", "/x", Some("claude")), // tier 2
+            make_pane("%3", "/x", None),           // tier 1
+            make_pane("%1", "/x", Some("codex")),  // tier 0
+        ];
+        let map = build_cwd_pane_groups(&infos);
+        let group = &map["/x"];
+        assert_eq!(group[0].pane_id, "%1"); // codex
+        assert_eq!(group[1].pane_id, "%3"); // neutral
+        assert_eq!(group[2].pane_id, "%2"); // claude
+        assert_eq!(group[3].pane_id, "%4"); // shell — last
+    }
+
+    #[tokio::test]
+    async fn process_thread_list_shell_panes_never_assigned() {
+        // 2 threads, 3 panes: node (tier1), zsh (tier3), zsh (tier3)
+        // Only the node pane should receive a thread — shells are ineligible.
+        let mut client = make_test_client().await;
+        let now = Utc::now();
+        let panes = vec![
+            make_pane("%1", "/proj", None),          // node — eligible (tier 1)
+            make_pane("%2", "/proj", Some("shell")), // zsh  — ineligible (tier 3)
+            make_pane("%3", "/proj", Some("shell")), // zsh  — ineligible (tier 3)
+        ];
+        let resp = make_thread_list_response(&["t-a", "t-b"]);
+        let mut tick = HashSet::new();
+        let mut events = Vec::new();
+
+        client.process_thread_list_response(&resp, &panes, &mut tick, now, &mut events);
+
+        // t-a → %1 (only eligible pane)
+        assert_eq!(client.thread_pane_bindings["t-a"].pane_id, "%1");
+        // t-b: no eligible pane left — must NOT be assigned
+        assert!(
+            !client.thread_pane_bindings.contains_key("t-b"),
+            "shell panes must not receive Codex thread assignment"
+        );
     }
 
     // ── process_thread_list_response: stable multi-pane assignment ────

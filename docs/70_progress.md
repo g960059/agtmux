@@ -6,6 +6,50 @@
 
 ---
 
+## 2026-02-27
+### T-125: Shell pane false-positive Codex binding fix — Completed
+
+### Problem confirmed via live inspection
+- `inspect_pane_processes("zsh")` → `None` = neutral tier 1 (同 `node`)
+- App Server が CWD 共有 pane 全体にスレッドを割り当て → zsh pane が `codex deterministic` に
+- 実例: vm agtmux v4 の %286, %305 (zsh) が誤って managed、test-session %301 (zsh) も同様
+
+### Implementation
+- `SHELL_CMDS` 定数: zsh, bash, fish, sh, csh, tcsh, ksh, dash, nu, pwsh
+- `inspect_pane_processes`: SHELL_CMDS に完全一致 → `Some("shell")` 返却 (exact match, lowercase)
+- `pane_tier()`: `Some("shell")` → tier 3 (never assign)
+- `process_thread_list_response` unclaimed フィルタ: `pane_tier(p) < 3` 追加
+- 4 new tests: `inspect_shell_cmds`, `inspect_neutral_runtime`, `build_cwd_pane_groups_tier_sort_with_shell`, `process_thread_list_shell_panes_never_assigned`
+- 649 tests total, `just verify` PASS
+- live 確認: v4 zsh pane, test-session %301 が unmanaged に ✓
+
+### Claude JSONL 検出失敗調査 (→ T-126)
+
+#### 問題: test-session %297 が `codex deterministic` になっているが、実際は Claude idle
+
+#### 調査結果
+- %297 CWD: `/Users/virtualmachine/ghq/github.com/yohey-w/multi-agent-shogun/agtmux-rs/crates/agtmux-daemon`
+- JSONL ファイル: `~/.claude/projects/-Users-...-agtmux-daemon/76b99a53-9c1a-4800-8916-71e31dddc920.jsonl` (2217行) → **存在する**
+- JSONL 最終書き込み: 2026-02-26 17:48 JST
+- daemon 起動時刻: 2026-02-26 20:48 JST (3時間後)
+- 最終行の type: `system` → translate が `None` を返す (無視)
+- watcher 設計: **EOF 起点** = 起動時に全履歴をスキップ
+- Claude は3時間 idle → 新規 JSONL 行なし → watcher イベントなし
+- 結果: Claude JSONL 証跡なし → Codex CWD 割り当てが勝つ
+
+#### 根本原因
+**watcher の EOF 起点設計が「daemon restart 後の idle Claude pane」を検出できない**。
+Codex は App Server が常に現在スレッドリストを返すため問題なし。
+Claude は JSONL への新規書き込みが発生するまで证跡が得られない。
+
+#### 提案 Fix (T-126): last-line bootstrap
+- watcher 起動時に EOF から逆方向スキャン
+- 最後の meaningful line (assistant / user / progress type) を1行だけ emit
+- 以降は通常の EOF watch に切り替え
+- ⚠️ 注意: last line が `system` 等の skip 対象の場合は emit しない
+
+---
+
 ## 2026-02-26 (cont.)
 ### T-124: Same-CWD Multi-Pane Codex Binding — Planning
 

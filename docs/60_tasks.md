@@ -22,7 +22,16 @@
 ## BLOCKED
 - [ ] (none)
 
+## TODO
+- [ ] T-126 (P1) [MVP] Claude JSONL last-line bootstrap (idle session detection after daemon restart)
+  - 問題: watcher は EOF 起点 → daemon restart 後に idle な Claude pane (新規行なし) を検出できない
+  - 根本原因: Claude idle = JSONL 新規行なし → watcher イベントなし → Codex CWD 割り当てが勝つ
+  - Fix: watcher 起動時に EOF から逆方向にスキャン、最後の meaningful line (assistant/user/progress) を1行だけ emit してブートストラップ
+  - blocked_by: なし
+
 ## DONE (keep short)
+- [x] T-125 (P1) [MVP] Shell pane false-positive Codex binding fix
+  - Evidence: `inspect_pane_processes` に `SHELL_CMDS` リスト (zsh/bash/fish/sh/csh/tcsh/ksh/dash/nu/pwsh) → `Some("shell")` 返却。`pane_tier` に tier 3 追加 (never assign)。`unclaimed` フィルタに `pane_tier < 3` 追加。live 確認: v4 の zsh pane (%286, %305) と test-session %301 (zsh) が unmanaged に変わることを確認。4 new tests。`just verify` PASS (649 tests)。
 - [x] T-124 (P1) [MVP] Same-CWD Multi-Pane Codex Binding
   - Evidence: `build_cwd_pane_map` → `build_cwd_pane_groups` (`HashMap<CWD, Vec<PaneCwdInfo>>`). `has_codex_hint: bool` → `process_hint: Option<String>` (3-tier: codex=0/neutral=1/competing=2). `process_thread_list_response` accepts `&[PaneCwdInfo]` + `assigned_in_tick`. H1: generation+birth_ts cache validation. H2: tick-scope dedup. `MAX_CWD_QUERIES_PER_TICK` 8→40. poll_loop.rs updated. 14 new tests (4 groups + 6 assignment + 4 tokio::test). `just verify` PASS (645 tests).
 - [x] T-123 (P1) [MVP] Provider Switching — Generic Cross-Provider Arbitration
