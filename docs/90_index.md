@@ -13,6 +13,12 @@
 - `docs/70_progress.md` (Phase 3 plan, Codex review, implementation records)
 - Wired into runtime: LatencyWindow, CursorWatermarks, SourceRegistry, TrustGuard (warn-only)
 
+## Claude JSONL Integration (T-122)
+- **Design**: `docs/40_design.md` (Section 9 → Claude JSONL Integration)
+- **Architecture**: `docs/30_architecture.md` (C-007)
+- **Crate**: `crates/agtmux-source-claude-jsonl/`
+- Source rank: `ClaudeHooks (rank 0) > ClaudeJsonl (rank 1) > Poller (rank 2)`
+
 ## Codex App Server Integration (T-113a — 597 tests)
 - **API reference (MUST READ before Codex work)**: `docs/codex-appserver-api-reference.md`
 - **Design/implementation strategy**: `docs/40_design.md` (Section 9 → Codex App Server Integration)
@@ -58,6 +64,13 @@
   - `docs/20_spec.md` (FR-024〜FR-031)
   - `docs/40_design.md` (Main -> Pane Signature Classifier)
   - `docs/80_decisions/ADR-20260225-pane-signature-v1.md`
+- Pane-first resolver grouping:
+  - `docs/20_spec.md` (FR-031a)
+  - `docs/40_design.md` (Main -> Resolver and Arbitration)
+  - `docs/80_decisions/ADR-20260226-pane-first-resolver-grouping.md`
+- Claude JSONL deterministic source:
+  - `docs/40_design.md` (Main -> Claude JSONL Integration)
+  - `docs/30_architecture.md` (C-007)
 - Poller fallback受入基準:
   - `docs/20_spec.md` (FR-032〜FR-033)
   - `docs/40_design.md` (Main -> Test Strategy)
@@ -79,6 +92,7 @@
 - `docs/80_decisions/ADR-20260225-runtime-control-contracts.md`
 - `docs/80_decisions/ADR-20260225-core-first-mode-b.md`
 - `docs/80_decisions/ADR-20260225-mvp-single-process-runtime.md`
+- `docs/80_decisions/ADR-20260226-pane-first-resolver-grouping.md`
 
 ## How to run (local-first)
 - quality gates:

@@ -21,7 +21,7 @@ pub struct SourceRank {
 /// Default source rank policy (MVP).
 ///
 /// - Codex: appserver (rank 0) > poller (rank 1)
-/// - Claude: hooks (rank 0) > poller (rank 1)
+/// - Claude: hooks (rank 0) > jsonl (rank 1) > poller (rank 2)
 pub fn default_source_ranks() -> Vec<SourceRank> {
     vec![
         SourceRank {
@@ -41,8 +41,13 @@ pub fn default_source_ranks() -> Vec<SourceRank> {
         },
         SourceRank {
             provider: Provider::Claude,
-            source_kind: SourceKind::Poller,
+            source_kind: SourceKind::ClaudeJsonl,
             rank: 1,
+        },
+        SourceRank {
+            provider: Provider::Claude,
+            source_kind: SourceKind::Poller,
+            rank: 2,
         },
     ]
 }
@@ -355,11 +360,16 @@ mod tests {
             .iter()
             .find(|r| r.source_kind == SourceKind::ClaudeHooks)
             .expect("claude hooks rank");
+        let claude_jsonl = ranks
+            .iter()
+            .find(|r| r.source_kind == SourceKind::ClaudeJsonl)
+            .expect("claude jsonl rank");
         let claude_poll = ranks
             .iter()
             .find(|r| r.provider == Provider::Claude && r.source_kind == SourceKind::Poller)
             .expect("claude poller rank");
-        assert!(claude_hooks.rank < claude_poll.rank);
+        assert!(claude_hooks.rank < claude_jsonl.rank);
+        assert!(claude_jsonl.rank < claude_poll.rank);
     }
 
     #[test]

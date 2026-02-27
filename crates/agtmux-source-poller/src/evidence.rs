@@ -50,11 +50,7 @@ pub fn claude_activity_signals() -> Vec<ActivitySignalDef> {
         },
         ActivitySignalDef {
             state: ActivityState::WaitingApproval,
-            patterns: vec![
-                "Allow?".to_string(),
-                "approve".to_string(),
-                "permission".to_string(),
-            ],
+            patterns: vec!["Allow?".to_string(), "Do you want to allow".to_string()],
         },
         ActivitySignalDef {
             state: ActivityState::Error,
@@ -84,7 +80,7 @@ pub fn codex_activity_signals() -> Vec<ActivitySignalDef> {
         },
         ActivitySignalDef {
             state: ActivityState::WaitingApproval,
-            patterns: vec!["approve".to_string(), "confirm".to_string()],
+            patterns: vec!["Apply patch?".to_string()],
         },
         ActivitySignalDef {
             state: ActivityState::Error,
@@ -273,7 +269,7 @@ mod tests {
     #[test]
     fn codex_waiting_approval_signal() {
         let signals = codex_activity_signals();
-        let lines = &["Please confirm the action"];
+        let lines = &["Apply patch? (y/n)"];
         let result = match_activity(lines, &signals);
 
         let m = result.expect("should match codex waiting_approval");

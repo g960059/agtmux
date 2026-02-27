@@ -112,7 +112,7 @@
     "current_cmd": "claude",
     "process_hint": "claude",
     "capture_lines": [
-      "⠙ Analyzing..."
+      "\u2819 Analyzing..."
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -185,7 +185,7 @@
     "current_cmd": "claude --resume",
     "process_hint": "claude",
     "capture_lines": [
-      "⠋ Loading files..."
+      "\u280b Loading files..."
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -197,7 +197,7 @@
     "current_cmd": "claude",
     "process_hint": "claude",
     "capture_lines": [
-      "❯"
+      "\u276f"
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -270,7 +270,7 @@
     "current_cmd": "codex",
     "process_hint": "codex",
     "capture_lines": [
-      "approve running make build"
+      "Apply patch? Review diff above"
     ],
     "expected_detected": true,
     "expected_provider": "codex",
@@ -294,7 +294,7 @@
     "current_cmd": "claude",
     "process_hint": "claude",
     "capture_lines": [
-      "Do you approve this change?"
+      "Allow? Edit 3 files"
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -318,7 +318,7 @@
     "current_cmd": "claude",
     "process_hint": "claude",
     "capture_lines": [
-      "permission needed for network access"
+      "Allow? Create new file utils.rs"
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -342,7 +342,7 @@
     "current_cmd": "codex",
     "process_hint": "codex",
     "capture_lines": [
-      "Please confirm the action"
+      "Apply patch? Review diff above"
     ],
     "expected_detected": true,
     "expected_provider": "codex",
@@ -402,7 +402,7 @@
     "current_cmd": "claude",
     "process_hint": "claude",
     "capture_lines": [
-      "Do you approve running this command?"
+      "Allow? (y/n)"
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -426,7 +426,7 @@
     "current_cmd": "claude",
     "process_hint": "claude",
     "capture_lines": [
-      "Do you approve running this command?"
+      "Allow? Delete temp.txt"
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -450,7 +450,7 @@
     "current_cmd": "claude",
     "process_hint": "claude",
     "capture_lines": [
-      "❯ cd src"
+      "\u276f cd src"
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -511,7 +511,7 @@
     "process_hint": "claude",
     "capture_lines": [
       "Done.",
-      "❯"
+      "\u276f"
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -535,7 +535,7 @@
     "current_cmd": "claude",
     "process_hint": "claude",
     "capture_lines": [
-      "permission to read /etc/hosts"
+      "Allow? Delete temp.txt"
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -583,7 +583,7 @@
     "current_cmd": "claude",
     "process_hint": "claude",
     "capture_lines": [
-      "permission required to write file"
+      "Allow? Run command: npm install"
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -607,7 +607,7 @@
     "current_cmd": "claude",
     "process_hint": "claude",
     "capture_lines": [
-      "permission to read /etc/hosts"
+      "Allow? Edit 3 files"
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -619,7 +619,7 @@
     "current_cmd": "claude",
     "process_hint": "claude",
     "capture_lines": [
-      "approve the edit to main.rs?"
+      "Do you want to allow running: cargo test?"
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -643,7 +643,7 @@
     "current_cmd": "claude --resume",
     "process_hint": "claude",
     "capture_lines": [
-      "⠸ Compiling..."
+      "\u2838 Compiling..."
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -703,7 +703,7 @@
     "current_cmd": "claude",
     "process_hint": "claude",
     "capture_lines": [
-      "permission needed for network access"
+      "Allow? Edit 3 files"
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -823,7 +823,7 @@
     "current_cmd": "claude",
     "process_hint": "claude",
     "capture_lines": [
-      "⠋ Loading files..."
+      "\u280b Loading files..."
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -847,7 +847,7 @@
     "current_cmd": "claude",
     "process_hint": "claude",
     "capture_lines": [
-      "❯"
+      "\u276f"
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -859,7 +859,7 @@
     "current_cmd": "codex",
     "process_hint": "codex",
     "capture_lines": [
-      "Please confirm the action"
+      "Apply patch? Review diff above"
     ],
     "expected_detected": true,
     "expected_provider": "codex",
@@ -871,7 +871,7 @@
     "current_cmd": "codex",
     "process_hint": "codex",
     "capture_lines": [
-      "Please confirm the action"
+      "Apply patch? This will change 2 files"
     ],
     "expected_detected": true,
     "expected_provider": "codex",
@@ -883,7 +883,7 @@
     "current_cmd": "codex",
     "process_hint": "codex",
     "capture_lines": [
-      "Please confirm the action"
+      "Apply patch? (y/n)"
     ],
     "expected_detected": true,
     "expected_provider": "codex",
@@ -895,7 +895,7 @@
     "current_cmd": "claude",
     "process_hint": "claude",
     "capture_lines": [
-      "❯ cd src"
+      "\u276f cd src"
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -907,7 +907,7 @@
     "current_cmd": "codex",
     "process_hint": "codex",
     "capture_lines": [
-      "confirm deletion of old files"
+      "Apply patch? (y/n)"
     ],
     "expected_detected": true,
     "expected_provider": "codex",
@@ -955,7 +955,7 @@
     "current_cmd": "claude",
     "process_hint": "claude",
     "capture_lines": [
-      "❯"
+      "\u276f"
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -991,7 +991,7 @@
     "current_cmd": "claude",
     "process_hint": "claude",
     "capture_lines": [
-      "approve the edit to main.rs?"
+      "Allow? Edit 3 files"
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -1015,7 +1015,7 @@
     "current_cmd": "codex",
     "process_hint": "codex",
     "capture_lines": [
-      "approve running make build"
+      "Apply patch? (y/n)"
     ],
     "expected_detected": true,
     "expected_provider": "codex",
@@ -1039,7 +1039,7 @@
     "current_cmd": "codex",
     "process_hint": "codex",
     "capture_lines": [
-      "approve this file change?"
+      "Apply patch? (y/n)"
     ],
     "expected_detected": true,
     "expected_provider": "codex",
@@ -1268,7 +1268,7 @@
     "process_hint": "claude",
     "capture_lines": [
       "Done.",
-      "❯"
+      "\u276f"
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -1280,7 +1280,7 @@
     "current_cmd": "codex",
     "process_hint": "codex",
     "capture_lines": [
-      "confirm deletion of old files"
+      "Apply patch? Review diff above"
     ],
     "expected_detected": true,
     "expected_provider": "codex",
@@ -1350,7 +1350,7 @@
     "current_cmd": "claude",
     "process_hint": "claude",
     "capture_lines": [
-      "❯ cd src"
+      "\u276f cd src"
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -1374,7 +1374,7 @@
     "current_cmd": "claude",
     "process_hint": "claude",
     "capture_lines": [
-      "⠸ Compiling..."
+      "\u2838 Compiling..."
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -1506,7 +1506,7 @@
     "current_cmd": "claude",
     "process_hint": "claude",
     "capture_lines": [
-      "❯ cd src"
+      "\u276f cd src"
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -1554,7 +1554,7 @@
     "current_cmd": "claude",
     "process_hint": "claude",
     "capture_lines": [
-      "⠹ Processing..."
+      "\u2839 Processing..."
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -1590,7 +1590,7 @@
     "current_cmd": "claude",
     "process_hint": "claude",
     "capture_lines": [
-      "❯ cd src"
+      "\u276f cd src"
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -1663,7 +1663,7 @@
     "current_cmd": "claude",
     "process_hint": "claude",
     "capture_lines": [
-      "⠹ Processing..."
+      "\u2839 Processing..."
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -1675,7 +1675,7 @@
     "current_cmd": "claude",
     "process_hint": "claude",
     "capture_lines": [
-      "⠋ Loading files..."
+      "\u280b Loading files..."
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -1809,7 +1809,7 @@
     "process_hint": "claude",
     "capture_lines": [
       "Done.",
-      "❯"
+      "\u276f"
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -1821,7 +1821,7 @@
     "current_cmd": "codex",
     "process_hint": "codex",
     "capture_lines": [
-      "approve running make build"
+      "Apply patch? Review diff above"
     ],
     "expected_detected": true,
     "expected_provider": "codex",
@@ -1881,7 +1881,7 @@
     "current_cmd": "codex",
     "process_hint": "codex",
     "capture_lines": [
-      "confirm: overwrite existing file?"
+      "Apply patch? (y/n)"
     ],
     "expected_detected": true,
     "expected_provider": "codex",
@@ -1893,7 +1893,7 @@
     "current_cmd": "codex",
     "process_hint": "codex",
     "capture_lines": [
-      "confirm deletion of old files"
+      "Apply patch? Review diff above"
     ],
     "expected_detected": true,
     "expected_provider": "codex",
@@ -1917,7 +1917,7 @@
     "current_cmd": "claude",
     "process_hint": "claude",
     "capture_lines": [
-      "❯"
+      "\u276f"
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -1953,7 +1953,7 @@
     "current_cmd": "claude",
     "process_hint": "claude",
     "capture_lines": [
-      "approve the edit to main.rs?"
+      "Allow? Delete temp.txt"
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -1977,7 +1977,7 @@
     "current_cmd": "codex",
     "process_hint": "codex",
     "capture_lines": [
-      "approve this file change?"
+      "Apply patch? Review diff above"
     ],
     "expected_detected": true,
     "expected_provider": "codex",
@@ -2001,7 +2001,7 @@
     "current_cmd": "claude",
     "process_hint": "claude",
     "capture_lines": [
-      "⠹ Processing..."
+      "\u2839 Processing..."
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -2341,7 +2341,7 @@
     "current_cmd": "claude",
     "process_hint": "claude",
     "capture_lines": [
-      "❯ cd src"
+      "\u276f cd src"
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -2402,7 +2402,7 @@
     "process_hint": "claude",
     "capture_lines": [
       "Done.",
-      "❯"
+      "\u276f"
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -2523,7 +2523,7 @@
     "current_cmd": "codex",
     "process_hint": "codex",
     "capture_lines": [
-      "Please confirm the action"
+      "Apply patch? Review diff above"
     ],
     "expected_detected": true,
     "expected_provider": "codex",
@@ -2595,7 +2595,7 @@
     "current_cmd": "codex",
     "process_hint": "codex",
     "capture_lines": [
-      "confirm: overwrite existing file?"
+      "Apply patch? Review diff above"
     ],
     "expected_detected": true,
     "expected_provider": "codex",
@@ -2607,7 +2607,7 @@
     "current_cmd": "claude --resume",
     "process_hint": "claude",
     "capture_lines": [
-      "⠙ Analyzing..."
+      "\u2819 Analyzing..."
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -2643,7 +2643,7 @@
     "current_cmd": "codex",
     "process_hint": "codex",
     "capture_lines": [
-      "approve running make build"
+      "Apply patch? Review diff above"
     ],
     "expected_detected": true,
     "expected_provider": "codex",
@@ -2655,7 +2655,7 @@
     "current_cmd": "codex",
     "process_hint": "codex",
     "capture_lines": [
-      "confirm: overwrite existing file?"
+      "Apply patch? This will change 2 files"
     ],
     "expected_detected": true,
     "expected_provider": "codex",
@@ -2667,7 +2667,7 @@
     "current_cmd": "claude",
     "process_hint": "claude",
     "capture_lines": [
-      "permission required to write file"
+      "Allow? Delete temp.txt"
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -2691,7 +2691,7 @@
     "current_cmd": "claude",
     "process_hint": "claude",
     "capture_lines": [
-      "⠙ Analyzing..."
+      "\u2819 Analyzing..."
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -2715,7 +2715,7 @@
     "current_cmd": "claude",
     "process_hint": "claude",
     "capture_lines": [
-      "permission required to write file"
+      "Do you want to allow writing to src/main.rs?"
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -2763,7 +2763,7 @@
     "current_cmd": "codex",
     "process_hint": "codex",
     "capture_lines": [
-      "approve this file change?"
+      "Apply patch? Review diff above"
     ],
     "expected_detected": true,
     "expected_provider": "codex",
@@ -2811,7 +2811,7 @@
     "current_cmd": "claude",
     "process_hint": "claude",
     "capture_lines": [
-      "permission needed for network access"
+      "Allow? (y/n)"
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -2835,7 +2835,7 @@
     "current_cmd": "claude",
     "process_hint": "claude",
     "capture_lines": [
-      "❯"
+      "\u276f"
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -2883,7 +2883,7 @@
     "current_cmd": "codex",
     "process_hint": "codex",
     "capture_lines": [
-      "confirm deletion of old files"
+      "Apply patch? (y/n)"
     ],
     "expected_detected": true,
     "expected_provider": "codex",
@@ -2967,7 +2967,7 @@
     "current_cmd": "claude",
     "process_hint": "claude",
     "capture_lines": [
-      "❯"
+      "\u276f"
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -3016,7 +3016,7 @@
     "process_hint": "claude",
     "capture_lines": [
       "Done.",
-      "❯"
+      "\u276f"
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -3112,7 +3112,7 @@
     "current_cmd": "codex",
     "process_hint": "codex",
     "capture_lines": [
-      "confirm: overwrite existing file?"
+      "Apply patch? (y/n)"
     ],
     "expected_detected": true,
     "expected_provider": "codex",
@@ -3137,7 +3137,7 @@
     "process_hint": "claude",
     "capture_lines": [
       "Done.",
-      "❯"
+      "\u276f"
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -3161,7 +3161,7 @@
     "current_cmd": "claude --resume",
     "process_hint": "claude",
     "capture_lines": [
-      "❯"
+      "\u276f"
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -3186,7 +3186,7 @@
     "current_cmd": "claude",
     "process_hint": "claude",
     "capture_lines": [
-      "⠹ Processing..."
+      "\u2839 Processing..."
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -3258,7 +3258,7 @@
     "current_cmd": "codex",
     "process_hint": "codex",
     "capture_lines": [
-      "approve running make build"
+      "Apply patch? Review diff above"
     ],
     "expected_detected": true,
     "expected_provider": "codex",
@@ -3270,7 +3270,7 @@
     "current_cmd": "claude",
     "process_hint": "claude",
     "capture_lines": [
-      "Do you approve this change?"
+      "Allow? Press Y to confirm"
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -3282,7 +3282,7 @@
     "current_cmd": "claude",
     "process_hint": "claude",
     "capture_lines": [
-      "permission to read /etc/hosts"
+      "Allow? This will modify 3 files"
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -3306,7 +3306,7 @@
     "current_cmd": "claude --resume",
     "process_hint": "claude",
     "capture_lines": [
-      "⠙ Analyzing..."
+      "\u2819 Analyzing..."
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -3390,7 +3390,7 @@
     "current_cmd": "codex",
     "process_hint": "codex",
     "capture_lines": [
-      "approve this file change?"
+      "Apply patch? This will change 2 files"
     ],
     "expected_detected": true,
     "expected_provider": "codex",
@@ -3402,7 +3402,7 @@
     "current_cmd": "codex",
     "process_hint": "codex",
     "capture_lines": [
-      "approve this file change?"
+      "Apply patch? (y/n)"
     ],
     "expected_detected": true,
     "expected_provider": "codex",
@@ -3450,7 +3450,7 @@
     "current_cmd": "claude",
     "process_hint": "claude",
     "capture_lines": [
-      "Do you approve this change?"
+      "Allow? Delete temp.txt"
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -3498,7 +3498,7 @@
     "current_cmd": "codex",
     "process_hint": "codex",
     "capture_lines": [
-      "confirm: overwrite existing file?"
+      "Apply patch? This will change 2 files"
     ],
     "expected_detected": true,
     "expected_provider": "codex",
@@ -3570,7 +3570,7 @@
     "current_cmd": "claude --resume",
     "process_hint": "claude",
     "capture_lines": [
-      "⠋ Loading files..."
+      "\u280b Loading files..."
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -3594,7 +3594,7 @@
     "current_cmd": "codex",
     "process_hint": "codex",
     "capture_lines": [
-      "confirm deletion of old files"
+      "Apply patch? (y/n)"
     ],
     "expected_detected": true,
     "expected_provider": "codex",
@@ -3618,7 +3618,7 @@
     "current_cmd": "claude",
     "process_hint": "claude",
     "capture_lines": [
-      "⠸ Compiling..."
+      "\u2838 Compiling..."
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -3762,7 +3762,7 @@
     "current_cmd": "claude",
     "process_hint": "claude",
     "capture_lines": [
-      "Do you approve running this command?"
+      "Allow? Edit 3 files"
     ],
     "expected_detected": true,
     "expected_provider": "claude",
@@ -3786,7 +3786,7 @@
     "current_cmd": "claude",
     "process_hint": "claude",
     "capture_lines": [
-      "⠸ Compiling..."
+      "\u2838 Compiling..."
     ],
     "expected_detected": true,
     "expected_provider": "claude",

@@ -113,6 +113,7 @@ async fn handle_connection(
                 "poller" => agtmux_core_v5::types::SourceKind::Poller,
                 "codex_appserver" => agtmux_core_v5::types::SourceKind::CodexAppserver,
                 "claude_hooks" => agtmux_core_v5::types::SourceKind::ClaudeHooks,
+                "claude_jsonl" => agtmux_core_v5::types::SourceKind::ClaudeJsonl,
                 _ => {
                     let error_response = serde_json::json!({
                         "jsonrpc": "2.0",
@@ -1290,15 +1291,16 @@ mod tests {
     }
 
     #[test]
-    fn trust_guard_pre_registers_three_sources() {
+    fn trust_guard_pre_registers_four_sources() {
         let state = make_state();
         assert_eq!(
             state.trust_guard.registered_count(),
-            3,
-            "DaemonState::new() should pre-register poller, codex_appserver, claude_hooks"
+            4,
+            "DaemonState::new() should pre-register poller, codex_appserver, claude_hooks, claude_jsonl"
         );
         assert!(state.trust_guard.is_registered("poller"));
         assert!(state.trust_guard.is_registered("codex_appserver"));
         assert!(state.trust_guard.is_registered("claude_hooks"));
+        assert!(state.trust_guard.is_registered("claude_jsonl"));
     }
 }

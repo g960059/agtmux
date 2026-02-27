@@ -15,6 +15,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::time::Duration;
 
 use agtmux_source_codex_appserver::translate::CodexRawEvent;
 use chrono::Utc;
@@ -38,6 +39,21 @@ pub struct PaneCwdInfo {
     pub has_codex_hint: bool,
 }
 
+/// Correlated pane identity for a Codex thread.
+#[derive(Debug, Clone)]
+struct ThreadPaneBinding {
+    pane_id: String,
+    pane_generation: Option<u64>,
+    pane_birth_ts: Option<chrono::DateTime<Utc>>,
+}
+
+/// Last emitted thread state (used for deduplication).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LastThreadState {
+    status: String,
+    pane_id: Option<String>,
+}
+
 /// Build a cwd → best-matching pane map for thread/list correlation.
 ///
 /// When multiple panes share the same cwd, prefer the one with `has_codex_hint`.
@@ -58,6 +74,9 @@ fn build_cwd_pane_map(pane_cwds: &[PaneCwdInfo]) -> HashMap<String, PaneCwdInfo>
     map
 }
 
+const MAX_CWD_QUERIES_PER_TICK: usize = 8;
+const THREAD_LIST_REQUEST_TIMEOUT: Duration = Duration::from_millis(500);
+
 // ─── App Server client (JSON-RPC 2.0 over stdio) ────────────────────
 
 /// Codex App Server client connected via stdio JSON-RPC 2.0.
@@ -74,8 +93,10 @@ pub struct CodexAppServerClient {
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     next_id: u64,
-    /// Tracks which thread status changes we've already emitted.
-    last_thread_statuses: HashMap<String, String>,
+    /// Tracks which thread states we've already emitted.
+    last_thread_states: HashMap<String, LastThreadState>,
+    /// Best-known thread -> pane binding, reused for pane-less events.
+    thread_pane_bindings: HashMap<String, ThreadPaneBinding>,
 }
 
 /// Result of attempting to spawn and connect to the Codex App Server.
@@ -115,7 +136,8 @@ impl CodexAppServerClient {
             stdin,
             stdout,
             next_id: 1,
-            last_thread_statuses: HashMap::new(),
+            last_thread_states: HashMap::new(),
+            thread_pane_bindings: HashMap::new(),
         };
 
         // Perform JSON-RPC initialize handshake with 10s timeout
@@ -207,10 +229,13 @@ impl CodexAppServerClient {
         let now = Utc::now();
         let mut events = Vec::new();
 
-        // Process notifications (turn/started, turn/completed, thread/status/changed)
-        // Note: notifications don't carry cwd info, so pane_id stays None.
+        // Process notifications (turn/started, turn/completed, thread/status/changed).
+        // Notifications don't carry cwd directly; when possible we enrich them via
+        // cached thread -> pane correlation from thread/list.
         for notif in &notifications {
-            if let Some(event) = notification_to_event(notif, now) {
+            let pane_binding = notification_thread_id(notif)
+                .and_then(|thread_id| self.thread_pane_bindings.get(thread_id));
+            if let Some(event) = notification_to_event_with_pane(notif, now, pane_binding) {
                 events.push(event);
             }
         }
@@ -221,18 +246,72 @@ impl CodexAppServerClient {
         let cwd_pane_map = build_cwd_pane_map(pane_cwds);
 
         // Step 1: Per-cwd queries for pane correlation (threads get pane_id set).
-        for (cwd, pane_info) in &cwd_pane_map {
-            let response = self.send_thread_list(Some(cwd)).await?;
-            self.process_thread_list_response(&response, Some(pane_info), now, &mut events);
+        // Prioritize codex candidates and cap the number of requests per tick.
+        let mut query_plan: Vec<PaneCwdInfo> = cwd_pane_map
+            .into_values()
+            .filter(|p| !p.cwd.is_empty())
+            .collect();
+        query_plan.sort_by(|a, b| {
+            b.has_codex_hint
+                .cmp(&a.has_codex_hint)
+                .then_with(|| a.pane_id.cmp(&b.pane_id))
+        });
+        if query_plan.len() > MAX_CWD_QUERIES_PER_TICK {
+            tracing::debug!(
+                "codex thread/list cwd queries capped: {} -> {}",
+                query_plan.len(),
+                MAX_CWD_QUERIES_PER_TICK
+            );
+        }
+        for pane_info in query_plan.into_iter().take(MAX_CWD_QUERIES_PER_TICK) {
+            match self
+                .send_thread_list_timed(Some(&pane_info.cwd), THREAD_LIST_REQUEST_TIMEOUT)
+                .await
+            {
+                Ok(response) => {
+                    self.process_thread_list_response(
+                        &response,
+                        Some(&pane_info),
+                        now,
+                        &mut events,
+                    );
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        "codex thread/list cwd query failed (cwd={}): {e}",
+                        pane_info.cwd
+                    );
+                }
+            }
         }
 
         // Step 2: Global query to catch threads at cwds that don't match any pane.
-        // These get pane_id=None (session-level projection only).
-        // Threads already seen in Step 1 are deduplicated by last_thread_statuses.
-        let response = self.send_thread_list(None).await?;
-        self.process_thread_list_response(&response, None, now, &mut events);
+        // For known threads, cached pane bindings are reused.
+        // Threads already seen in Step 1 are deduplicated by last_thread_states.
+        match self
+            .send_thread_list_timed(None, THREAD_LIST_REQUEST_TIMEOUT)
+            .await
+        {
+            Ok(response) => {
+                self.process_thread_list_response(&response, None, now, &mut events);
+            }
+            Err(e) => {
+                tracing::debug!("codex thread/list global query failed: {e}");
+            }
+        }
 
         Ok(events)
+    }
+
+    async fn send_thread_list_timed(
+        &mut self,
+        cwd: Option<&str>,
+        timeout: Duration,
+    ) -> anyhow::Result<serde_json::Value> {
+        match tokio::time::timeout(timeout, self.send_thread_list(cwd)).await {
+            Ok(result) => result,
+            Err(_) => anyhow::bail!("thread/list timeout"),
+        }
     }
 
     /// Send a `thread/list` request, optionally filtered by `cwd`.
@@ -283,28 +362,68 @@ impl CodexAppServerClient {
 
         for thread in threads {
             let thread_id = thread["id"].as_str().unwrap_or("");
-            // Status is an object { type: "idle" } per the official API
+            // Status is an object { type: "idle" } per the API reference.
+            // However, the real App Server (v0.104.0+) may omit `status` from
+            // `thread/list` results — it's only guaranteed in `thread/status/changed`
+            // notifications and `thread/read`. Default to "idle" when absent:
+            // a listed thread is at least available/loaded.
             let status = thread
                 .get("status")
                 .and_then(|s| s.get("type"))
                 .and_then(|t| t.as_str())
-                .unwrap_or("unknown");
+                .unwrap_or("idle");
 
-            // Only emit events for status changes
+            // Skip notLoaded threads — they're historical (on disk, not in memory)
+            // and don't represent active agents. See codex-appserver-api-reference.md.
+            if status == "notLoaded" {
+                continue;
+            }
+
+            if thread_id.is_empty() {
+                continue;
+            }
+
+            let observed_binding = pane_info.map(|p| ThreadPaneBinding {
+                pane_id: p.pane_id.clone(),
+                pane_generation: p.generation,
+                pane_birth_ts: p.birth_ts,
+            });
+            if let Some(binding) = observed_binding.clone() {
+                self.thread_pane_bindings
+                    .insert(thread_id.to_string(), binding);
+            }
+
+            // Keep existing pane association when current observation is global (pane-less).
+            let effective_pane_id = observed_binding
+                .as_ref()
+                .map(|b| b.pane_id.clone())
+                .or_else(|| {
+                    self.last_thread_states
+                        .get(thread_id)
+                        .and_then(|s| s.pane_id.clone())
+                });
+            let next_state = LastThreadState {
+                status: status.to_string(),
+                pane_id: effective_pane_id,
+            };
+
+            // Emit when either status or pane association changed.
             let changed = self
-                .last_thread_statuses
+                .last_thread_states
                 .get(thread_id)
-                .is_none_or(|prev| prev != status);
+                .is_none_or(|prev| prev != &next_state);
 
-            if changed && !thread_id.is_empty() {
-                self.last_thread_statuses
-                    .insert(thread_id.to_string(), status.to_string());
+            if changed {
+                self.last_thread_states
+                    .insert(thread_id.to_string(), next_state);
+
+                let event_binding =
+                    observed_binding.or_else(|| self.thread_pane_bindings.get(thread_id).cloned());
 
                 let event_type = match status {
                     "active" => "thread.active",
                     "idle" => "thread.idle",
                     "systemError" => "thread.error",
-                    "notLoaded" => "thread.not_loaded",
                     _ => "thread.status_changed",
                 };
 
@@ -313,9 +432,9 @@ impl CodexAppServerClient {
                     event_type: event_type.to_string(),
                     session_id: thread_id.to_string(),
                     timestamp: now,
-                    pane_id: pane_info.map(|p| p.pane_id.clone()),
-                    pane_generation: pane_info.and_then(|p| p.generation),
-                    pane_birth_ts: pane_info.and_then(|p| p.birth_ts),
+                    pane_id: event_binding.as_ref().map(|b| b.pane_id.clone()),
+                    pane_generation: event_binding.as_ref().and_then(|b| b.pane_generation),
+                    pane_birth_ts: event_binding.as_ref().and_then(|b| b.pane_birth_ts),
                     payload: thread.clone(),
                 });
             }
@@ -376,6 +495,23 @@ fn notification_to_event(
     notif: &serde_json::Value,
     now: chrono::DateTime<Utc>,
 ) -> Option<CodexRawEvent> {
+    notification_to_event_with_pane(notif, now, None)
+}
+
+fn notification_thread_id(notif: &serde_json::Value) -> Option<&str> {
+    let method = notif["method"].as_str()?;
+    let params = notif.get("params")?;
+    match method {
+        "turn/started" | "turn/completed" | "thread/status/changed" => params["threadId"].as_str(),
+        _ => None,
+    }
+}
+
+fn notification_to_event_with_pane(
+    notif: &serde_json::Value,
+    now: chrono::DateTime<Utc>,
+    pane_binding: Option<&ThreadPaneBinding>,
+) -> Option<CodexRawEvent> {
     let method = notif["method"].as_str()?;
     let params = notif.get("params")?;
 
@@ -387,9 +523,9 @@ fn notification_to_event(
                 event_type: "turn.started".to_string(),
                 session_id: params["threadId"].as_str().unwrap_or("unknown").to_string(),
                 timestamp: now,
-                pane_id: None,
-                pane_generation: None,
-                pane_birth_ts: None,
+                pane_id: pane_binding.map(|b| b.pane_id.clone()),
+                pane_generation: pane_binding.and_then(|b| b.pane_generation),
+                pane_birth_ts: pane_binding.and_then(|b| b.pane_birth_ts),
                 payload: params.clone(),
             })
         }
@@ -401,9 +537,9 @@ fn notification_to_event(
                 event_type: format!("turn.{status}"),
                 session_id: params["threadId"].as_str().unwrap_or("unknown").to_string(),
                 timestamp: now,
-                pane_id: None,
-                pane_generation: None,
-                pane_birth_ts: None,
+                pane_id: pane_binding.map(|b| b.pane_id.clone()),
+                pane_generation: pane_binding.and_then(|b| b.pane_generation),
+                pane_birth_ts: pane_binding.and_then(|b| b.pane_birth_ts),
                 payload: params.clone(),
             })
         }
@@ -423,9 +559,9 @@ fn notification_to_event(
                 event_type: format!("thread.{status}"),
                 session_id: thread_id.to_string(),
                 timestamp: now,
-                pane_id: None,
-                pane_generation: None,
-                pane_birth_ts: None,
+                pane_id: pane_binding.map(|b| b.pane_id.clone()),
+                pane_generation: pane_binding.and_then(|b| b.pane_generation),
+                pane_birth_ts: pane_binding.and_then(|b| b.pane_birth_ts),
                 payload: params.clone(),
             })
         }
@@ -569,6 +705,26 @@ mod tests {
         let event = notification_to_event(&notif, Utc::now()).expect("should parse turn/started");
         assert_eq!(event.event_type, "turn.started");
         assert_eq!(event.session_id, "thr_abc");
+    }
+
+    #[test]
+    fn notification_to_event_with_cached_pane_binding() {
+        let notif = serde_json::json!({
+            "method": "turn/started",
+            "params": {
+                "threadId": "thr_abc",
+                "turn": {"id": "turn_1", "status": "inProgress", "items": []}
+            }
+        });
+        let binding = ThreadPaneBinding {
+            pane_id: "%9".to_string(),
+            pane_generation: Some(3),
+            pane_birth_ts: None,
+        };
+        let event = notification_to_event_with_pane(&notif, Utc::now(), Some(&binding))
+            .expect("should parse turn/started");
+        assert_eq!(event.pane_id, Some("%9".to_string()));
+        assert_eq!(event.pane_generation, Some(3));
     }
 
     #[test]

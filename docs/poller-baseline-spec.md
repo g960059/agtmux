@@ -100,11 +100,12 @@ which:
 
 ## Signal Weights (hardcoded in core)
 
-| Signal | Weight | Source |
-|--------|--------|--------|
-| `process_hint` | 1.00 | `WEIGHT_PROCESS_HINT` |
-| `cmd_match` | 0.86 | `WEIGHT_CMD_MATCH` |
-| `title_match` | 0.66 | `WEIGHT_TITLE_MATCH` |
+| Signal | Weight | Source | Note |
+|--------|--------|--------|------|
+| `process_hint` | 1.00 | `WEIGHT_PROCESS_HINT` | |
+| `cmd_match` | 0.86 | `WEIGHT_CMD_MATCH` | |
+| `poller_match` | 0.78 | `WEIGHT_POLLER_MATCH` | capture-based detection (4th signal) |
+| `title_match` | 0.66 | `WEIGHT_TITLE_MATCH` | title-only では検出しない（無条件抑制） |
 
 ## Activity Precedence (conflict resolution)
 

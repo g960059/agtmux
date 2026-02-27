@@ -22,8 +22,8 @@
   - poller capture signal: `0.78`
   - pane_title token: `0.66`
 - Guardrails:
-  - title-only match は managed 昇格根拠にしない
-  - wrapper command（`node|bun|deno`）かつ provider hint 不在の title-only は reject
+  - title-only match は managed 昇格根拠にしない（`current_cmd` に関係なく無条件抑制）
+  - pane_title は stale になりやすく（エージェント終了後も残存）、単独シグナルとしては信頼性が低い
 - Hysteresis:
   - idle確定: `max(4s, 2*poll_interval)`
   - running昇格: `last_interaction <= 8s` かつ running hint あり

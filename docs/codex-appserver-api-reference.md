@@ -98,7 +98,7 @@ agtmux の主要ポーリング対象。`cwd` フィルタで pane 対応が可�
         "createdAt": 1730831111,
         "updatedAt": 1730831111,
         "name": "TUI prototype",
-        "status": { "type": "idle" }
+        "status": { "type": "idle" }  // ⚠ May be OMITTED — see note below
       }
     ],
     "nextCursor": "opaque-token-or-null"
@@ -117,6 +117,18 @@ agtmux の主要ポーリング対象。`cwd` フィルタで pane 対応が可�
 | `sourceKinds` | string[]? | `cli`, `vscode`, `exec`, `appServer`, `subAgent*`, `unknown` |
 | `modelProviders` | string[]? | Filter by provider |
 | `archived` | bool? | Show archived only |
+
+> **⚠ IMPORTANT: `status` field may be omitted (v0.104.0+)**
+>
+> The API documentation shows `"status": { "type": "idle" }` in thread objects, but the
+> real Codex App Server (v0.104.0) frequently omits the `status` field entirely from
+> `thread/list` responses. The `status` is only guaranteed in:
+> - `thread/status/changed` notifications
+> - `thread/read` responses
+>
+> **agtmux handling**: When `status` is absent, default to `"idle"` (a listed thread is
+> at minimum available/loaded). Do NOT default to `"unknown"` — this causes all Codex panes
+> to show `ActivityState::Unknown`.
 
 ### `thread/start` — 新規スレッド作成
 
@@ -317,10 +329,13 @@ App Server が利用不可の場合（`codex` 未インストール、認証失�
 
 ### 現実装の既知問題
 
-| Issue | Severity | Description |
-|-------|----------|-------------|
-| `jsonrpc` field missing | High | 全送信メッセージに `"jsonrpc": "2.0"` が欠落。仕様違反。 |
-| `used_appserver` flag logic | Medium | App Server が alive だがイベント 0 件の場合、不要な capture fallback が起動 |
-| No reconnection | Medium | App Server プロセス終了後、再接続を試みない |
-| Mutex across await | Low | `poll_threads().await` 中に DaemonState mutex を保持 |
-| No `params` in `initialized` | Low | `initialized` 通知に `"params": {}` が未設定 |
+| Issue | Severity | Status | Description |
+|-------|----------|--------|-------------|
+| `jsonrpc` field missing | High | **Fixed (T-120)** | 全送信メッセージに `"jsonrpc": "2.0"` が欠落 → B1 で修正。 |
+| `thread/list` omits `status` | High | **Fixed** | Real API (v0.104.0) は `status` フィールドを `thread/list` に含めない → `unwrap_or("idle")` で対応。 |
+| `used_appserver` flag logic | Medium | **Fixed (T-120)** | App Server alive + 0 events → 不要な capture fallback → B3 で `is_alive()` 判定に修正。 |
+| No reconnection | Medium | **Fixed (T-120)** | App Server 終了後の再接続なし → B4 で exponential backoff 再接続追加。 |
+| Mutex across await | Low | **Fixed (T-120)** | `poll_threads().await` 中に mutex 保持 → B5 で take/put パターンに修正。 |
+| No `params` in `initialized` | Low | **Fixed (T-120)** | `initialized` 通知に `"params": {}` 未設定 → B2 で修正。 |
+| `notLoaded` thread pollution | Low | **Fixed** | `notLoaded` ステータスのスレッドが events に含まれる → filter で除外。 |
+| Per-cwd query volume | Low | Open | 全スレッドが各 per-cwd query で返される (cwd filter が効いていない可能性) → 1 tick あたり ~50 events。MAX_CWD_QUERIES_PER_TICK=8 で cap。 |

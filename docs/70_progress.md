@@ -8,6 +8,61 @@
 
 ## 2026-02-26 (cont.)
 ### Current objective
+- Bugfix: Detection accuracy — WaitingApproval false positive + provider misidentification
+
+### Completed
+- **Detection accuracy bugfix**: ライブテストで 2 つの検出精度バグを発見・修正
+  - **Bug 1 — WaitingApproval 偽陽性**: Claude Code のステータスバー `"⏵⏵ bypass permissions on"` が `"permission"` パターンにマッチし、全 idle Claude pane が WaitingApproval と誤判定
+    - **Fix**: `evidence.rs` の WaitingApproval パターンを具体的な UI プロンプトに限定
+      - Claude: `["Allow?", "Do you want to allow"]` (旧: `["Allow?", "approve", "permission"]`)
+      - Codex: `["Apply patch?"]` (旧: `["approve", "confirm"]`)
+  - **Bug 2 — Provider 誤識別**: v4 session の Codex pane が stale な `pane_title="✳ Claude Code"` により Claude と誤検出
+    - **Fix**: `detect.rs` の title-only 抑制を無条件化 — title_match のみでは `current_cmd` に関係なく検出しない
+    - 削除: `KNOWN_SHELLS` 定数、`cmd_basename()`, `is_known_shell()` 関数 (不要になった dead code)
+  - **Fixture 更新**: `dataset.json` の 43 capture lines を現実的な UI パターンに置き換え (`random.seed(42)` で決定的)
+  - **Test 更新**: 6 テスト削除 (shell-specific suppression)、2 テスト追加 (title-only unconditional suppression)、4 テスト修正
+  - Files: `evidence.rs`, `detect.rs`, `accuracy.rs`, `fixtures/poller-baseline/dataset.json`
+  - Live test verified: Claude panes → Idle, v4 Codex → title-only suppressed, 597 tests pass
+  - Docs 更新: `40_design.md` (title-only 抑制), `20_spec.md` (FR-027), `poller-baseline-spec.md` (signal weights), ADR (guardrails)
+
+### Key decisions
+- `pane_title` は単独シグナルとして信頼できない — stale title がプロセス変更後も残存するため、title_match のみの検出は無条件で抑制
+- WaitingApproval パターンは具体的な UI プロンプト文字列に限定 — 汎用的な単語 (`"permission"`, `"approve"`) は status bar 等の無関係なコンテキストにマッチする
+
+### Learnings
+- Claude Code のステータスバー (`bypass permissions on`) は activity 検出ではなく UI 設定表示 — activity signal pattern は UI プロンプトの exact phrase に限定すべき
+- tmux の `pane_title` はプロセス変更時に更新されない場合がある — v4 session で Codex に切り替わっても旧 Claude の title が残存
+
+---
+
+## 2026-02-26 (cont.)
+### Current objective
+- Bugfix: Codex pane `activity_state: Unknown` in live CLI output
+
+### Completed
+- **Codex activity_state Unknown bugfix**: Real Codex App Server (v0.104.0) does NOT include `status` field in `thread/list` responses — all threads defaulted to "unknown" status → `ActivityState::Unknown`.
+  - **Root cause**: `process_thread_list_response()` in `codex_poller.rs` used `.unwrap_or("unknown")` for missing status, but the real API omits `status` entirely from thread/list results (only guaranteed in `thread/status/changed` notifications and `thread/read`).
+  - **Fix 1 (root cause)**: Changed default from `"unknown"` to `"idle"` — a listed thread is at least available/loaded.
+  - **Fix 2 (notLoaded filter)**: Skip `notLoaded` threads in `process_thread_list_response()` — these are historical threads on disk, not in memory.
+  - **Fix 3 (defensive)**: Added `"thread.not_loaded"` → `ActivityState::Idle` in `parse_activity_state()`.
+  - **Fix 4 (clippy)**: Collapsed nested `if let Some(events) ... { if !events.is_empty() {` into single condition in poll_loop.rs.
+  - **External enhancements** (applied during session): `session_to_pane` HashMap in projection.rs for pane_id fallback, `ThreadPaneBinding`/`LastThreadState` in codex_poller.rs, per-cwd query limits (`MAX_CWD_QUERIES_PER_TICK=8`, `THREAD_LIST_REQUEST_TIMEOUT=500ms`).
+  - Files: `codex_poller.rs`, `projection.rs`, `poll_loop.rs`
+  - Live test verified: all Codex panes show `activity_state: Idle`, Claude panes show appropriate states.
+  - `just verify` PASS — 601 tests, 0 failures, fmt + clippy clean.
+
+### Key decisions
+- Default to `"idle"` (not `"unknown"`) when Codex App Server omits `status` from `thread/list` — a listed thread is at minimum available.
+- `notLoaded` threads are filtered at the poller level (not projection) since they represent unavailable historical threads.
+
+### Learnings
+- Codex App Server API documentation vs reality gap: `thread/list` response schema shows `status: { type: "idle" }` but real v0.104.0 responses omit the field entirely.
+- Debug logging (`raw_status=None`) was the key technique to discover the root cause — initial hypothesis about `notLoaded` threads was a contributing factor but not the primary issue.
+
+---
+
+## 2026-02-26 (cont.)
+### Current objective
 - Codex App Server 公式 API ドキュメントの永続化
 
 ### Completed
@@ -821,3 +876,47 @@ Codex review findings (all adopted):
 ### Summary
 - All MVP tasks (T-100 through T-106) complete. CLI runs, 514 tests pass, E2E smoke verified.
 - Waiting on user? yes — next steps (post-MVP hardening, persistence, multi-process extraction)
+
+---
+
+## 2026-02-26 (cont.)
+### Current objective
+- T-121: Pane-first resolver grouping — evidence_mode ダウングレード防止
+
+### Investigation
+- **バグ再現**: Codex pane で deterministic evidence (AppServer) があるのに、Claude の deferred (heuristic/poller) evidence が優先される現象を調査
+- **根本原因**: `apply_events()` が `session_key` でイベントをグループ化するが、各 source は異なる `session_key` を使用する:
+  - Poller: `"poller-{pane_id}"` (Heuristic)
+  - Codex AppServer: `thread_id` (Deterministic)
+  - Claude Hooks: `session_id` (Deterministic)
+- 同一 pane のイベントが別々の resolver セッションで処理され、`project_pane()` の last-writer-wins で Heuristic が Deterministic を上書きできる
+- **代替案検討**: PaneTierArbiter (二段解決) を検討したが、Codex→Claude 切替時に Codex AppServer が thread/list events を出し続け `det_last_seen` を fresh に保つため、Claude heuristic が永久にブロックされる致命的欠陥を発見
+
+### Design decision
+- **Pane-first grouping**: `apply_events()` のグループ化キーを `session_key` → `pane_id` (fallback: `session_to_pane` → `session_key`) に変更
+- 同一 pane の全ソースイベントが同一 resolver batch に入り、既存の tier 抑制 + rank 抑制がそのまま正しく機能する
+- **核心不変条件**: 同一 pane の全ソースイベントが同一 resolver batch で処理される
+- 変更対象: `projection.rs` のみ (4 modification points)
+- resolver.rs は pure function — グループ化は呼び出し側の責務、resolver 変更不要
+
+### Reproduction tests (9 tests written, 3 FAIL = bug confirmed)
+- `cross_session_det_overwritten_by_heur_sequential_ticks` — **FAIL**: fresh Det(1s) が Heur に上書き
+- `cross_session_claude_det_plus_poller_heur` — **FAIL**: Claude Det が Poller Heur に上書き
+- `deterministic_fresh_active_cross_session` — **FAIL**: per-session freshness で demotion 誤発火
+- 他 6 テスト PASS (edge cases: stale takeover, recovery, provider switch, 3-source, pane_id=None fallback)
+
+### Docs updated
+- `20_spec.md`: FR-031a 追加 (pane-first grouping 必須)
+- `30_architecture.md`: Flow-003 に pane-first grouping 注記追加
+- `40_design.md`: Section 3 (Resolver and Arbitration) に pane-first grouping 設計追加、Poll Loop Step 10 に投影詳細追加
+- `60_tasks.md`: T-121 DOING 追加
+- `70_progress.md`: 本エントリ
+
+### Key decisions
+- `session_key` 単位のグループ化は cross-source tier 抑制が機能しないため禁止 (FR-031a)
+- `pane_id` なしイベントは `session_to_pane` HashMap で fallback し、それもない場合は `session_key` を使用
+- Provider 切り替え時 (Codex→Claude) は 3s freshness window で自然に切り替わる — 旧 provider の deterministic イベントが停止すると stale → heuristic takeover
+
+### Learnings
+- Resolver は pure function で正しく設計されている — バグは呼び出し側のグループ化にあった
+- 同一 pane に対して複数 source が異なる `session_key` を使う構造は、pane-first grouping で解決が最もシンプル

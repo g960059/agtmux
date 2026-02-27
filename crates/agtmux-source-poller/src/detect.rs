@@ -52,13 +52,6 @@ pub struct PaneMeta {
 
 // ─── MVP Provider Definitions ────────────────────────────────────
 
-/// MVP provider definitions for Claude and Codex.
-/// Known shell command names for stale title suppression.
-/// Case-insensitive basename matching is used.
-const KNOWN_SHELLS: &[&str] = &[
-    "zsh", "bash", "fish", "sh", "dash", "nu", "pwsh", "tcsh", "csh", "ksh", "ash",
-];
-
 pub fn mvp_provider_defs() -> Vec<ProviderDetectDef> {
     vec![
         ProviderDetectDef {
@@ -140,12 +133,11 @@ pub fn detect(meta: &PaneMeta, def: &ProviderDetectDef) -> Option<DetectResult> 
         return None;
     }
 
-    // 6. Stale title suppression: title_match only + shell cmd + no capture → None
+    // 6. Title-only suppression: title_match alone is never sufficient for detection.
+    //    pane_title is unreliable (stale titles persist after process change, tmux
+    //    doesn't update titles reliably). Title only counts as corroborating signal.
     if title_match && !provider_hint && !cmd_match && !capture_match {
-        let cmd_basename = cmd_basename(&meta.current_cmd);
-        if is_known_shell(&cmd_basename) {
-            return None;
-        }
+        return None;
     }
 
     // 7. Return DetectResult
@@ -158,23 +150,6 @@ pub fn detect(meta: &PaneMeta, def: &ProviderDetectDef) -> Option<DetectResult> 
         is_wrapper_cmd: def.wrapper_cmd,
         confidence,
     })
-}
-
-/// Extract the basename from a command path, stripping login-shell prefix.
-/// e.g., "/usr/local/bin/fish" → "fish", "Zsh" → "zsh", "-zsh" → "zsh"
-fn cmd_basename(cmd: &str) -> String {
-    let trimmed = cmd.trim();
-    let basename = trimmed.rsplit('/').next().unwrap_or(trimmed);
-    // Also handle spaces (take first word if there are arguments)
-    let first_word = basename.split_whitespace().next().unwrap_or(basename);
-    // Strip login-shell prefix '-' (e.g. "-zsh" → "zsh")
-    let stripped = first_word.strip_prefix('-').unwrap_or(first_word);
-    stripped.to_ascii_lowercase()
-}
-
-/// Check if a command basename is a known shell.
-fn is_known_shell(basename: &str) -> bool {
-    KNOWN_SHELLS.contains(&basename)
 }
 
 /// Detect across all MVP providers, return the best match (highest confidence).
@@ -272,10 +247,11 @@ mod tests {
         assert!((r.confidence - WEIGHT_CMD_MATCH).abs() < f64::EPSILON);
     }
 
-    // ── 3. Detection: title-only match (lower confidence) ───────
+    // ── 3. Detection: title-only never sufficient ──────────────
 
     #[test]
-    fn detect_title_only_lower_confidence() {
+    fn detect_title_only_suppressed() {
+        // Title-only match is never sufficient for detection (pane_title is unreliable).
         let meta = PaneMeta {
             pane_title: "Claude Code".to_string(),
             current_cmd: "node".to_string(),
@@ -286,11 +262,7 @@ mod tests {
         let claude_def = defs.iter().find(|d| d.provider == Provider::Claude);
         let result = detect(&meta, claude_def.expect("claude def should exist"));
 
-        let r = result.expect("should detect via title");
-        assert!(r.title_match);
-        assert!(!r.provider_hint);
-        assert!(!r.cmd_match);
-        assert!((r.confidence - WEIGHT_TITLE_MATCH).abs() < f64::EPSILON);
+        assert!(result.is_none(), "title-only match should be suppressed");
     }
 
     // ── 4. Detection: no match returns None ─────────────────────
@@ -314,10 +286,10 @@ mod tests {
 
     #[test]
     fn detect_best_picks_highest_confidence() {
-        // Meta that matches Claude via process_hint (1.0) and Codex via title (0.66)
+        // Meta that matches Claude via process_hint (1.0) and Codex via cmd (0.86)
         let meta = PaneMeta {
-            pane_title: "codex terminal".to_string(),
-            current_cmd: String::new(),
+            pane_title: String::new(),
+            current_cmd: "codex".to_string(),
             process_hint: Some("claude".to_string()),
             ..Default::default()
         };
@@ -332,9 +304,10 @@ mod tests {
 
     #[test]
     fn detect_wrapper_cmd_propagated() {
+        // Use cmd_match (not title-only) to trigger detection
         let meta = PaneMeta {
-            pane_title: "codex terminal".to_string(),
-            current_cmd: String::new(),
+            pane_title: String::new(),
+            current_cmd: "codex --model o3".to_string(),
             process_hint: None,
             ..Default::default()
         };
@@ -342,20 +315,20 @@ mod tests {
         let codex_def = defs.iter().find(|d| d.provider == Provider::Codex);
         let result = detect(&meta, codex_def.expect("codex def should exist"));
 
-        let r = result.expect("should detect Codex via title");
+        let r = result.expect("should detect Codex via cmd");
         assert!(r.is_wrapper_cmd, "Codex should have wrapper_cmd=true");
 
         // Claude should have wrapper_cmd=false
         let meta2 = PaneMeta {
-            pane_title: "claude code".to_string(),
-            current_cmd: String::new(),
+            pane_title: String::new(),
+            current_cmd: "claude".to_string(),
             process_hint: None,
             ..Default::default()
         };
         let claude_def = defs.iter().find(|d| d.provider == Provider::Claude);
         let result2 = detect(&meta2, claude_def.expect("claude def should exist"));
 
-        let r2 = result2.expect("should detect Claude via title");
+        let r2 = result2.expect("should detect Claude via cmd");
         assert!(!r2.is_wrapper_cmd, "Claude should have wrapper_cmd=false");
     }
 
@@ -377,10 +350,11 @@ mod tests {
     }
 
     #[test]
-    fn detect_case_insensitive_title() {
+    fn detect_case_insensitive_title_with_corroborating() {
+        // Title-only is suppressed, so add a corroborating signal (cmd_match)
         let meta = PaneMeta {
             pane_title: "OPENAI CODEX".to_string(),
-            current_cmd: String::new(),
+            current_cmd: "codex".to_string(),
             process_hint: None,
             ..Default::default()
         };
@@ -388,7 +362,9 @@ mod tests {
         let codex_def = defs.iter().find(|d| d.provider == Provider::Codex);
         let result = detect(&meta, codex_def.expect("codex def should exist"));
 
-        assert!(result.is_some(), "case-insensitive title match should work");
+        let r = result.expect("title + cmd should detect");
+        assert!(r.title_match, "case-insensitive title match should work");
+        assert!(r.cmd_match);
     }
 
     // ── detect_best returns None when nothing matches ───────────
@@ -500,41 +476,25 @@ mod tests {
     }
 
     #[test]
-    fn detect_stale_title_shell_suppressed() {
-        // title matches "claude" but current_cmd is zsh and no capture → stale title
+    fn detect_title_only_suppressed_any_cmd() {
+        // title-only match is always suppressed, regardless of current_cmd
         let meta = PaneMeta {
             pane_title: "\u{2733} Claude Code".to_string(),
+            current_cmd: "node".to_string(),
+            process_hint: None,
+            capture_lines: vec![],
+        };
+        let result = detect_best(&meta);
+        assert!(result.is_none(), "title-only + node → None");
+
+        let meta2 = PaneMeta {
+            pane_title: "Claude Code".to_string(),
             current_cmd: "zsh".to_string(),
             process_hint: None,
-            capture_lines: vec!["$ ls -la".to_string()],
-        };
-        let result = detect_best(&meta);
-        assert!(result.is_none(), "stale title + shell + no capture → None");
-    }
-
-    #[test]
-    fn detect_stale_title_with_path_shell() {
-        // shell as full path
-        let meta = PaneMeta {
-            pane_title: "Claude Code".to_string(),
-            current_cmd: "/usr/local/bin/fish".to_string(),
-            process_hint: None,
             capture_lines: vec![],
         };
-        let result = detect_best(&meta);
-        assert!(result.is_none(), "stale title + path shell → None");
-    }
-
-    #[test]
-    fn detect_stale_title_case_insensitive_shell() {
-        let meta = PaneMeta {
-            pane_title: "Claude Code".to_string(),
-            current_cmd: "Bash".to_string(),
-            process_hint: None,
-            capture_lines: vec![],
-        };
-        let result = detect_best(&meta);
-        assert!(result.is_none(), "stale title + case-variant shell → None");
+        let result2 = detect_best(&meta2);
+        assert!(result2.is_none(), "title-only + zsh → None");
     }
 
     #[test]
@@ -572,18 +532,8 @@ mod tests {
     }
 
     #[test]
-    fn detect_cmd_basename_normalization() {
-        assert_eq!(cmd_basename("zsh"), "zsh");
-        assert_eq!(cmd_basename("/usr/bin/zsh"), "zsh");
-        assert_eq!(cmd_basename("/usr/local/bin/fish"), "fish");
-        assert_eq!(cmd_basename("Bash"), "bash");
-        assert_eq!(cmd_basename("-zsh"), "zsh"); // login shell prefix stripped
-        assert_eq!(cmd_basename("-bash"), "bash");
-    }
-
-    #[test]
-    fn detect_stale_title_login_shell_prefix() {
-        // tmux reports "-zsh" for login shells — should still be suppressed
+    fn detect_title_only_suppressed_login_shell() {
+        // Even with login-shell prefix, title-only is still suppressed
         let meta = PaneMeta {
             pane_title: "Claude Code".to_string(),
             current_cmd: "-zsh".to_string(),
@@ -591,21 +541,6 @@ mod tests {
             capture_lines: vec![],
         };
         let result = detect_best(&meta);
-        assert!(result.is_none(), "stale title + login shell (-zsh) → None");
-    }
-
-    #[test]
-    fn known_shells_list() {
-        assert!(is_known_shell("zsh"));
-        assert!(is_known_shell("bash"));
-        assert!(is_known_shell("fish"));
-        assert!(is_known_shell("nu"));
-        assert!(is_known_shell("pwsh"));
-        assert!(is_known_shell("tcsh"));
-        assert!(is_known_shell("csh"));
-        assert!(is_known_shell("ksh"));
-        assert!(is_known_shell("ash"));
-        assert!(!is_known_shell("node"));
-        assert!(!is_known_shell("vim"));
+        assert!(result.is_none(), "title-only + login shell → None");
     }
 }

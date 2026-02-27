@@ -55,6 +55,8 @@ pub struct DaemonProjection {
     sessions: HashMap<String, SessionRuntimeState>,
     /// Per-pane runtime state, keyed by `pane_id`.
     panes: HashMap<String, PaneRuntimeState>,
+    /// Best-known session -> pane mapping (used when events omit pane_id).
+    session_to_pane: HashMap<String, String>,
     /// Monotonic version counter for change tracking.
     version: StateVersion,
     /// Change log for client polling.
@@ -76,6 +78,7 @@ impl DaemonProjection {
             resolver_states: HashMap::new(),
             sessions: HashMap::new(),
             panes: HashMap::new(),
+            session_to_pane: HashMap::new(),
             version: 0,
             changes: Vec::new(),
             source_ranks: resolver::default_source_ranks(),
@@ -84,38 +87,47 @@ impl DaemonProjection {
 
     /// Apply a batch of events from the gateway.
     ///
-    /// Events are grouped by `session_key`, resolved per-session through
-    /// the tier resolver, and projected into the read model. Returns
-    /// statistics about what was accepted/changed.
+    /// Events are grouped by `pane_id` (pane-first grouping), resolved
+    /// per-group through the tier resolver, and projected into the read model.
+    /// This ensures all source events for the same pane enter the same resolver
+    /// batch, so cross-source tier suppression works correctly.
+    ///
+    /// Fallback when `pane_id` is absent: `session_to_pane` lookup, then `session_key`.
     pub fn apply_events(&mut self, events: Vec<SourceEventV2>, now: DateTime<Utc>) -> ApplyResult {
         if events.is_empty() {
             return ApplyResult::default();
         }
 
-        // Group events by session_key
-        let mut by_session: HashMap<String, Vec<SourceEventV2>> = HashMap::new();
+        // (a) Group events by pane_id (fallback: session_to_pane → session_key).
+        // Invariant: all source events for the same pane enter the same resolver batch.
+        let mut by_group: HashMap<String, Vec<SourceEventV2>> = HashMap::new();
         for event in events {
-            by_session
-                .entry(event.session_key.clone())
-                .or_default()
-                .push(event);
+            let group_key = event
+                .pane_id
+                .clone()
+                .or_else(|| self.session_to_pane.get(&event.session_key).cloned())
+                .unwrap_or_else(|| event.session_key.clone());
+            by_group.entry(group_key).or_default().push(event);
         }
 
         let mut result = ApplyResult::default();
 
         // Process sorted for determinism in tests
-        let mut session_keys: Vec<_> = by_session.keys().cloned().collect();
-        session_keys.sort();
+        let mut group_keys: Vec<_> = by_group.keys().cloned().collect();
+        group_keys.sort();
 
-        for session_key in session_keys {
-            let session_events = by_session.remove(&session_key).unwrap_or_default();
-            let prev_state = self.resolver_states.get(&session_key);
+        for group_key in group_keys {
+            let group_events = by_group.remove(&group_key).unwrap_or_default();
 
-            let output = resolver::resolve(session_events, now, prev_state, &self.source_ranks);
+            // (b) resolver_states keyed by group_key (= pane_id or fallback).
+            // deterministic_last_seen is tracked per-pane across all sources.
+            let prev_state = self.resolver_states.get(&group_key);
+
+            let output = resolver::resolve(group_events, now, prev_state, &self.source_ranks);
 
             // Always update resolver state (tracks deterministic_last_seen)
             self.resolver_states
-                .insert(session_key.clone(), output.next_state.clone());
+                .insert(group_key.clone(), output.next_state.clone());
 
             result.events_accepted += output.accepted_events.len();
             result.events_suppressed += output.suppressed_events.len();
@@ -126,17 +138,32 @@ impl DaemonProjection {
                 continue;
             }
 
-            // Update session runtime state
-            if self.project_session(&session_key, &output, now) {
-                result.sessions_changed += 1;
+            // (c) One group may contain multiple session_keys (different sources).
+            // Project each unique session_key independently.
+            let mut session_keys_in_group: Vec<String> = output
+                .accepted_events
+                .iter()
+                .map(|e| e.session_key.clone())
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
+            session_keys_in_group.sort();
+            for sk in &session_keys_in_group {
+                if self.project_session(sk, &output, now) {
+                    result.sessions_changed += 1;
+                }
             }
 
             // Update pane states from accepted events (dedup same pane_id)
-            let mut panes_counted: HashSet<&str> = HashSet::new();
+            let mut panes_counted: HashSet<String> = HashSet::new();
             for event in &output.accepted_events {
-                if let Some(pane_id) = &event.pane_id
-                    && self.project_pane(pane_id, event, &output, now)
-                    && panes_counted.insert(pane_id.as_str())
+                let pane_id = event
+                    .pane_id
+                    .clone()
+                    .or_else(|| self.session_to_pane.get(&event.session_key).cloned());
+                if let Some(pane_id) = pane_id
+                    && self.project_pane(&pane_id, event, &output, now)
+                    && panes_counted.insert(pane_id)
                 {
                     result.panes_changed += 1;
                 }
@@ -221,7 +248,12 @@ impl DaemonProjection {
 
         let pane_instance_id = PaneInstanceId {
             pane_id: pane_id.to_owned(),
-            generation: event.pane_generation.unwrap_or(0),
+            generation: event.pane_generation.unwrap_or_else(|| {
+                self.panes
+                    .get(pane_id)
+                    .map(|p| p.pane_instance_id.generation)
+                    .unwrap_or(0)
+            }),
             birth_ts,
         };
 
@@ -241,9 +273,12 @@ impl DaemonProjection {
             .get(pane_id)
             .is_some_and(|p| p.signature_class == PaneSignatureClass::Deterministic);
 
-        // Check if deterministic evidence is fresh for this session.
+        // (d) Check if deterministic evidence is fresh for this pane.
+        // Use the pane's group_key (pane_id) to look up the resolver state,
+        // not event.session_key — ensures cross-source freshness is tracked.
         let deterministic_fresh_active = {
-            let resolver_state = self.resolver_states.get(&event.session_key);
+            let pane_resolver_key = event.pane_id.as_deref().unwrap_or(&event.session_key);
+            let resolver_state = self.resolver_states.get(pane_resolver_key);
             let det_last_seen = resolver_state.and_then(|s| s.deterministic_last_seen);
             matches!(
                 resolver::classify_freshness(det_last_seen, now),
@@ -332,6 +367,8 @@ impl DaemonProjection {
             });
         }
 
+        self.session_to_pane
+            .insert(event.session_key.clone(), pane_id.to_owned());
         self.panes.insert(pane_id.to_owned(), new_state);
         changed
     }
@@ -398,8 +435,13 @@ impl DaemonProjection {
 // ─── Helpers ─────────────────────────────────────────────────────
 
 /// Parse an `ActivityState` from an `event_type` string.
+///
+/// Supports three event_type namespaces:
+/// - `activity.*` / `lifecycle.*`: poller heuristic + Claude hooks
+/// - `thread.*` / `turn.*`: Codex App Server (JSON-RPC thread/list + notifications)
 fn parse_activity_state(event_type: &str) -> ActivityState {
     match event_type {
+        // Poller / Claude hooks namespace
         "activity.running" | "lifecycle.running" | "activity.start" | "lifecycle.start" => {
             ActivityState::Running
         }
@@ -410,6 +452,12 @@ fn parse_activity_state(event_type: &str) -> ActivityState {
             ActivityState::WaitingApproval
         }
         "activity.error" | "lifecycle.error" => ActivityState::Error,
+        // Codex App Server namespace (thread/list status + notifications)
+        "thread.active" | "turn.started" | "turn.inProgress" => ActivityState::Running,
+        "thread.idle" | "thread.not_loaded" | "turn.completed" | "turn.interrupted" => {
+            ActivityState::Idle
+        }
+        "thread.error" | "thread.systemError" | "turn.failed" => ActivityState::Error,
         _ => ActivityState::Unknown,
     }
 }
@@ -652,6 +700,34 @@ mod tests {
             ActivityState::Error
         );
         assert_eq!(parse_activity_state("unknown.type"), ActivityState::Unknown);
+
+        // Codex App Server namespace
+        assert_eq!(
+            parse_activity_state("thread.active"),
+            ActivityState::Running
+        );
+        assert_eq!(parse_activity_state("thread.idle"), ActivityState::Idle);
+        assert_eq!(parse_activity_state("thread.error"), ActivityState::Error);
+        assert_eq!(
+            parse_activity_state("thread.systemError"),
+            ActivityState::Error
+        );
+        assert_eq!(parse_activity_state("turn.started"), ActivityState::Running);
+        assert_eq!(
+            parse_activity_state("turn.inProgress"),
+            ActivityState::Running
+        );
+        assert_eq!(parse_activity_state("turn.completed"), ActivityState::Idle);
+        assert_eq!(
+            parse_activity_state("turn.interrupted"),
+            ActivityState::Idle
+        );
+        assert_eq!(parse_activity_state("turn.failed"), ActivityState::Error);
+        // notLoaded threads map to Idle (defensive — primary filter is in codex_poller)
+        assert_eq!(
+            parse_activity_state("thread.not_loaded"),
+            ActivityState::Idle
+        );
     }
 
     // ── 5. Empty batch returns default result ──────────────────────
@@ -877,6 +953,36 @@ mod tests {
         assert_eq!(result.panes_changed, 0);
         assert!(proj.get_session("s1").is_some());
         assert_eq!(proj.pane_count(), 0);
+    }
+
+    #[test]
+    fn event_without_pane_id_updates_known_pane() {
+        let mut proj = DaemonProjection::new();
+        let t = t0();
+
+        // First deterministic event establishes session->pane mapping.
+        proj.apply_events(vec![det_event("e1", "thr-1", "%1", "thread.active", t)], t);
+        let pane = proj.get_pane("%1").expect("pane");
+        assert_eq!(pane.activity_state, ActivityState::Running);
+
+        // Follow-up event for the same session has no pane_id (notification/global path).
+        let t2 = t + TimeDelta::seconds(1);
+        let event = make_event(
+            "e2",
+            agtmux_core_v5::types::Provider::Codex,
+            SourceKind::CodexAppserver,
+            "thr-1",
+            None,
+            "turn.completed",
+            t2,
+        );
+        let result = proj.apply_events(vec![event], t2);
+
+        assert_eq!(result.sessions_changed, 1);
+        assert_eq!(result.panes_changed, 1);
+        let pane = proj.get_pane("%1").expect("pane");
+        assert_eq!(pane.activity_state, ActivityState::Idle);
+        assert_eq!(pane.session_key, "thr-1");
     }
 
     // ── 16. Signature inputs extracted from payload ─────────────────
@@ -1469,5 +1575,375 @@ mod tests {
             "poller_match should be inferred from matched_pattern"
         );
         assert_eq!(pane.signature_class, PaneSignatureClass::Heuristic);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Cross-session_key evidence downgrade tests
+    //
+    // These tests reproduce the bug where different sources generate
+    // different session_keys for the same pane, causing heuristic
+    // evidence to overwrite deterministic evidence.
+    // ═══════════════════════════════════════════════════════════════
+
+    // Helper: Codex AppServer deterministic event (session_key = thread_id)
+    fn codex_det_event(id: &str, thread_id: &str, pane: &str, at: DateTime<Utc>) -> SourceEventV2 {
+        make_event(
+            id,
+            agtmux_core_v5::types::Provider::Codex,
+            SourceKind::CodexAppserver,
+            thread_id, // e.g. "thr_abc"
+            Some(pane),
+            "thread.active",
+            at,
+        )
+    }
+
+    // Helper: Poller heuristic event for Codex (session_key = "poller-{pane_id}")
+    fn codex_poller_event(
+        id: &str,
+        pane: &str,
+        event_type: &str,
+        at: DateTime<Utc>,
+    ) -> SourceEventV2 {
+        let session_key = format!("poller-{pane}");
+        let mut e = make_event(
+            id,
+            agtmux_core_v5::types::Provider::Codex,
+            SourceKind::Poller,
+            &session_key,
+            Some(pane),
+            event_type,
+            at,
+        );
+        e.payload = serde_json::json!({
+            "provider_hint": true,
+            "cmd_match": true,
+        });
+        e
+    }
+
+    // Helper: Claude Hooks deterministic event
+    fn claude_det_event(
+        id: &str,
+        session_id: &str,
+        pane: &str,
+        at: DateTime<Utc>,
+    ) -> SourceEventV2 {
+        make_event(
+            id,
+            agtmux_core_v5::types::Provider::Claude,
+            SourceKind::ClaudeHooks,
+            session_id, // e.g. "claude-sess-xyz"
+            Some(pane),
+            "lifecycle.running",
+            at,
+        )
+    }
+
+    // Helper: Poller heuristic event for Claude (session_key = "poller-{pane_id}")
+    fn claude_poller_event(
+        id: &str,
+        pane: &str,
+        event_type: &str,
+        at: DateTime<Utc>,
+    ) -> SourceEventV2 {
+        let session_key = format!("poller-{pane}");
+        let mut e = make_event(
+            id,
+            agtmux_core_v5::types::Provider::Claude,
+            SourceKind::Poller,
+            &session_key,
+            Some(pane),
+            event_type,
+            at,
+        );
+        e.payload = serde_json::json!({
+            "provider_hint": true,
+            "cmd_match": true,
+        });
+        e
+    }
+
+    // ── 37. BUG REPRO: Deterministic overwritten by heuristic (same batch) ──
+
+    #[test]
+    fn cross_session_det_overwritten_by_heur_same_batch() {
+        let mut proj = DaemonProjection::new();
+        let now = Utc::now();
+
+        // Codex AppServer deterministic event (session_key = "thr_abc")
+        // AND Poller heuristic event (session_key = "poller-%1")
+        // for the SAME pane %1, in the same batch.
+        let events = vec![
+            codex_det_event("e1", "thr_abc", "%1", now - TimeDelta::milliseconds(500)),
+            codex_poller_event(
+                "e2",
+                "%1",
+                "activity.running",
+                now - TimeDelta::milliseconds(500),
+            ),
+        ];
+        proj.apply_events(events, now);
+
+        let pane = proj.get_pane("%1").expect("pane should exist");
+
+        // BUG: With session_key-based grouping, the poller's "poller-%1" session
+        // is resolved independently (no deterministic evidence in its batch),
+        // so it sets evidence_mode=Heuristic. Since "poller-%1" sorts after
+        // "thr_abc", it overwrites the deterministic result.
+        //
+        // EXPECTED after fix: evidence_mode should be Deterministic because
+        // Codex AppServer's deterministic evidence should take priority.
+        assert_eq!(
+            pane.evidence_mode,
+            EvidenceMode::Deterministic,
+            "deterministic evidence should NOT be overwritten by heuristic \
+             from a different session_key targeting the same pane"
+        );
+    }
+
+    // ── 38. BUG REPRO: Deterministic overwritten by heuristic (sequential ticks) ──
+
+    #[test]
+    fn cross_session_det_overwritten_by_heur_sequential_ticks() {
+        let mut proj = DaemonProjection::new();
+        let now = Utc::now();
+
+        // Tick 1: Codex AppServer deterministic event
+        proj.apply_events(vec![codex_det_event("e1", "thr_abc", "%1", now)], now);
+
+        let pane = proj.get_pane("%1").expect("pane after tick 1");
+        assert_eq!(pane.evidence_mode, EvidenceMode::Deterministic);
+
+        // Tick 2 (1s later): ONLY poller event arrives for same pane
+        // (different session_key "poller-%1")
+        let now2 = now + TimeDelta::seconds(1);
+        proj.apply_events(
+            vec![codex_poller_event("e2", "%1", "activity.running", now2)],
+            now2,
+        );
+
+        let pane = proj.get_pane("%1").expect("pane after tick 2");
+
+        // BUG: Poller's session "poller-%1" has no deterministic history,
+        // so winner_tier=Heuristic, overwriting the pane's Deterministic state.
+        //
+        // EXPECTED after fix: Deterministic should be maintained because
+        // the pane's det_last_seen (from tick 1) is still fresh (1s < 3s).
+        assert_eq!(
+            pane.evidence_mode,
+            EvidenceMode::Deterministic,
+            "fresh deterministic evidence (1s old) should not be overwritten by heuristic"
+        );
+    }
+
+    // ── 39. Heuristic correctly takes over when deterministic goes stale ──
+
+    #[test]
+    fn cross_session_heur_takes_over_when_det_stale() {
+        let mut proj = DaemonProjection::new();
+        let now = Utc::now();
+
+        // Tick 1: Deterministic
+        proj.apply_events(vec![codex_det_event("e1", "thr_abc", "%1", now)], now);
+        assert_eq!(
+            proj.get_pane("%1").expect("pane %1").evidence_mode,
+            EvidenceMode::Deterministic,
+        );
+
+        // Tick 2 (4s later): Det is stale (>3s), only poller arrives
+        let now2 = now + TimeDelta::seconds(4);
+        proj.apply_events(
+            vec![codex_poller_event("e2", "%1", "activity.idle", now2)],
+            now2,
+        );
+
+        let pane = proj.get_pane("%1").expect("pane after tick 2");
+        assert_eq!(
+            pane.evidence_mode,
+            EvidenceMode::Heuristic,
+            "when deterministic is stale (>3s), heuristic should take over"
+        );
+    }
+
+    // ── 40. Deterministic recovery after stale fallback ──
+
+    #[test]
+    fn cross_session_det_recovery_after_stale() {
+        let mut proj = DaemonProjection::new();
+        let now = Utc::now();
+
+        // Tick 1: Deterministic
+        proj.apply_events(vec![codex_det_event("e1", "thr_abc", "%1", now)], now);
+        assert_eq!(
+            proj.get_pane("%1").expect("pane %1").evidence_mode,
+            EvidenceMode::Deterministic,
+        );
+
+        // Tick 2 (4s): Stale → Heuristic
+        let now2 = now + TimeDelta::seconds(4);
+        proj.apply_events(
+            vec![codex_poller_event("e2", "%1", "activity.idle", now2)],
+            now2,
+        );
+        assert_eq!(
+            proj.get_pane("%1").expect("pane %1").evidence_mode,
+            EvidenceMode::Heuristic,
+        );
+
+        // Tick 3 (5s): Deterministic recovers
+        let now3 = now + TimeDelta::seconds(5);
+        proj.apply_events(vec![codex_det_event("e3", "thr_abc", "%1", now3)], now3);
+        assert_eq!(
+            proj.get_pane("%1").expect("pane %1").evidence_mode,
+            EvidenceMode::Deterministic,
+            "deterministic should re-promote after recovery"
+        );
+    }
+
+    // ── 41. Provider switch: Codex (Det) → Claude (Heur, no hooks) ──
+
+    #[test]
+    fn cross_session_provider_switch_codex_to_claude() {
+        let mut proj = DaemonProjection::new();
+        let now = Utc::now();
+
+        // Tick 1: Codex with deterministic AppServer evidence
+        proj.apply_events(
+            vec![
+                codex_det_event("e1", "thr_abc", "%1", now),
+                codex_poller_event("e2", "%1", "activity.running", now),
+            ],
+            now,
+        );
+        let pane = proj.get_pane("%1").expect("pane %1");
+        assert_eq!(pane.evidence_mode, EvidenceMode::Deterministic);
+        assert_eq!(pane.provider, Some(agtmux_core_v5::types::Provider::Codex),);
+
+        // [User switches pane from Codex to Claude]
+        // Tick 2 (4s later): Only Claude poller events, Codex AppServer stopped
+        let now2 = now + TimeDelta::seconds(4);
+        proj.apply_events(
+            vec![claude_poller_event("e3", "%1", "activity.idle", now2)],
+            now2,
+        );
+        let pane = proj.get_pane("%1").expect("pane %1");
+        assert_eq!(
+            pane.evidence_mode,
+            EvidenceMode::Heuristic,
+            "after Codex stops (det stale >3s), Claude heuristic should take over"
+        );
+        assert_eq!(
+            pane.provider,
+            Some(agtmux_core_v5::types::Provider::Claude),
+            "provider should switch to Claude"
+        );
+    }
+
+    // ── 42. Claude with hooks (Det) + Claude poller (Heur) same pane ──
+
+    #[test]
+    fn cross_session_claude_det_plus_poller_heur() {
+        let mut proj = DaemonProjection::new();
+        let now = Utc::now();
+
+        // Claude Hooks (deterministic, session="claude-sess-xyz")
+        // + Poller (heuristic, session="poller-%2")
+        // for pane %2
+        let events = vec![
+            claude_det_event("e1", "claude-sess-xyz", "%2", now),
+            claude_poller_event("e2", "%2", "activity.running", now),
+        ];
+        proj.apply_events(events, now);
+
+        let pane = proj.get_pane("%2").expect("pane");
+        assert_eq!(
+            pane.evidence_mode,
+            EvidenceMode::Deterministic,
+            "Claude hooks deterministic should win over Claude poller heuristic"
+        );
+    }
+
+    // ── 43. Three sources: Codex Det + Claude Det + Poller Heur ──
+
+    #[test]
+    fn cross_session_three_sources_same_pane() {
+        let mut proj = DaemonProjection::new();
+        let now = Utc::now();
+
+        // Unlikely but possible: all three sources target pane %1
+        let events = vec![
+            codex_det_event("e1", "thr_abc", "%1", now),
+            claude_det_event("e2", "claude-sess", "%1", now),
+            codex_poller_event("e3", "%1", "activity.running", now),
+        ];
+        proj.apply_events(events, now);
+
+        let pane = proj.get_pane("%1").expect("pane");
+        assert_eq!(
+            pane.evidence_mode,
+            EvidenceMode::Deterministic,
+            "deterministic should win when multiple sources target same pane"
+        );
+    }
+
+    // ── 44. pane_id=None events use session_key grouping (regression guard) ──
+
+    #[test]
+    fn session_only_events_use_session_key_grouping() {
+        let mut proj = DaemonProjection::new();
+        let now = Utc::now();
+
+        // Event with pane_id=None (session-level event)
+        let event = make_event(
+            "e1",
+            agtmux_core_v5::types::Provider::Codex,
+            SourceKind::CodexAppserver,
+            "thr_abc",
+            None, // no pane_id
+            "thread.active",
+            now,
+        );
+        let result = proj.apply_events(vec![event], now);
+
+        // Should process without panic, update session state
+        assert_eq!(result.events_accepted, 1);
+        assert_eq!(result.sessions_changed, 1);
+        // No pane projection (no pane_id)
+        assert_eq!(result.panes_changed, 0);
+    }
+
+    // ── 45. deterministic_fresh_active uses pane-level freshness ──
+
+    #[test]
+    fn deterministic_fresh_active_cross_session() {
+        let mut proj = DaemonProjection::new();
+        let now = Utc::now();
+
+        // Tick 1: Codex AppServer sets deterministic for pane %1
+        proj.apply_events(vec![codex_det_event("e1", "thr_abc", "%1", now)], now);
+        let pane = proj.get_pane("%1").expect("pane %1");
+        assert_eq!(pane.signature_class, PaneSignatureClass::Deterministic);
+
+        // Tick 2 (1s later): Poller event for same pane (different session_key).
+        // The pane has deterministic evidence from tick 1 (still fresh).
+        // After fix: deterministic_fresh_active should be true for this pane,
+        // so no-agent demotion is blocked.
+        let now2 = now + TimeDelta::seconds(1);
+        let mut poller_evt = codex_poller_event("e2", "%1", "activity.running", now2);
+        // Remove signals to test no-agent streak guard
+        poller_evt.payload = serde_json::json!({});
+        proj.apply_events(vec![poller_evt], now2);
+
+        let pane = proj.get_pane("%1").expect("pane %1");
+        // With pane-first grouping, the resolver state for "%1" knows about
+        // det_last_seen from tick 1. deterministic_fresh_active should be true.
+        // This means no-agent demotion is blocked even from a heuristic session.
+        assert_ne!(
+            pane.signature_class,
+            PaneSignatureClass::None,
+            "deterministic_fresh_active should prevent no-agent demotion \
+             when deterministic evidence is still fresh from another session"
+        );
     }
 }

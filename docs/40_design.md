@@ -146,12 +146,18 @@ pub struct SourceCursorState {
   - key: `source_kind`
 
 ### 3) Resolver and Arbitration (MVP)
+- **Pane-first grouping**: `apply_events()` はイベントを `pane_id` でグループ化する（fallback: `session_to_pane` → `session_key`）。
+  - 各 source は異なる `session_key` を使用する（Poller: `"poller-{pane_id}"`, Codex AppServer: `thread_id`, Claude Hooks: `session_id`）。
+  - `session_key` でグループ化すると同一 pane のイベントが別 resolver batch に分離し、last-writer-wins で heuristic が deterministic を上書きする。
+  - `pane_id` でグループ化することで、同一 pane の全ソースイベントが同一 resolver batch に入り、既存の tier 抑制 + rank 抑制がそのまま正しく機能する。
+  - `resolver_states` のキーも `pane_id` (or fallback session_key) で管理し、`deterministic_last_seen` が pane 横断で追跡される。
+  - **核心不変条件: 同一 pane の全ソースイベントが同一 resolver batch で処理される。**
 - Dedup key: `provider + session_key + event_id`
 - Deterministic freshness:
   - fresh: `<= 3s`
   - stale: `> 3s`
   - down: `> 15s` or health down
-- Winner selection:
+- Winner selection (resolver は pure function; grouping は呼び出し側の責務):
   1. dedup
   2. split deterministic/heuristic
   3. deterministic fresh があれば deterministic tier を採用
@@ -159,8 +165,9 @@ pub struct SourceCursorState {
   5. fresh deterministic 再到達で即時 re-promotion
 - Source rank policy (MVP):
   - Codex: `appserver (official API) > capture fallback > poller`
-  - Claude: `hooks > poller`
+  - Claude: `hooks (rank 0) > jsonl (rank 1) > poller (rank 2)`
   - Note: Codex appserver は公式 API (`docs/codex-appserver-api-reference.md`) を使用。独自プロトコルは禁止。
+  - Note: Claude JSONL は hooks 未登録環境での deterministic fallback。hooks が有効な場合は hooks が rank 優先。
 - Presence rule:
   - deterministic/heuristic 切替は `presence` を変更しない
   - `presence=managed` は agent session がある限り維持
@@ -287,6 +294,8 @@ pub struct SourceCursorState {
   8. `gateway.ingest_source_response(SourceKind::Poller, response)`
   9. `gateway.pull_events(&gw_request)` -> `GatewayPullResponse`
   10. `daemon.apply_events(gw_response.events, now)` — `Vec<>` ownership move
+      - イベントは `pane_id` でグループ化後、各グループを resolver に投入（pane-first grouping）
+      - 1 グループに複数 `session_key` がある場合、各 session に個別投影
   11. Compact: poller buffer trim, gateway committed cursor advance, daemon change log trim
 
 #### Cursor Contract Fix（事前要件）
@@ -412,6 +421,55 @@ tmux list-panes:
 - 同一 cwd に複数 thread がある場合: status=active な thread を優先、同率なら updatedAt 最新
 - マッチしない thread: `pane_id = None` のまま (session-level のみ投影)
 
+#### Claude JSONL Integration (MVP)
+
+##### Overview
+
+Claude Code は hooks を登録しなくても、プロジェクト単位の JSONL transcript を `~/.claude/projects/<encoded-path>/<sessionId>.jsonl` に書き出す。この append-only ファイルを deterministic source として読み取ることで、hooks 不要で deterministic evidence を提供する。
+
+##### File Structure
+```
+~/.claude/projects/
+├── -Users-vm-ghq-github-com-g960059-agtmux-v5/
+│   ├── sessions-index.json          ← CWD→session mapping
+│   ├── c4c0766e-....jsonl           ← session transcript (append-only)
+│   └── ...
+```
+
+##### CWD-based Session Discovery
+```
+tmux pane cwd (from list_panes)
+  → canonicalize() (symlink/worktree 解決)
+  → encode path: /Users/vm/foo → -Users-vm-foo
+  → ~/.claude/projects/{encoded}/sessions-index.json
+  → entries[].projectPath == canonical_cwd && !isSidechain && modified 最新
+  → fullPath → JSONL file
+```
+
+Poller が Claude と検出した pane のみ JSONL lookup を行う。
+
+##### File Watcher
+- 初回は EOF に seek（過去イベントは不要、新規行のみ追跡）
+- seek position tracking: partial line は `incomplete_buffer` に保持し次 tick で結合
+- inode 変化検出 (file rotation) → seek を 0 にリセット
+- パース失敗行: `warn!` log + skip（source 全体を停止しない）
+
+##### Event Translation
+- `"user"` → `"activity.user_input"` (Running)
+- `"tool_use"` → `"activity.running"` (Running)
+- `"tool_result"` → `"activity.tool_complete"` (Idle)
+- `"assistant"` → `"activity.idle"` (Idle)
+- `tier = Deterministic`, `confidence = 1.0`, `provider = Claude`, `source_kind = ClaudeJsonl`
+
+##### poll_tick Step 6b
+```
+// After poller (Step 6a), before gateway (Step 8)
+let claude_pane_cwds = snapshots filtered by poller Claude detection
+let discoveries = discover_sessions(claude_pane_cwds)
+let jsonl_events = poll_files(discoveries, watchers)
+for event in jsonl_events: claude_jsonl_source.ingest(event)
+```
+
 #### Detection Accuracy Hardening (MVP)
 
 ##### 問題
@@ -429,11 +487,10 @@ Poller のヒューリスティック検出は `pane_title` / `current_cmd` / `p
 - `DetectResult` に `capture_match: bool` を追加し、event payload に `"capture_match"` として伝搬
 - `extract_signature_inputs()` で payload の `capture_match` を読み取り `poller_match` に OR 合成
 
-##### Stale title 抑制
-- title_match のみ（process_hint/cmd_match/capture_match いずれも false）かつ `current_cmd` が shell の場合、検出結果を `None` に抑制
-- Shell list: `zsh`/`bash`/`fish`/`sh`/`dash`/`nu`/`pwsh`/`tcsh`/`csh`/`ksh`/`ash`（レビュー採択: nushell/PowerShell Core/tcsh/ksh/ash 追加）
-- 比較は case-insensitive + basename 抽出 + login-shell prefix 除去（`/usr/local/bin/fish` → `fish`, `-zsh` → `zsh`）
-- Rationale: 実際にエージェントが動いている場合は capture content にエージェント固有パターンが出るため、title_match + shell cmd のみでは stale title の可能性が高い
+##### Title-only 抑制
+- title_match のみ（process_hint/cmd_match/capture_match いずれも false）の場合、`current_cmd` に関係なく検出結果を `None` に抑制
+- Rationale: `pane_title` は tmux がプロセス変更時に確実に更新せず、エージェント終了後も stale title が残存する。実際にエージェントが動作中であれば cmd_match/capture_match/process_hint のいずれかが必ず発火するため、title のみは信頼できない
+- 旧実装（v5 T-107）では shell cmd の場合のみ抑制していたが、ライブテストで `pane_title` が Codex→Claude 等の stale 誤検出を引き起こすことが判明し、無条件抑制に変更
 
 ##### Per-pane activity_state + provider
 - `PaneRuntimeState` に `activity_state: ActivityState` と `provider: Option<Provider>` を追加（レビュー採択: Option で unmanaged pane の "未検出" を表現）

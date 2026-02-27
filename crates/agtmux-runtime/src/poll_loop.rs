@@ -18,6 +18,8 @@ use agtmux_gateway::latency_window::{LatencyEvaluation, LatencyWindow};
 use agtmux_gateway::source_registry::SourceRegistry;
 use agtmux_gateway::trust_guard::TrustGuard;
 use agtmux_source_claude_hooks::source::SourceState as ClaudeSourceState;
+use agtmux_source_claude_jsonl::source::ClaudeJsonlSourceState;
+use agtmux_source_claude_jsonl::watcher::SessionFileWatcher;
 use agtmux_source_codex_appserver::source::SourceState as CodexSourceState;
 use agtmux_source_poller::source::{PollerSourceState, poll_pane};
 use agtmux_tmux_v5::{
@@ -36,6 +38,8 @@ pub struct DaemonState {
     pub poller: PollerSourceState,
     pub codex_source: CodexSourceState,
     pub claude_source: ClaudeSourceState,
+    pub claude_jsonl_source: ClaudeJsonlSourceState,
+    pub claude_jsonl_watchers: std::collections::HashMap<String, SessionFileWatcher>,
     pub gateway: Gateway,
     pub daemon: DaemonProjection,
     pub generation_tracker: PaneGenerationTracker,
@@ -92,16 +96,20 @@ impl DaemonState {
         trust_guard.register_source("poller");
         trust_guard.register_source("codex_appserver");
         trust_guard.register_source("claude_hooks");
+        trust_guard.register_source("claude_jsonl");
 
         Self {
             poller: PollerSourceState::new(),
             codex_source: CodexSourceState::new(),
             claude_source: ClaudeSourceState::new(),
+            claude_jsonl_source: ClaudeJsonlSourceState::new(),
+            claude_jsonl_watchers: std::collections::HashMap::new(),
             gateway: Gateway::with_sources(
                 &[
                     SourceKind::Poller,
                     SourceKind::CodexAppserver,
                     SourceKind::ClaudeHooks,
+                    SourceKind::ClaudeJsonl,
                 ],
                 Utc::now(),
             ),
@@ -374,12 +382,12 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
 
     // B3 fix: used_appserver is true when client is alive (regardless of event count)
     let used_appserver = appserver_poll_result.is_some();
-    if let Some(events) = appserver_poll_result {
-        if !events.is_empty() {
-            tracing::debug!("codex app-server: {} events from thread/list", events.len());
-            for event in events {
-                st.codex_source.ingest(event);
-            }
+    if let Some(events) = appserver_poll_result
+        && !events.is_empty()
+    {
+        tracing::debug!("codex app-server: {} events from thread/list", events.len());
+        for event in events {
+            st.codex_source.ingest(event);
         }
     }
 
@@ -411,6 +419,59 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
 
     // B6: propagate App Server connectivity to codex source health
     st.codex_source.set_appserver_connected(used_appserver);
+
+    // 6b. Claude JSONL discovery + poll
+    // For panes that poller detected as Claude, look up JSONL transcript files.
+    // CWD comes from TmuxPaneInfo (panes), not PaneSnapshot.
+    {
+        // Collect pane_ids that poller detected as Claude
+        let claude_pane_ids: HashSet<&str> = snapshots
+            .iter()
+            .filter(|s| {
+                poll_pane(s)
+                    .map(|r| r.provider == Provider::Claude)
+                    .unwrap_or(false)
+            })
+            .map(|s| s.pane_id.as_str())
+            .collect();
+
+        let claude_pane_cwds: Vec<(
+            String,
+            String,
+            Option<u64>,
+            Option<chrono::DateTime<chrono::Utc>>,
+        )> = panes
+            .iter()
+            .filter(|p| claude_pane_ids.contains(p.pane_id.as_str()))
+            .map(|p| {
+                let (pane_gen, pane_birth) = st
+                    .generation_tracker
+                    .get(&p.pane_id)
+                    .map(|(g, b)| (Some(g), Some(b)))
+                    .unwrap_or((None, None));
+                (
+                    p.pane_id.clone(),
+                    p.current_path.clone(),
+                    pane_gen,
+                    pane_birth,
+                )
+            })
+            .collect();
+
+        if !claude_pane_cwds.is_empty() {
+            let discoveries = ClaudeJsonlSourceState::discover_sessions(&claude_pane_cwds);
+            let jsonl_events =
+                ClaudeJsonlSourceState::poll_files(&mut st.claude_jsonl_watchers, &discoveries);
+            for event in jsonl_events {
+                tracing::debug!(
+                    "claude jsonl event: {} (pane={:?})",
+                    event.event_type,
+                    event.pane_id
+                );
+                st.claude_jsonl_source.ingest(event);
+            }
+        }
+    }
 
     // 7. Pull events from poller
     let poller_cursor = st
@@ -456,6 +517,21 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
     );
     st.gateway
         .ingest_source_response(SourceKind::ClaudeHooks, claude_response);
+
+    // 8c. Pull events from claude JSONL source
+    let jsonl_cursor = st
+        .gateway
+        .source_cursor(SourceKind::ClaudeJsonl)
+        .map(String::from);
+    let jsonl_response = st.claude_jsonl_source.pull_events(
+        &PullEventsRequest {
+            cursor: jsonl_cursor,
+            limit: 500,
+        },
+        now,
+    );
+    st.gateway
+        .ingest_source_response(SourceKind::ClaudeJsonl, jsonl_response);
 
     // 9. Pull from gateway
     let gw_request = GatewayPullRequest {
@@ -522,12 +598,19 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
     {
         st.codex_source.compact(seq);
     }
-    // Claude: trim events up to the gateway's source cursor.
+    // Claude hooks: trim events up to the gateway's source cursor.
     if let Some(claude_cursor) = st.gateway.source_cursor(SourceKind::ClaudeHooks)
         && let Some(seq_str) = claude_cursor.strip_prefix("claude-hooks:")
         && let Ok(seq) = seq_str.parse::<u64>()
     {
         st.claude_source.compact(seq);
+    }
+    // Claude JSONL: trim events up to the gateway's source cursor.
+    if let Some(jsonl_cursor) = st.gateway.source_cursor(SourceKind::ClaudeJsonl)
+        && let Some(seq_str) = jsonl_cursor.strip_prefix("claude-jsonl:")
+        && let Ok(seq) = seq_str.parse::<u64>()
+    {
+        st.claude_jsonl_source.compact(seq);
     }
     // Gateway: trim events up to the daemon's committed cursor.
     if let Some(gw_cursor) = st.gateway_cursor.clone() {
@@ -1054,11 +1137,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gateway_registers_all_three_sources() {
+    async fn gateway_registers_all_four_sources() {
         let state = new_state();
         let st = state.lock().await;
         let health = st.gateway.list_source_health();
-        assert_eq!(health.len(), 3, "poller + codex + claude registered");
+        assert_eq!(
+            health.len(),
+            4,
+            "poller + codex + claude_hooks + claude_jsonl registered"
+        );
     }
 
     // ── T-118: Latency window integration tests ──────────────────────

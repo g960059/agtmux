@@ -28,8 +28,8 @@
   - Claude hook event を正規化
 - C-006 `[MVP]`: `agtmux-source-poller`（Heuristic fallback）
   - v4 poller pattern 判定を再利用
-- C-007 `[Post-MVP]`: `agtmux-source-file`（Optional/後段）
-  - ファイル観測系 source を分離追加
+- C-007 `[MVP]`: `agtmux-source-claude-jsonl`（Deterministic）
+  - Claude Code の JSONL transcript ファイル (`~/.claude/projects/<encoded-path>/<sessionId>.jsonl`) を読み取り、hooks 未登録環境でも deterministic evidence を提供
 - C-008 `[MVP]`: `agtmux-core-v5`
   - 型・tier resolver・attention導出（IOなし）
 - C-009 `[MVP]`: `capability registry`（logical component）
@@ -60,6 +60,7 @@
   - signatureなし / no-agent連続観測: `unmanaged` + `none`
 - Flow-003 `[MVP]`: deterministic outage -> fallback -> re-promotion
   - source health stale/down -> poller accepted -> deterministic fresh復帰 -> winner即再昇格
+  - pane-first grouping により同一 pane の全ソースイベントが同一 resolver batch で処理され、cross-source tier 抑制が正しく機能する
 - Flow-004 `[MVP]`: source health 更新
   - supervisor/gateway probe -> health table更新 -> daemon admissibility 判定へ反映
 - Flow-005 `[MVP]`: title handshake and session tile rendering
@@ -105,6 +106,7 @@
    |- [agtmux-gateway]
    |- [agtmux-source-codex-appserver]
    |- [agtmux-source-claude-hooks]
+   |- [agtmux-source-claude-jsonl]
    '- [agtmux-source-poller]
 
 source-* --pull--> gateway --pull--> daemon --push--> clients

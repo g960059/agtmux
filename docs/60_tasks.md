@@ -23,6 +23,10 @@
 - [ ] (none)
 
 ## DONE (keep short)
+- [x] T-122 (P1) [MVP] Claude JSONL deterministic source (`agtmux-source-claude-jsonl`)
+  - Evidence: New crate `agtmux-source-claude-jsonl` (4 modules: discovery, translate, watcher, source). CWD-based session discovery via `sessions-index.json`. File watcher (EOF seek, partial line, inode rotation). Source rank: `ClaudeHooks(0) > ClaudeJsonl(1) > Poller(2)`. Wired into poll_loop Step 6b + 8c + compaction. Gateway registers 4 sources. 20 new tests. `just verify` PASS (626 tests).
+- [x] T-121 (P0) [MVP] Pane-first resolver grouping + pane_generation fallback
+  - Evidence: `apply_events()` grouping key changed from `session_key` to `pane_id` (fallback: `session_to_pane` → `session_key`). `resolver_states` keyed by group_key. Per-group multi-session projection. `deterministic_fresh_active` references pane group_key. `pane_generation` fallback from existing pane state. 9 new cross-session tests (3 confirmed bugs → all PASS after fix). ADR-20260226-pane-first-resolver-grouping.md. FR-031a. `just verify` PASS (606 tests).
 - [x] T-119 (P1) Codex App Server → pane_id correlation (thread.cwd ↔ tmux pane cwd matching)
   - Evidence: Per-cwd `thread/list` queries (API `cwd` filter param). `PaneCwdInfo` struct + `build_cwd_pane_map()` for disambiguation (Codex process_hint wins). `CodexRawEvent` extended with `pane_generation`/`pane_birth_ts`, passthrough in `translate()`. `poll_threads()` accepts `&[PaneCwdInfo]`, poll_loop builds from `last_panes`+`generation_tracker`+`snapshots`. `FakeTmuxBackend.with_pane_cwd()` for testing. 5 new tests (4 cwd map + 1 translate passthrough). `just verify` PASS (599 tests).
 - [x] T-120 (P1) Codex App Server protocol fix + reliability hardening

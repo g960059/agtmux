@@ -89,7 +89,7 @@
 - FR-010 `[MVP]`: daemon client API は `list_panes` / `list_sessions` / `state_changed` / `summary_changed` を提供する。
 - FR-011 `[MVP]`: source health と winner source を可観測化（API/ログ/ストレージ）する。
 - FR-012 `[MVP]`: runtime supervisor は source->gateway->daemon->UI の順に起動し、異常時再起動を行う。
-- FR-013 `[MVP]`: v5 MVP の deterministic source は `Codex appserver` と `Claude hooks` を一次対象として固定する。
+- FR-013 `[MVP]`: v5 MVP の deterministic source は `Codex appserver`、`Claude hooks`、`Claude JSONL` を対象として固定する。Claude JSONL は hooks 未登録環境でも deterministic evidence を提供する。
 - FR-014 `[MVP]`: 将来の provider capability 追加（例: Codex hooks など）を source server 追加で取り込める拡張設計にする。
 - FR-015 `[MVP]`: pane/session tile title は、agent session と pane session の handshake 完了時に agent session name を最優先で表示する。
 - FR-016 `[MVP]`: title 解決は v4 実装の有効ロジック（canonical session index, binding history）を再利用可能な crate として取り込み、UI間で一貫表示する。
@@ -103,11 +103,12 @@
 - FR-024 `[MVP]`: pane 判定は `signature_class`（`deterministic` / `heuristic` / `none`）と `signature_reason` を必須保持し、list API と push event へ露出する。
 - FR-025 `[MVP]`: deterministic signature は `provider + source_kind + pane_instance_id + session_key + source_event_id + event_time` を最小契約とする。
 - FR-026 `[MVP]`: heuristic signature は v1 優先順位（process_hint > cmd > poller > title）で判定し、重みは `1.00 / 0.86 / 0.78 / 0.66` を既定とする。
-- FR-027 `[MVP]`: title-only guard を適用し、wrapper command + provider hint 不在時の title-only match では managed 昇格させない。
+- FR-027 `[MVP]`: title-only guard を適用し、title_match のみ（process_hint/cmd_match/capture_match いずれも false）の場合は `current_cmd` に関係なく managed 昇格させない。pane_title は stale になりやすいため、単独シグナルとしては信頼できない。
 - FR-028 `[MVP]`: heuristic `no-agent` は連続2観測で `unmanaged` へ降格する。deterministic signature が fresh の間は `managed` を維持する。
 - FR-029 `[MVP]`: poller由来の状態補正は `8s` running昇格窓、`45s` running降格窓、`max(4s,2*poll_interval)` idle安定窓を採用する。
-- FR-030 `[MVP]`: source rank は provider別に固定し、MVPでは `Codex: appserver > poller`、`Claude: hooks > poller` とする（将来 source 追加時は rank を拡張）。
+- FR-030 `[MVP]`: source rank は provider別に固定し、MVPでは `Codex: appserver > poller`、`Claude: hooks > jsonl > poller` とする（将来 source 追加時は rank を拡張）。
 - FR-031 `[MVP]`: `managed/unmanaged` 判定に env 変数の存在を必須条件として使わない（補助シグナルとしてのみ許可）。
+- FR-031a `[MVP]`: daemon の `apply_events()` はイベントを `pane_id` でグループ化し（fallback: `session_to_pane` → `session_key`）、同一 pane の全ソースイベントが同一 resolver batch で処理されることを保証する。`session_key` 単位のグループ化は禁止する（異なる source が異なる `session_key` を使うため、cross-source tier 抑制が機能しない）。
 - FR-032 `[MVP]`: poller fallback の受入基準は固定し、リリース可否は `weighted F1 >= 0.85` かつ `waiting recall >= 0.85` を必須とする。
 - FR-033 `[MVP]`: poller fallback の評価データセットは固定 fixture（`>= 300` labeled windows, Codex/Claude混在）を使用し、指標は毎回同一セットで再計測する。
 - FR-034 `[Post-MVP]`: `invalid_cursor` 復旧は数値契約を固定し、checkpoint は `30s` または `500 events` ごと、safe rewind 上限は `10m` または `10,000 events` とする。
