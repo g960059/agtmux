@@ -18,6 +18,8 @@ pub struct SessionFileWatcher {
     inode: u64,
     /// Incomplete line buffer from previous read (partial line at EOF).
     incomplete_buffer: String,
+    /// True after the first poll — guards the one-shot bootstrap event emission.
+    bootstrapped: bool,
 }
 
 impl SessionFileWatcher {
@@ -35,7 +37,18 @@ impl SessionFileWatcher {
             seek_pos,
             inode,
             incomplete_buffer: String::new(),
+            bootstrapped: false,
         }
+    }
+
+    /// Whether the first-poll bootstrap event has already been emitted.
+    pub fn is_bootstrapped(&self) -> bool {
+        self.bootstrapped
+    }
+
+    /// Mark the watcher as having completed its bootstrap.
+    pub fn mark_bootstrapped(&mut self) {
+        self.bootstrapped = true;
     }
 
     /// Create a watcher starting from position 0 (for testing).
@@ -47,6 +60,7 @@ impl SessionFileWatcher {
             seek_pos: 0,
             inode,
             incomplete_buffer: String::new(),
+            bootstrapped: false,
         }
     }
 

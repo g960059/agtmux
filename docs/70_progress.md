@@ -6,6 +6,56 @@
 
 ---
 
+## 2026-02-27 (cont.)
+### T-126: JSONL all-pane discovery fix — Completed (3 phases)
+
+#### Root cause (confirmed)
+`poll_loop.rs` Step 6b gated JSONL discovery on `claude_pane_ids` (panes poller/projection already knew were Claude).
+After daemon restart, projection is empty → `claude_pane_ids` = {} → `discover_sessions` never called → no heartbeat → Codex CWD assignment wins for idle Claude panes.
+**Vicious cycle**: JSONL discovery gated on Claude detection; Claude detection requires JSONL evidence after restart.
+
+#### Phase 1: Remove `claude_pane_ids` filter + process_hint exclusion
+- Removed `claude_pane_ids` filter from Step 6b; replaced with `snapshot_hint` lookup from `snapshots` vector
+- Filter: exclude `Some("shell") | Some("codex")` panes (prevents attributing Claude to zsh panes that happen to share CWD with old JSONL files)
+- `candidate_pane_cwds` = all panes except definite non-Claude processes
+- `discover_sessions` returns empty for panes with no `~/.claude/projects/<cwd>/*.jsonl` → safe (no false positives for panes with no JSONL)
+
+#### Phase 2: Bootstrap event in watcher
+**Problem after Phase 1**: idle watcher emitted `is_heartbeat=true` even on first poll. This only refreshes `deterministic_last_seen`, NOT `last_real_activity[Claude]`. So `select_winning_provider` couldn't see Claude as "recently active" — Codex still won.
+
+**Fix:**
+- Added `bootstrapped: bool` field to `SessionFileWatcher` (starts `false`)
+- `is_bootstrapped()` / `mark_bootstrapped()` accessors
+- `poll_files()` first-poll logic: if no real events → emit `bootstrap_event(is_heartbeat=false)`, then set `bootstrapped=true`
+- `bootstrap_event()`: `is_heartbeat=false`, `event_type="activity.idle"` — writes `last_real_activity[Claude]` in projection
+- If real events were emitted on first poll: mark bootstrapped, no extra bootstrap event needed
+- Second+ polls: emit `idle_heartbeat(is_heartbeat=true)` as before
+
+#### Phase 3: Timing fix — `Utc::now()` in Step 6b
+**Problem after Phase 2**: Step 6b used poll_tick's `now` (set at tick START). Step 6a (Codex network I/O) uses `Utc::now()` internally during async call. So T_codex > T_tick_start → `last_real_activity[Codex] > last_real_activity[Claude]` → Codex won `select_winning_provider`.
+
+**Fix:** Changed `poll_files(..., now)` → `poll_files(..., Utc::now())` in Step 6b.
+- Step 6b runs AFTER Step 6a completes → T_claude = Utc::now() ≥ T_codex → Claude wins provider conflict for idle Claude panes
+
+#### Tests
+- `poll_tick_jsonl_discovery_scans_all_panes` (new): verifies node pane with no JSONL gets discovery attempted without panic
+- `poll_files_emits_bootstrap_on_first_poll_when_no_new_lines` (renamed + updated): first poll = bootstrap (is_heartbeat=false), second poll = heartbeat (is_heartbeat=true)
+- `poll_files_emits_bootstrap_when_only_metadata_lines` (renamed + updated): metadata-only first tick = bootstrap, not heartbeat
+- 652 tests total (from 649), `just verify` PASS
+
+#### Live verification
+- `%297` (test-session, node, CWD=agtmux-daemon): `claude deterministic idle` ✓ (was `codex deterministic`)
+- `%290` (exp-go-codex, node): `claude deterministic idle` ✓
+- `%282`, `%289` (real Codex panes): `codex deterministic idle` ✓ (unaffected)
+- All zsh panes: `unmanaged` ✓ (no false Claude attribution)
+
+#### Files changed
+- `crates/agtmux-runtime/src/poll_loop.rs`: Step 6b completely rewritten (snapshot_hint, candidate_pane_cwds, Utc::now())
+- `crates/agtmux-source-claude-jsonl/src/watcher.rs`: `bootstrapped` field + accessors
+- `crates/agtmux-source-claude-jsonl/src/source.rs`: `bootstrap_event()`, `poll_files()` bootstrap logic, 2 test renames
+
+---
+
 ## 2026-02-27
 ### T-125: Shell pane false-positive Codex binding fix — Completed
 

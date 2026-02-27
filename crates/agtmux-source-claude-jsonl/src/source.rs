@@ -4,7 +4,8 @@
 use std::collections::HashMap;
 
 use agtmux_core_v5::types::{
-    PullEventsRequest, PullEventsResponse, SourceEventV2, SourceHealthReport, SourceHealthStatus,
+    EvidenceTier, Provider, PullEventsRequest, PullEventsResponse, SourceEventV2,
+    SourceHealthReport, SourceHealthStatus, SourceKind,
 };
 use chrono::{DateTime, Utc};
 use tracing::warn;
@@ -99,10 +100,17 @@ impl ClaudeJsonlSourceState {
     /// Discover JSONL sessions for given pane CWDs, poll new lines from
     /// their files, translate to events, and return them.
     ///
+    /// When a JSONL file is discovered but no real (non-metadata) lines are
+    /// found this tick — e.g. idle pane after daemon restart — a heartbeat
+    /// event (`is_heartbeat = true`, `activity.idle`) is emitted so that
+    /// `deterministic_last_seen` stays fresh and the resolver does not fall
+    /// back to heuristic or mis-attribute the pane to another provider.
+    ///
     /// Manages watcher lifecycle (create/reuse/remove).
     pub fn poll_files(
         watchers: &mut HashMap<String, SessionFileWatcher>,
         discoveries: &[SessionDiscovery],
+        now: DateTime<Utc>,
     ) -> Vec<SourceEventV2> {
         let mut events = Vec::new();
 
@@ -134,10 +142,12 @@ impl ClaudeJsonlSourceState {
                 pane_birth_ts: discovery.pane_birth_ts,
             };
 
+            let mut emitted_real_event = false;
             for line_str in &new_lines {
                 match serde_json::from_str::<ClaudeJsonlLine>(line_str) {
                     Ok(parsed) => {
                         if let Some(event) = translate::translate(&parsed, &ctx) {
+                            emitted_real_event = true;
                             events.push(event);
                         }
                     }
@@ -150,6 +160,36 @@ impl ClaudeJsonlSourceState {
                     }
                 }
             }
+
+            // Bootstrap or heartbeat: keep Claude deterministic evidence alive when idle.
+            //
+            // Codex App Server re-emits unchanged thread status every ~2s as a
+            // heartbeat.  Without a symmetric signal, an idle Claude pane (no
+            // new JSONL lines since daemon restart) would have zero deterministic
+            // evidence while Codex still has fresh heartbeats — causing a
+            // false-positive Codex attribution.
+            //
+            // On the very FIRST poll of a newly-created watcher (bootstrapped=false):
+            //   - If real events were emitted: `last_real_activity[Claude]` is already set;
+            //     no additional bootstrap needed.  We just mark bootstrapped.
+            //   - If no real events: emit a bootstrap event with `is_heartbeat=false`.
+            //     This writes `last_real_activity[Claude]` so `select_winning_provider`
+            //     can compare it against Codex's own `last_real_activity` (set on its
+            //     first thread detection).  Because Step 6b runs after Step 6a in each
+            //     tick, the bootstrap `observed_at=now()` is slightly newer than Codex's
+            //     initial detection → Claude wins the provider conflict for that pane.
+            //
+            // On all subsequent polls (bootstrapped=true), emit `is_heartbeat=true` to
+            // keep `deterministic_last_seen` fresh without biasing the arbitration.
+            if !watcher.is_bootstrapped() {
+                // First poll: mark bootstrapped regardless; emit bootstrap only if no real events.
+                if !emitted_real_event {
+                    events.push(bootstrap_event(discovery, now));
+                }
+                watcher.mark_bootstrapped();
+            } else if !emitted_real_event {
+                events.push(idle_heartbeat(discovery, now));
+            }
         }
 
         events
@@ -161,6 +201,61 @@ impl ClaudeJsonlSourceState {
         pane_cwds: &[(String, String, Option<u64>, Option<DateTime<Utc>>)],
     ) -> Vec<SessionDiscovery> {
         discovery::discover_sessions(pane_cwds)
+    }
+}
+
+/// Build a one-shot bootstrap event emitted on the first poll of a newly-created watcher.
+///
+/// Setting `is_heartbeat = false` writes `last_real_activity[Claude]` in the projection,
+/// enabling `select_winning_provider` to resolve Codex vs. Claude conflicts when both
+/// have sessions at the same CWD (e.g. a stale Codex App Server thread vs. an idle
+/// Claude JSONL session after daemon restart).
+///
+/// `observed_at = now` (not the JSONL file's last-line timestamp) ensures the event
+/// is fresh and doesn't trigger the resolver's stale-detection threshold.
+fn bootstrap_event(discovery: &SessionDiscovery, now: DateTime<Utc>) -> SourceEventV2 {
+    SourceEventV2 {
+        event_id: format!("claude-jsonl-boot-{}", discovery.pane_id),
+        provider: Provider::Claude,
+        source_kind: SourceKind::ClaudeJsonl,
+        tier: EvidenceTier::Deterministic,
+        observed_at: now,
+        session_key: discovery.session_id.clone(),
+        pane_id: Some(discovery.pane_id.clone()),
+        pane_generation: discovery.pane_generation,
+        pane_birth_ts: discovery.pane_birth_ts,
+        source_event_id: None,
+        event_type: "activity.idle".to_owned(),
+        payload: serde_json::json!({}),
+        confidence: 1.0,
+        is_heartbeat: false, // KEY: updates last_real_activity in the projection
+    }
+}
+
+/// Build a deterministic idle heartbeat for a discovered Claude JSONL session.
+///
+/// Used when the JSONL file exists for a pane but no new real activity lines
+/// have been observed this poll tick (e.g. idle session after daemon restart),
+/// AND the watcher has already been bootstrapped.
+/// Setting `is_heartbeat = true` lets the projection update
+/// `deterministic_last_seen` without affecting `last_real_activity`, so
+/// cross-provider arbitration is not biased toward the heartbeat emitter.
+fn idle_heartbeat(discovery: &SessionDiscovery, now: DateTime<Utc>) -> SourceEventV2 {
+    SourceEventV2 {
+        event_id: format!("claude-jsonl-hb-{}", discovery.pane_id),
+        provider: Provider::Claude,
+        source_kind: SourceKind::ClaudeJsonl,
+        tier: EvidenceTier::Deterministic,
+        observed_at: now,
+        session_key: discovery.session_id.clone(),
+        pane_id: Some(discovery.pane_id.clone()),
+        pane_generation: discovery.pane_generation,
+        pane_birth_ts: discovery.pane_birth_ts,
+        source_event_id: None,
+        event_type: "activity.idle".to_owned(),
+        payload: serde_json::json!({}),
+        confidence: 1.0,
+        is_heartbeat: true,
     }
 }
 
@@ -315,13 +410,144 @@ mod tests {
             SessionFileWatcher::new_from_start(jsonl_path),
         );
 
-        let events = ClaudeJsonlSourceState::poll_files(&mut watchers, &discoveries);
+        let events = ClaudeJsonlSourceState::poll_files(&mut watchers, &discoveries, now());
+        // user + tool_use = 2 real events; no heartbeat because emitted_real_event = true
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].event_type, "activity.user_input");
         assert_eq!(events[0].provider, Provider::Claude);
         assert_eq!(events[0].source_kind, SourceKind::ClaudeJsonl);
         assert_eq!(events[0].tier, EvidenceTier::Deterministic);
         assert_eq!(events[1].event_type, "activity.running");
+        assert!(!events[0].is_heartbeat);
+        assert!(!events[1].is_heartbeat);
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// After daemon restart, an idle Claude pane produces no new JSONL lines.
+    ///
+    /// T-126 bootstrap: the VERY FIRST poll emits a bootstrap event
+    /// (`is_heartbeat=false`) to set `last_real_activity[Claude]`.  This lets
+    /// `select_winning_provider` pick Claude over a stale Codex App Server thread.
+    /// Subsequent polls emit the usual idle heartbeat (`is_heartbeat=true`).
+    #[test]
+    fn poll_files_emits_bootstrap_on_first_poll_when_no_new_lines() {
+        use std::fs;
+
+        let tmp = std::env::temp_dir().join("agtmux-test-hb-no-new-lines");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).expect("test");
+
+        let jsonl_path = tmp.join("idle-session.jsonl");
+        // Historical content already on disk — daemon starts at EOF, sees nothing new.
+        fs::write(
+            &jsonl_path,
+            "{\"type\":\"assistant\",\"timestamp\":\"2026-02-25T10:00:00Z\",\"uuid\":\"u0\"}\n",
+        )
+        .expect("test");
+
+        let discoveries = vec![SessionDiscovery {
+            pane_id: "%9".to_owned(),
+            session_id: "idle-sess".to_owned(),
+            jsonl_path: jsonl_path.clone(),
+            pane_generation: Some(3),
+            pane_birth_ts: None,
+        }];
+
+        let mut watchers = HashMap::new();
+        // Watcher starts at EOF (production behaviour after daemon restart).
+        watchers.insert("%9".to_owned(), SessionFileWatcher::new(jsonl_path));
+
+        // FIRST poll → bootstrap event (is_heartbeat=false) to set last_real_activity.
+        let events = ClaudeJsonlSourceState::poll_files(&mut watchers, &discoveries, now());
+        assert_eq!(events.len(), 1, "expected exactly one bootstrap event");
+        let boot = &events[0];
+        assert!(
+            !boot.is_heartbeat,
+            "first poll must emit bootstrap (is_heartbeat=false)"
+        );
+        assert_eq!(boot.event_type, "activity.idle");
+        assert_eq!(boot.provider, Provider::Claude);
+        assert_eq!(boot.source_kind, SourceKind::ClaudeJsonl);
+        assert_eq!(boot.tier, EvidenceTier::Deterministic);
+        assert_eq!(boot.pane_id, Some("%9".to_owned()));
+        assert_eq!(boot.pane_generation, Some(3));
+        assert_eq!(boot.observed_at, now());
+
+        // SECOND poll → idle heartbeat (is_heartbeat=true), bootstrap is done.
+        let events2 = ClaudeJsonlSourceState::poll_files(&mut watchers, &discoveries, now());
+        assert_eq!(
+            events2.len(),
+            1,
+            "expected exactly one heartbeat on second poll"
+        );
+        let hb = &events2[0];
+        assert!(
+            hb.is_heartbeat,
+            "subsequent polls must emit heartbeat (is_heartbeat=true)"
+        );
+        assert_eq!(hb.event_type, "activity.idle");
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// metadata-only lines (type=system) do not count as real events;
+    /// the first poll emits a bootstrap (is_heartbeat=false) even in that case.
+    #[test]
+    fn poll_files_emits_bootstrap_when_only_metadata_lines() {
+        use std::fs;
+        use std::io::Write;
+
+        let tmp = std::env::temp_dir().join("agtmux-test-hb-metadata-only");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).expect("test");
+
+        let jsonl_path = tmp.join("meta-session.jsonl");
+        fs::write(&jsonl_path, "").expect("test");
+
+        let discoveries = vec![SessionDiscovery {
+            pane_id: "%7".to_owned(),
+            session_id: "meta-sess".to_owned(),
+            jsonl_path: jsonl_path.clone(),
+            pane_generation: None,
+            pane_birth_ts: None,
+        }];
+
+        let mut watchers = HashMap::new();
+        watchers.insert(
+            "%7".to_owned(),
+            SessionFileWatcher::new_from_start(jsonl_path.clone()),
+        );
+
+        // Append only metadata lines (type=system is skipped by translate).
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&jsonl_path)
+            .expect("test");
+        writeln!(
+            f,
+            r#"{{"type":"system","timestamp":"2026-02-25T14:00:00Z","uuid":"sys1"}}"#
+        )
+        .expect("test");
+        drop(f);
+
+        // First poll: metadata lines don't count as real events → bootstrap emitted.
+        let events = ClaudeJsonlSourceState::poll_files(&mut watchers, &discoveries, now());
+        assert_eq!(
+            events.len(),
+            1,
+            "expected one bootstrap event for metadata-only first tick"
+        );
+        assert!(
+            !events[0].is_heartbeat,
+            "first poll must be bootstrap (is_heartbeat=false)"
+        );
+        assert_eq!(events[0].event_type, "activity.idle");
+
+        // Second poll (no new lines): heartbeat emitted.
+        let events2 = ClaudeJsonlSourceState::poll_files(&mut watchers, &discoveries, now());
+        assert_eq!(events2.len(), 1, "second poll emits heartbeat");
+        assert!(events2[0].is_heartbeat, "subsequent poll must be heartbeat");
 
         let _ = fs::remove_dir_all(&tmp);
     }

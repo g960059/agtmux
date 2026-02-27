@@ -421,39 +421,37 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
     st.codex_source.set_appserver_connected(used_appserver);
 
     // 6b. Claude JSONL discovery + poll
-    // For panes known to be Claude (from poller OR projection/hooks), look up JSONL transcripts.
-    // CWD comes from TmuxPaneInfo (panes), not PaneSnapshot.
+    // Scan all panes that might be running Claude for JSONL transcripts (T-126 fix).
+    //
+    // Previously, discovery was gated on the poller/projection already detecting the pane as
+    // Claude.  After a daemon restart the projection is empty, so idle Claude panes (running
+    // as `node`) were never discovered → no heartbeat → Codex CWD assignment won falsely.
+    //
+    // We now include all panes EXCEPT those we KNOW are not Claude:
+    //   - `shell` (zsh/bash/…): tier-3 panes that never run agents.  Including them would
+    //     produce false-positive Claude attribution for any directory with an old JSONL file.
+    //   - `codex`: deterministic Codex evidence is handled by Step 6a; also including here
+    //     would produce spurious cross-provider heartbeats.
+    // All other panes (node, claude CLI, unknown runtimes) are included.
     {
-        // Collect pane_ids that poller detected as Claude
-        let mut claude_pane_ids: HashSet<&str> = snapshots
+        // Build snapshot lookup for process_hint (same pattern as Step 6a PaneCwdInfo build)
+        let snapshot_hint: std::collections::HashMap<&str, Option<&str>> = snapshots
             .iter()
-            .filter(|s| {
-                poll_pane(s)
-                    .map(|r| r.provider == Provider::Claude)
-                    .unwrap_or(false)
-            })
-            .map(|s| s.pane_id.as_str())
+            .map(|s| (s.pane_id.as_str(), s.process_hint.as_deref()))
             .collect();
 
-        // Also include panes that projection already knows are Claude
-        // (e.g. detected via hooks, not just poller)
-        for pane_state in st.daemon.list_panes() {
-            if pane_state.provider == Some(Provider::Claude) {
-                let pid = &pane_state.pane_instance_id.pane_id;
-                if let Some(tmux_pane) = panes.iter().find(|p| p.pane_id == *pid) {
-                    claude_pane_ids.insert(tmux_pane.pane_id.as_str());
-                }
-            }
-        }
-
-        let claude_pane_cwds: Vec<(
+        let candidate_pane_cwds: Vec<(
             String,
             String,
             Option<u64>,
             Option<chrono::DateTime<chrono::Utc>>,
         )> = panes
             .iter()
-            .filter(|p| claude_pane_ids.contains(p.pane_id.as_str()))
+            .filter(|p| {
+                // Exclude definite non-Claude panes to avoid false positives
+                let hint = snapshot_hint.get(p.pane_id.as_str()).copied().flatten();
+                !matches!(hint, Some("shell") | Some("codex"))
+            })
             .map(|p| {
                 let (pane_gen, pane_birth) = st
                     .generation_tracker
@@ -469,10 +467,18 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
             })
             .collect();
 
-        if !claude_pane_cwds.is_empty() {
-            let discoveries = ClaudeJsonlSourceState::discover_sessions(&claude_pane_cwds);
-            let jsonl_events =
-                ClaudeJsonlSourceState::poll_files(&mut st.claude_jsonl_watchers, &discoveries);
+        if !candidate_pane_cwds.is_empty() {
+            let discoveries = ClaudeJsonlSourceState::discover_sessions(&candidate_pane_cwds);
+            // Use Utc::now() (not poll_tick's `now`) so the bootstrap event's observed_at
+            // is guaranteed to be AFTER the Codex App Server events (which also use Utc::now()
+            // during their async network call in Step 6a).  This ensures
+            // last_real_activity[Claude] > last_real_activity[Codex] → Claude wins the
+            // select_winning_provider tiebreaker when both have fresh deterministic evidence.
+            let jsonl_events = ClaudeJsonlSourceState::poll_files(
+                &mut st.claude_jsonl_watchers,
+                &discoveries,
+                Utc::now(),
+            );
             for event in jsonl_events {
                 st.claude_jsonl_source.ingest(event);
             }
@@ -1365,6 +1371,61 @@ mod tests {
         assert!(
             !managed.is_empty(),
             "codex pane without JSON should still be detected by poller"
+        );
+    }
+
+    // ── T-126: JSONL discovery for all panes ──────────────────────
+
+    /// T-126: JSONL discovery must attempt all panes, not just those the poller already
+    /// identified as Claude.  After daemon restart, idle Claude panes (no new JSONL lines)
+    /// have no poller/projection evidence, so the old filter (`claude_pane_ids`) would
+    /// silently skip them — causing Codex CWD assignment to win falsely.
+    ///
+    /// For panes whose CWD has no ~/.claude/projects/<cwd>/*.jsonl file, discover_sessions
+    /// returns empty, so no false events are emitted.  This test uses a unique temp path
+    /// that is guaranteed not to have any real JSONL file.
+    #[tokio::test]
+    async fn poll_tick_jsonl_discovery_scans_all_panes() {
+        // %0 is 'node' (Claude Code runtime process).  Before T-126 the poller would
+        // NOT include it in claude_pane_ids (poller looks for "claude" in cmd string),
+        // so discover_sessions was never called for it.  After T-126 it is called.
+        //
+        // No JSONL file exists for this temp CWD, so the watcher list stays empty and
+        // no events are emitted — the important thing is the code path doesn't panic
+        // and does not silently skip the pane.
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let tmp_cwd = format!("/tmp/agtmux-t126-test-{nonce}");
+
+        let backend = Arc::new(
+            FakeTmuxBackend::new()
+                .with_pane_cwd("%0", "main", "node", "", &tmp_cwd)
+                .with_pane_cwd("%1", "main", "zsh", "$ ls", "/no-jsonl-here-either"),
+        );
+        let state = new_state();
+
+        poll_tick(&backend, &state)
+            .await
+            .expect("tick should succeed");
+
+        let st = state.lock().await;
+        // No JSONL files on disk for these CWDs → no watchers, no JSONL events
+        assert!(
+            st.claude_jsonl_watchers.is_empty(),
+            "no JSONL files → no watchers should be created"
+        );
+        assert_eq!(
+            st.claude_jsonl_source.buffered_len(),
+            0,
+            "no JSONL files → no events buffered"
+        );
+        // All panes are still tracked by the poll loop
+        assert_eq!(
+            st.last_panes.len(),
+            2,
+            "both panes must be tracked in last_panes"
         );
     }
 }

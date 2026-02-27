@@ -22,14 +22,13 @@
 ## BLOCKED
 - [ ] (none)
 
-## TODO
-- [ ] T-126 (P1) [MVP] Claude JSONL last-line bootstrap (idle session detection after daemon restart)
-  - 問題: watcher は EOF 起点 → daemon restart 後に idle な Claude pane (新規行なし) を検出できない
-  - 根本原因: Claude idle = JSONL 新規行なし → watcher イベントなし → Codex CWD 割り当てが勝つ
-  - Fix: watcher 起動時に EOF から逆方向にスキャン、最後の meaningful line (assistant/user/progress) を1行だけ emit してブートストラップ
-  - blocked_by: なし
-
 ## DONE (keep short)
+- [x] T-126 (P1) [MVP] Claude JSONL all-pane discovery fix (idle session detection after daemon restart)
+  - 根本原因: Step 6b が `claude_pane_ids` でゲート → daemon restart 後 projection 空 → discovery なし → heartbeat なし → Codex wins (vicious cycle)
+  - Phase 1: `claude_pane_ids` フィルタ廃止 → `snapshot_hint` で process_hint チェック → `Some("shell")|Some("codex")` pane を除外した全候補を `discover_sessions` に渡す (false positive 防止)
+  - Phase 2: `SessionFileWatcher.bootstrapped: bool` 追加。初回 poll では `bootstrap_event(is_heartbeat=false)` を emit → `last_real_activity[Claude]` を書き込み、`select_winning_provider` で Codex と比較可能に。2回目以降は従来の `idle_heartbeat(is_heartbeat=true)`
+  - Phase 3: Step 6b で `Utc::now()` を使用 (poll_tick の `now` でなく)。Step 6a (Codex network call) より後に呼ぶため T_claude ≥ T_codex → Claude wins provider conflict
+  - 3 new/renamed tests: `poll_tick_jsonl_discovery_scans_all_panes`, `poll_files_emits_bootstrap_on_first_poll_when_no_new_lines`, `poll_files_emits_bootstrap_when_only_metadata_lines`. 652 tests total, `just verify` PASS. live 確認: %297 (test-session, idle node) が `claude deterministic idle` に変わることを確認
 - [x] T-125 (P1) [MVP] Shell pane false-positive Codex binding fix
   - Evidence: `inspect_pane_processes` に `SHELL_CMDS` リスト (zsh/bash/fish/sh/csh/tcsh/ksh/dash/nu/pwsh) → `Some("shell")` 返却。`pane_tier` に tier 3 追加 (never assign)。`unclaimed` フィルタに `pane_tier < 3` 追加。live 確認: v4 の zsh pane (%286, %305) と test-session %301 (zsh) が unmanaged に変わることを確認。4 new tests。`just verify` PASS (649 tests)。
 - [x] T-124 (P1) [MVP] Same-CWD Multi-Pane Codex Binding
