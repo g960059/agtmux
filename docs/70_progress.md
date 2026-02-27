@@ -7,6 +7,26 @@
 ---
 
 ## 2026-02-26 (cont.)
+### T-123: Provider Switching — Generic Cross-Provider Arbitration
+
+### Completed
+- `is_heartbeat: bool` field added to `SourceEventV2` (with `#[serde(default)]`) and `CodexRawEvent`
+- Codex poller: `is_heartbeat=true` when status+pane unchanged and elapsed ≥ `HEARTBEAT_INTERVAL_SECS` (2s); all notifications and capture events use `is_heartbeat=false`
+- `DaemonProjection.last_real_activity: HashMap<pane_id, HashMap<Provider, DateTime<Utc>>>`: updated only for non-heartbeat Det events in `apply_events`
+- `select_winning_provider()`: when ≤1 Det provider in batch → no-op (return that provider); when multiple → winner = most-recent real activity in `last_real_activity`; fallback = current pane provider or latest event
+- `tick_freshness`: removes stale pane entries from `last_real_activity`
+- 10 new tests: 8 in projection.rs + 2 in translate.rs (codex-appserver)
+- 641 tests total (up from 631), all PASS
+
+### Key decisions
+- **pane_title 使用禁止** (ユーザー指示): binding 判定・provider 切替検出・generation bump のすべてに使用禁止。ADR-20260225 および docs/40_design.md に記録済み。
+- **正しい検出手法**: `is_heartbeat` フラグ + `last_real_activity` per-pane per-provider tracking。Codex heartbeat は freshness 維持のみで provider winner 選択には使わない。
+- **Resolver 変更なし**: tier 選択ロジックは resolver に残し、cross-provider 競合解決は projection 層で行う設計。
+- **汎用設計**: Gemini/Copilot などの将来の provider も `Provider` enum への追加だけで対応可能。
+
+---
+
+## 2026-02-26 (cont.)
 ### Current objective
 - Bugfix: Detection accuracy — WaitingApproval false positive + provider misidentification
 

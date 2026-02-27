@@ -123,6 +123,7 @@ pub fn poll_pane(snapshot: &PaneSnapshot) -> Option<PollResult> {
         event_type: activity_event_type(activity_state).to_string(),
         payload,
         confidence: detect_result.confidence,
+        is_heartbeat: false, // Poller events are never heartbeats
     };
 
     // 6. Return PollResult

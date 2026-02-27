@@ -23,6 +23,8 @@
 - [ ] (none)
 
 ## DONE (keep short)
+- [x] T-123 (P1) [MVP] Provider Switching — Generic Cross-Provider Arbitration
+  - Evidence: `is_heartbeat: bool` added to `SourceEventV2` (serde default=false) + `CodexRawEvent`. Codex poller computes `is_heartbeat=true` when status/pane unchanged and time elapsed ≥2s; all notifications/capture events `is_heartbeat=false`. `DaemonProjection.last_real_activity: HashMap<pane_id, HashMap<Provider, DateTime>>` tracks last non-heartbeat Det event per provider. `select_winning_provider()` picks most-recently-active Det provider; no conflict if ≤1 Det provider. `tick_freshness` clears stale pane entries. Covers Codex→Claude, Claude→Codex, Any→zsh, future Gemini. 10 new tests (8 projection + 2 translate). `just verify` PASS (641 tests).
 - [x] T-122 (P1) [MVP] Claude JSONL deterministic source (`agtmux-source-claude-jsonl`)
   - Evidence: New crate `agtmux-source-claude-jsonl` (4 modules: discovery, translate, watcher, source). CWD-based session discovery via `sessions-index.json`. File watcher (EOF seek, partial line, inode rotation). Source rank: `ClaudeHooks(0) > ClaudeJsonl(1) > Poller(2)`. Wired into poll_loop Step 6b + 8c + compaction. Gateway registers 4 sources. 20 new tests. `just verify` PASS (626 tests).
 - [x] T-121 (P0) [MVP] Pane-first resolver grouping + pane_generation fallback

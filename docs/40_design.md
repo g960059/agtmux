@@ -186,6 +186,11 @@ pub struct SourceCursorState {
 - Guardrails:
   - title-only は managed 昇格根拠にしない
   - wrapper (`node|bun|deno`) + no provider hint + title-only は reject
+  - **`pane_title` はいかなる binding / provider 判定にも使用禁止**:
+    tmux は pane_title をプロセス終了後もクリアしないため stale 残存する。
+    さらに session compaction で即座に失われる揮発的な値であり、
+    Codex↔Claude 切替検出・CWD binding 検証・generation bump のいずれにも
+    エビデンスとして利用してはならない。
 - Hysteresis:
   - idle確定: `max(4s, 2 * poll_interval)`
   - running昇格: running hint + `last_interaction <= 8s`
@@ -491,6 +496,56 @@ Poller のヒューリスティック検出は `pane_title` / `current_cmd` / `p
 - title_match のみ（process_hint/cmd_match/capture_match いずれも false）の場合、`current_cmd` に関係なく検出結果を `None` に抑制
 - Rationale: `pane_title` は tmux がプロセス変更時に確実に更新せず、エージェント終了後も stale title が残存する。実際にエージェントが動作中であれば cmd_match/capture_match/process_hint のいずれかが必ず発火するため、title のみは信頼できない
 - 旧実装（v5 T-107）では shell cmd の場合のみ抑制していたが、ライブテストで `pane_title` が Codex→Claude 等の stale 誤検出を引き起こすことが判明し、無条件抑制に変更
+
+##### pane_title 使用禁止（Hard Constraint）
+- **`pane_title` はいかなる目的にも evidence として使用しない**
+- 禁止対象:
+  - Codex App Server の CWD binding validation（thread を pane に紐付ける際の検証）
+  - Codex↔Claude プロバイダー切替の検出トリガー
+  - `PaneGenerationTracker.bump()` の発火条件
+  - resolver の freshness / tier 判定への入力
+- 根拠:
+  1. tmux はプロセス終了後も pane_title を即座にクリアしない → stale title が長期残存
+  2. compaction（session cleanup）時に即座に失われる揮発的な値
+  3. Claude Code は session UUID を pane_title に設定することがあり、Codex の thread UUID と混同する
+  4. Codex は pane_title を設定しない場合があり（hostname 等になる）、title によるプロバイダー識別は不可能
+- Codex↔Claude 切替の正しい検出方法: → **T-123 Provider Conflict Resolution（下記参照）**で即座に検出する。15s freshness timeout は依然として「新 provider が存在しない場合 (→zsh 等)」のフォールバックとして機能する。
+
+##### Provider Conflict Resolution (T-123)
+
+同一 pane に複数 provider が fresh な deterministic evidence を持つ競合状態を解決する仕組み。**pane_title を一切使用しない**。
+
+**設計原則**: 「1 pane には同時に 1 つの active provider しか存在できない」。最後に**実活動 (real activity)** があった provider が winner。
+
+**`is_heartbeat: bool` フィールド** (`SourceEventV2` + `CodexRawEvent`):
+- `false` (デフォルト): 実際の状態変化・新規アクティビティ (初回発見、status 変化、JSONL 新行)
+- `true`: 時間経過のみで再送出した periodic keep-alive (Codex poller の 2s heartbeat)
+- Claude JSONL・Claude Hooks からのイベントは常に `false`
+
+**`DaemonProjection.last_real_activity: HashMap<pane_id, HashMap<Provider, DateTime<Utc>>>]`**:
+- non-heartbeat な deterministic イベントが届くたびに `last_real_activity[pane_id][provider]` を更新
+- `tick_freshness()` で DOWN した pane のエントリを削除
+
+**`select_winning_provider(pane_id, accepted_events) -> Option<Provider>`**:
+1. accepted_events 内の Det イベントの provider を列挙
+2. provider が 1 つ以下 → conflict なし、そのまま返す
+3. 複数の場合 → `last_real_activity[pane_id]` を参照し、最新 timestamp の provider を返す
+4. 履歴なし → 現在の pane provider を維持 (switching しない)
+
+**apply_events への統合**:
+```
+resolver::resolve (tier 選択) → last_real_activity 更新 → select_winning_provider → project_pane (winner のみ)
+```
+
+**動作確認表**:
+| ケース | 動作 |
+|--------|------|
+| Codex→Claude | Claude JSONL real event → `last_real_activity[Claude] > [Codex]` → Claude が即 winner |
+| Claude→Codex | Codex status change (real) → Codex が winner |
+| Codex→zsh | 新 Det source なし → Codex heartbeat が 15s 後 DOWN → heuristic fallback |
+| Claude→zsh | JSONL 停止 → 15s freshness timeout → heuristic |
+| Codex→Gemini (将来) | Gemini source real event → 同ロジックで Gemini winner (汎用) |
+| Codex idle (まだ開いてる) | heartbeat のみ → 他 provider の real activity がなければ Codex 維持 |
 
 ##### Per-pane activity_state + provider
 - `PaneRuntimeState` に `activity_state: ActivityState` と `provider: Option<Provider>` を追加（レビュー採択: Option で unmanaged pane の "未検出" を表現）

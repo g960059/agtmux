@@ -17,7 +17,7 @@ use agtmux_core_v5::resolver::{self, ResolverState, SourceRank};
 use agtmux_core_v5::signature::{self, SignatureInputs};
 use agtmux_core_v5::types::{
     ActivityState, EvidenceMode, EvidenceTier, PaneInstanceId, PanePresence, PaneRuntimeState,
-    PaneSignatureClass, SessionRuntimeState, SignatureInputsCompact, SourceEventV2,
+    PaneSignatureClass, Provider, SessionRuntimeState, SignatureInputsCompact, SourceEventV2,
 };
 
 /// Monotonic version counter for change tracking.
@@ -63,6 +63,9 @@ pub struct DaemonProjection {
     changes: Vec<StateChange>,
     /// Source rank policy.
     source_ranks: Vec<SourceRank>,
+    /// Per-pane, per-provider last non-heartbeat deterministic event timestamp.
+    /// Used for cross-provider conflict resolution (T-123).
+    last_real_activity: HashMap<String, HashMap<Provider, DateTime<Utc>>>,
 }
 
 impl Default for DaemonProjection {
@@ -82,6 +85,7 @@ impl DaemonProjection {
             version: 0,
             changes: Vec::new(),
             source_ranks: resolver::default_source_ranks(),
+            last_real_activity: HashMap::new(),
         }
     }
 
@@ -154,18 +158,46 @@ impl DaemonProjection {
                 }
             }
 
-            // Update pane states from accepted events (dedup same pane_id)
+            // B2: Update last_real_activity for non-heartbeat deterministic events.
+            for event in &output.accepted_events {
+                if !event.is_heartbeat && event.tier == EvidenceTier::Deterministic {
+                    if let Some(pane_id) = &event.pane_id {
+                        let entry = self
+                            .last_real_activity
+                            .entry(pane_id.clone())
+                            .or_default()
+                            .entry(event.provider)
+                            .or_insert(event.observed_at);
+                        if event.observed_at > *entry {
+                            *entry = event.observed_at;
+                        }
+                    }
+                }
+            }
+
+            // B3: Determine winning provider for this group (cross-provider arbitration).
+            let winning_provider = self.select_winning_provider(&group_key, &output.accepted_events);
+
+            // Update pane states from accepted events (dedup same pane_id).
+            // Only project events from the winning provider to avoid nondeterministic overwrite.
             let mut panes_counted: HashSet<String> = HashSet::new();
             for event in &output.accepted_events {
                 let pane_id = event
                     .pane_id
                     .clone()
                     .or_else(|| self.session_to_pane.get(&event.session_key).cloned());
-                if let Some(pane_id) = pane_id
-                    && self.project_pane(&pane_id, event, &output, now)
-                    && panes_counted.insert(pane_id)
-                {
-                    result.panes_changed += 1;
+                if let Some(pane_id) = pane_id {
+                    // Provider arbitration: skip events from losing providers.
+                    if let Some(wp) = winning_provider {
+                        if event.provider != wp {
+                            continue;
+                        }
+                    }
+                    if self.project_pane(&pane_id, event, &output, now)
+                        && panes_counted.insert(pane_id)
+                    {
+                        result.panes_changed += 1;
+                    }
                 }
             }
         }
@@ -373,6 +405,55 @@ impl DaemonProjection {
         changed
     }
 
+    // ── Provider Arbitration (T-123) ───────────────────────────────
+
+    /// Determine the winning provider for a pane when multiple deterministic
+    /// sources are active simultaneously (e.g. Codex heartbeat + Claude JSONL).
+    ///
+    /// Rules:
+    /// 1. If ≤1 Det provider in accepted events → no conflict, return that provider.
+    /// 2. Conflict: winner = provider with most recent non-heartbeat Det activity.
+    /// 3. No history: keep current pane provider, or fall back to latest-event provider.
+    fn select_winning_provider(
+        &self,
+        pane_id: &str,
+        accepted_events: &[SourceEventV2],
+    ) -> Option<Provider> {
+        let det_providers: HashSet<Provider> = accepted_events
+            .iter()
+            .filter(|e| e.tier == EvidenceTier::Deterministic)
+            .map(|e| e.provider)
+            .collect();
+
+        // No conflict: 0 or 1 Det provider.
+        if det_providers.len() <= 1 {
+            return accepted_events.iter().map(|e| e.provider).next();
+        }
+
+        // Conflict: winner = provider with most recent real activity.
+        if let Some(map) = self.last_real_activity.get(pane_id) {
+            let winner = map
+                .iter()
+                .filter(|(p, _)| det_providers.contains(p))
+                .max_by_key(|(_, t)| *t)
+                .map(|(p, _)| *p);
+            if winner.is_some() {
+                return winner;
+            }
+        }
+
+        // No activity history yet: keep current pane provider, or latest-event provider.
+        self.panes
+            .get(pane_id)
+            .and_then(|p| p.provider)
+            .or_else(|| {
+                accepted_events
+                    .iter()
+                    .max_by_key(|e| e.observed_at)
+                    .map(|e| e.provider)
+            })
+    }
+
     // ── Client API ─────────────────────────────────────────────────
 
     /// List all pane runtime states, sorted by `pane_id`.
@@ -488,6 +569,9 @@ impl DaemonProjection {
                     }
                 }
             }
+
+            // T-123: clear provider activity history for this stale pane.
+            self.last_real_activity.remove(&key);
         }
 
         changed
@@ -608,6 +692,7 @@ mod tests {
             event_type: event_type.to_owned(),
             payload: serde_json::json!({}),
             confidence: 0.86,
+            is_heartbeat: false,
         }
     }
 
@@ -2084,5 +2169,227 @@ mod tests {
         );
         let pane = proj.get_pane("%1").expect("pane %1");
         assert_eq!(pane.evidence_mode, EvidenceMode::Deterministic);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // T-123: Provider Switching / Cross-Provider Arbitration Tests
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn codex_to_claude_switch_via_real_activity() {
+        let mut proj = DaemonProjection::new();
+        let t = t0();
+        let t1 = t + TimeDelta::seconds(3);
+
+        // Step 1: Codex is the established active provider
+        let codex_real = codex_det_event("c1", "codex-sess", "%1", t);
+        proj.apply_events(vec![codex_real], t);
+        assert_eq!(
+            proj.get_pane("%1").unwrap().provider,
+            Some(agtmux_core_v5::types::Provider::Codex),
+        );
+
+        // Step 2: Codex heartbeat + Claude real event arrive in same tick
+        let mut codex_hb = codex_det_event("c2", "codex-sess", "%1", t1);
+        codex_hb.is_heartbeat = true;
+        let claude_real = claude_det_event("cl1", "claude-sess", "%1", t1);
+
+        proj.apply_events(vec![codex_hb, claude_real], t1);
+
+        // Claude real activity is most recent → pane switches to Claude
+        assert_eq!(
+            proj.get_pane("%1").unwrap().provider,
+            Some(agtmux_core_v5::types::Provider::Claude),
+            "pane provider should switch to Claude after Claude real activity"
+        );
+    }
+
+    #[test]
+    fn claude_to_codex_switch_via_real_activity() {
+        let mut proj = DaemonProjection::new();
+        let t = t0();
+        let t1 = t + TimeDelta::seconds(3);
+
+        // Step 1: Claude is the established active provider
+        let claude_real = claude_det_event("cl1", "claude-sess", "%1", t);
+        proj.apply_events(vec![claude_real], t);
+        assert_eq!(
+            proj.get_pane("%1").unwrap().provider,
+            Some(agtmux_core_v5::types::Provider::Claude),
+        );
+
+        // Step 2: Codex real event + Claude heartbeat arrive in same tick
+        let codex_real = codex_det_event("c1", "codex-sess", "%1", t1);
+        let mut claude_hb = claude_det_event("cl2", "claude-sess", "%1", t1);
+        claude_hb.is_heartbeat = true;
+
+        proj.apply_events(vec![codex_real, claude_hb], t1);
+
+        // Codex real activity is most recent → pane switches to Codex
+        assert_eq!(
+            proj.get_pane("%1").unwrap().provider,
+            Some(agtmux_core_v5::types::Provider::Codex),
+            "pane provider should switch to Codex after Codex real activity"
+        );
+    }
+
+    #[test]
+    fn both_have_real_activity_recency_wins() {
+        let mut proj = DaemonProjection::new();
+        let t = t0();
+        let t1 = t + TimeDelta::seconds(2);
+        let t2 = t + TimeDelta::seconds(4);
+
+        // Codex real at t1, Claude real at t2 — both in same tick
+        let codex_real = codex_det_event("c1", "codex-sess", "%1", t1);
+        let claude_real = claude_det_event("cl1", "claude-sess", "%1", t2);
+
+        proj.apply_events(vec![codex_real, claude_real], t2);
+
+        // Claude has more recent real activity → Claude wins
+        assert_eq!(
+            proj.get_pane("%1").unwrap().provider,
+            Some(agtmux_core_v5::types::Provider::Claude),
+            "provider with more recent real activity should win"
+        );
+    }
+
+    #[test]
+    fn heartbeat_only_no_provider_switch() {
+        let mut proj = DaemonProjection::new();
+        let t = t0();
+        let t1 = t + TimeDelta::seconds(2);
+
+        // Establish Codex as pane owner
+        let codex_real = codex_det_event("c1", "codex-sess", "%1", t);
+        proj.apply_events(vec![codex_real], t);
+        assert_eq!(
+            proj.get_pane("%1").unwrap().provider,
+            Some(agtmux_core_v5::types::Provider::Codex),
+        );
+
+        // Both Codex and Claude send only heartbeats — no real activity
+        let mut codex_hb = codex_det_event("c2", "codex-sess", "%1", t1);
+        codex_hb.is_heartbeat = true;
+        let mut claude_hb = claude_det_event("cl1", "claude-sess", "%1", t1);
+        claude_hb.is_heartbeat = true;
+
+        proj.apply_events(vec![codex_hb, claude_hb], t1);
+
+        // No new real activity: keep Codex (established via last_real_activity from Step 1)
+        assert_eq!(
+            proj.get_pane("%1").unwrap().provider,
+            Some(agtmux_core_v5::types::Provider::Codex),
+            "heartbeat-only tick should not switch provider"
+        );
+    }
+
+    #[test]
+    fn single_provider_no_conflict() {
+        let mut proj = DaemonProjection::new();
+        let t = t0();
+
+        // Only Codex events — no conflict resolution needed
+        let codex_real = codex_det_event("c1", "codex-sess", "%1", t);
+        proj.apply_events(vec![codex_real], t);
+
+        let pane = proj.get_pane("%1").expect("pane");
+        assert_eq!(
+            pane.provider,
+            Some(agtmux_core_v5::types::Provider::Codex),
+            "single provider should be selected without conflict"
+        );
+        assert_eq!(pane.evidence_mode, EvidenceMode::Deterministic);
+    }
+
+    #[test]
+    fn provider_switch_cleanup_on_freshness_timeout() {
+        let mut proj = DaemonProjection::new();
+        let t = t0();
+
+        // Establish pane with Codex real activity
+        let codex_real = codex_det_event("c1", "codex-sess", "%1", t);
+        proj.apply_events(vec![codex_real], t);
+
+        // last_real_activity should have Codex entry
+        assert!(
+            proj.last_real_activity
+                .get("%1")
+                .and_then(|m| m.get(&agtmux_core_v5::types::Provider::Codex))
+                .is_some(),
+            "last_real_activity should contain Codex entry after real event"
+        );
+
+        // Advance time well past DOWN_THRESHOLD (15s) — pane goes stale
+        let stale_time = t + TimeDelta::seconds(20);
+        proj.tick_freshness(stale_time);
+
+        // last_real_activity should be cleared for this pane
+        assert!(
+            proj.last_real_activity.get("%1").is_none(),
+            "tick_freshness should clear last_real_activity for stale pane"
+        );
+    }
+
+    #[test]
+    fn heartbeat_events_do_not_update_last_real_activity() {
+        let mut proj = DaemonProjection::new();
+        let t = t0();
+        let t1 = t + TimeDelta::seconds(2);
+
+        // First, establish via real event
+        let real = codex_det_event("c1", "codex-sess", "%1", t);
+        proj.apply_events(vec![real], t);
+
+        let ts_after_real = *proj
+            .last_real_activity
+            .get("%1")
+            .and_then(|m| m.get(&agtmux_core_v5::types::Provider::Codex))
+            .expect("should have Codex entry");
+
+        // Now send a heartbeat — should NOT update last_real_activity
+        let mut hb = codex_det_event("c2", "codex-sess", "%1", t1);
+        hb.is_heartbeat = true;
+        proj.apply_events(vec![hb], t1);
+
+        let ts_after_heartbeat = *proj
+            .last_real_activity
+            .get("%1")
+            .and_then(|m| m.get(&agtmux_core_v5::types::Provider::Codex))
+            .expect("Codex entry should still exist");
+
+        assert_eq!(
+            ts_after_real, ts_after_heartbeat,
+            "heartbeat should not advance last_real_activity timestamp"
+        );
+    }
+
+    #[test]
+    fn real_events_update_last_real_activity() {
+        let mut proj = DaemonProjection::new();
+        let t = t0();
+        let t1 = t + TimeDelta::seconds(5);
+
+        // First real event at t
+        let e1 = codex_det_event("c1", "codex-sess", "%1", t);
+        proj.apply_events(vec![e1], t);
+
+        let ts_t0 = *proj
+            .last_real_activity
+            .get("%1")
+            .and_then(|m| m.get(&agtmux_core_v5::types::Provider::Codex))
+            .expect("should have Codex entry");
+        assert_eq!(ts_t0, t);
+
+        // Second real event at t1
+        let e2 = codex_det_event("c2", "codex-sess", "%1", t1);
+        proj.apply_events(vec![e2], t1);
+
+        let ts_t1 = *proj
+            .last_real_activity
+            .get("%1")
+            .and_then(|m| m.get(&agtmux_core_v5::types::Provider::Codex))
+            .expect("should have Codex entry");
+        assert_eq!(ts_t1, t1, "real event should advance last_real_activity");
     }
 }

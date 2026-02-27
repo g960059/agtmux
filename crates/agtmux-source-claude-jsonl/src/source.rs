@@ -191,6 +191,7 @@ mod tests {
             event_type: "activity.running".to_owned(),
             payload: serde_json::json!({"line_type": "tool_use"}),
             confidence: 1.0,
+            is_heartbeat: false,
         }
     }
 

@@ -330,6 +330,7 @@ mod tests {
             event_type: "lifecycle.running".to_string(),
             payload: serde_json::json!({"status": "running"}),
             confidence: 1.0,
+            is_heartbeat: false,
         }
     }
 

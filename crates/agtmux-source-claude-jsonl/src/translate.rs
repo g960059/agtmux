@@ -53,6 +53,7 @@ pub fn translate(line: &ClaudeJsonlLine, ctx: &TranslateContext) -> Option<Sourc
             "line_type": line.line_type,
         }),
         confidence: 1.0,
+        is_heartbeat: false, // JSONL lines are always real activity (not periodic keep-alive)
     })
 }
 

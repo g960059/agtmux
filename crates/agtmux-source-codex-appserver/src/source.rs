@@ -154,6 +154,7 @@ mod tests {
             pane_generation: None,
             pane_birth_ts: None,
             payload: json!({}),
+            is_heartbeat: false,
         }
     }
 

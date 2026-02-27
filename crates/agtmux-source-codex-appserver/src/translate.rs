@@ -23,6 +23,10 @@ pub struct CodexRawEvent {
     pub pane_birth_ts: Option<DateTime<Utc>>,
     /// Arbitrary payload data.
     pub payload: serde_json::Value,
+    /// Whether this event is a periodic heartbeat (not a real state change).
+    /// Set by the Codex poller when the only emit reason is elapsed time.
+    #[serde(default)]
+    pub is_heartbeat: bool,
 }
 
 /// Translate a single Codex raw event to a [`SourceEventV2`].
@@ -52,6 +56,7 @@ pub fn translate(raw: &CodexRawEvent) -> SourceEventV2 {
         event_type: raw.event_type.clone(),
         payload: raw.payload.clone(),
         confidence: 1.0,
+        is_heartbeat: raw.is_heartbeat,
     }
 }
 
@@ -81,6 +86,7 @@ mod tests {
             pane_generation: None,
             pane_birth_ts: None,
             payload: json!({"key": "value"}),
+            is_heartbeat: false,
         }
     }
 
@@ -146,6 +152,7 @@ mod tests {
             pane_generation: Some(3),
             pane_birth_ts: Some(now),
             payload: json!({}),
+            is_heartbeat: false,
         };
         let translated = translate(&raw);
         assert_eq!(translated.pane_generation, Some(3));
@@ -158,5 +165,29 @@ mod tests {
         let translated = translate(&raw);
         assert_eq!(translated.tier, EvidenceTier::Deterministic);
         assert!((translated.confidence - 1.0).abs() < f64::EPSILON);
+    }
+
+    // ── T-123: is_heartbeat passthrough tests ────────────────────
+
+    #[test]
+    fn translate_heartbeat_flag_preserved() {
+        let mut raw = make_raw("hb-1", "task.idle", None);
+        raw.is_heartbeat = true;
+        let translated = translate(&raw);
+        assert!(
+            translated.is_heartbeat,
+            "heartbeat flag must be preserved through translate()"
+        );
+    }
+
+    #[test]
+    fn translate_real_event_flag_false() {
+        let raw = make_raw("re-1", "task.running", Some("%3"));
+        assert!(!raw.is_heartbeat, "make_raw should default is_heartbeat=false");
+        let translated = translate(&raw);
+        assert!(
+            !translated.is_heartbeat,
+            "real event must have is_heartbeat=false after translate()"
+        );
     }
 }

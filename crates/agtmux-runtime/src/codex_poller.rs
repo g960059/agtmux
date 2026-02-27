@@ -81,7 +81,7 @@ fn build_cwd_pane_map(pane_cwds: &[PaneCwdInfo]) -> HashMap<String, PaneCwdInfo>
     map
 }
 
-const MAX_CWD_QUERIES_PER_TICK: usize = 8;
+const MAX_CWD_QUERIES_PER_TICK: usize = 40;
 const THREAD_LIST_REQUEST_TIMEOUT: Duration = Duration::from_millis(500);
 
 // ─── App Server client (JSON-RPC 2.0 over stdio) ────────────────────
@@ -420,6 +420,14 @@ impl CodexAppServerClient {
             };
 
             if should_emit {
+                // Heartbeat: emit triggered by elapsed time only (no status/pane change).
+                let is_heartbeat = match self.last_thread_states.get(thread_id) {
+                    None => false, // first discovery = real event
+                    Some(prev) => {
+                        prev.status == status && prev.pane_id == effective_pane_id
+                    }
+                };
+
                 self.last_thread_states.insert(
                     thread_id.to_string(),
                     LastThreadState {
@@ -448,6 +456,7 @@ impl CodexAppServerClient {
                     pane_generation: event_binding.as_ref().and_then(|b| b.pane_generation),
                     pane_birth_ts: event_binding.as_ref().and_then(|b| b.pane_birth_ts),
                     payload: thread.clone(),
+                    is_heartbeat,
                 });
             }
         }
@@ -539,6 +548,7 @@ fn notification_to_event_with_pane(
                 pane_generation: pane_binding.and_then(|b| b.pane_generation),
                 pane_birth_ts: pane_binding.and_then(|b| b.pane_birth_ts),
                 payload: params.clone(),
+                is_heartbeat: false, // notifications = real activity
             })
         }
         "turn/completed" => {
@@ -553,6 +563,7 @@ fn notification_to_event_with_pane(
                 pane_generation: pane_binding.and_then(|b| b.pane_generation),
                 pane_birth_ts: pane_binding.and_then(|b| b.pane_birth_ts),
                 payload: params.clone(),
+                is_heartbeat: false, // notifications = real activity
             })
         }
         "thread/status/changed" => {
@@ -575,6 +586,7 @@ fn notification_to_event_with_pane(
                 pane_generation: pane_binding.and_then(|b| b.pane_generation),
                 pane_birth_ts: pane_binding.and_then(|b| b.pane_birth_ts),
                 payload: params.clone(),
+                is_heartbeat: false, // notifications = real activity
             })
         }
         _ => None,
@@ -684,6 +696,7 @@ pub fn parse_codex_capture_events(
             pane_generation: None,
             pane_birth_ts: None,
             payload: parsed,
+            is_heartbeat: false, // captured NDJSON events = real activity
         });
     }
 

@@ -38,6 +38,7 @@ pub fn translate(raw: &ClaudeHookEvent) -> SourceEventV2 {
         event_type: normalize_event_type(&raw.hook_type),
         payload: raw.data.clone(),
         confidence: 1.0,
+        is_heartbeat: false, // Claude hooks are always real activity (not periodic keep-alive)
     }
 }
 

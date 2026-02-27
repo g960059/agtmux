@@ -193,6 +193,16 @@ pub struct SourceEventV2 {
     pub event_type: String,
     pub payload: serde_json::Value,
     pub confidence: f64,
+    /// Periodic freshness keep-alive event, not real activity.
+    ///
+    /// `true`  = time-elapsed heartbeat (e.g. Codex poller 2s re-emission of unchanged state).
+    /// `false` = actual state change or new activity (initial discovery, status change, new JSONL line).
+    ///
+    /// Heartbeats maintain `deterministic_last_seen` freshness but are excluded from
+    /// `DaemonProjection.last_real_activity`, which is used for cross-provider conflict
+    /// resolution when two providers both have fresh deterministic evidence for the same pane.
+    #[serde(default)]
+    pub is_heartbeat: bool,
 }
 
 // ─── Identity ─────────────────────────────────────────────────────
@@ -406,6 +416,7 @@ mod tests {
             event_type: "lifecycle.running".into(),
             payload: serde_json::json!({"status": "running"}),
             confidence: 1.0,
+            is_heartbeat: false,
         };
         let json = serde_json::to_string(&event).expect("serialize");
         let back: SourceEventV2 = serde_json::from_str(&json).expect("deserialize");
