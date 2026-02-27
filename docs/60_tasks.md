@@ -23,6 +23,8 @@
 - [ ] (none)
 
 ## DONE (keep short)
+- [x] T-128 (P1) [MVP] Process-tree agent identification — `pane_pid` + child-process argv scan
+  - `TmuxPaneInfo.pane_pid: Option<u32>` + `LIST_PANES_FORMAT` に `#{pane_pid}` 追加。`scan_all_processes()` (ps -eo) + `inspect_pane_processes_deep()` を capture.rs に実装。`to_pane_snapshot` に `Option<&ProcessMap>` 追加。`pane_tier`: `runtime_unknown` → tier=3 (fail-closed)。poll_loop Step 2.5 で ProcessMap を tick 毎 1 回構築し snapshot に渡す。19 new tests. 675 tests total. `just verify` PASS.
 - [x] T-127 (P1) [MVP] Pane attribution false-positive fixes (3 bugs)
   - Bug A: `cwd_candidate_count: usize` in `SessionDiscovery` + `ambiguous_cwd_bootstrap(is_heartbeat=true)` in source.rs。同一 CWD の複数 pane で bootstrap が `last_real_activity[Claude]` を汚染しなくなった
   - Bug B: `CLAUDE_JSONL_RUNTIME_CMDS` positive allowlist in Step 6b filter (poll_loop.rs)。yazi/htop 等 neutral-process pane が JSONL discovery から除外された

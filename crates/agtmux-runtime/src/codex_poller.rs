@@ -76,7 +76,7 @@ fn pane_tier(p: &PaneCwdInfo) -> u8 {
     match p.process_hint.as_deref() {
         Some("codex") => 0,
         None => 1,
-        Some("shell") => 3,
+        Some("shell") | Some("runtime_unknown") => 3, // never assigned: shell or ambiguous neutral
         _ => 2,
     }
 }
@@ -1078,6 +1078,40 @@ mod tests {
         assert_eq!(group[1].pane_id, "%3"); // neutral
         assert_eq!(group[2].pane_id, "%2"); // claude
         assert_eq!(group[3].pane_id, "%4"); // shell — last
+    }
+
+    #[test]
+    fn pane_tier_runtime_unknown_is_tier3() {
+        // runtime_unknown must be tier 3 (same as shell) so it is never assigned a Codex thread
+        let p = make_pane("%1", "/proj", Some("runtime_unknown"));
+        assert_eq!(
+            pane_tier(&p),
+            3,
+            "runtime_unknown should be tier 3 (ineligible for Codex assignment)"
+        );
+    }
+
+    #[tokio::test]
+    async fn process_thread_list_runtime_unknown_panes_never_assigned() {
+        // 2 threads, 2 panes: runtime_unknown (tier3) and codex (tier0)
+        // Only the codex pane should be assigned.
+        let mut client = make_test_client().await;
+        let now = Utc::now();
+        let panes = vec![
+            make_pane("%1", "/proj", Some("codex")), // eligible (tier 0)
+            make_pane("%2", "/proj", Some("runtime_unknown")), // ineligible (tier 3)
+        ];
+        let resp = make_thread_list_response(&["t-a", "t-b"]);
+        let mut tick = HashSet::new();
+        let mut events = Vec::new();
+
+        client.process_thread_list_response(&resp, &panes, &mut tick, now, &mut events);
+
+        assert_eq!(client.thread_pane_bindings["t-a"].pane_id, "%1");
+        assert!(
+            !client.thread_pane_bindings.contains_key("t-b"),
+            "runtime_unknown pane must not receive Codex thread assignment"
+        );
     }
 
     #[tokio::test]

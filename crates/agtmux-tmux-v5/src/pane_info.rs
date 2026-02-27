@@ -5,7 +5,7 @@ use crate::executor::TmuxCommandRunner;
 use serde::{Deserialize, Serialize};
 
 /// Tab-delimited format string for `tmux list-panes -a -F`.
-pub const LIST_PANES_FORMAT: &str = "#{session_id}\t#{session_name}\t#{window_id}\t#{window_name}\t#{pane_id}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_title}\t#{pane_width}\t#{pane_height}\t#{pane_active}\t#{session_attached}";
+pub const LIST_PANES_FORMAT: &str = "#{session_id}\t#{session_name}\t#{window_id}\t#{window_name}\t#{pane_id}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_title}\t#{pane_width}\t#{pane_height}\t#{pane_active}\t#{session_attached}\t#{pane_pid}";
 
 /// Full metadata for a tmux pane.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -22,6 +22,9 @@ pub struct TmuxPaneInfo {
     pub height: u16,
     pub active: bool,
     pub session_attached: bool,
+    /// PID of the process running in this pane (tmux `#{pane_pid}`).
+    /// Used for deep process-tree inspection (T-128).
+    pub pane_pid: Option<u32>,
 }
 
 /// Execute `tmux list-panes -a` and parse the output.
@@ -64,6 +67,7 @@ fn parse_line(line: &str, line_num: usize) -> Result<TmuxPaneInfo, TmuxError> {
     } else {
         false
     };
+    let pane_pid: Option<u32> = parts.get(12).and_then(|s| s.trim().parse().ok());
 
     Ok(TmuxPaneInfo {
         session_id: parts[0].to_string(),
@@ -78,6 +82,7 @@ fn parse_line(line: &str, line_num: usize) -> Result<TmuxPaneInfo, TmuxError> {
         height,
         active,
         session_attached,
+        pane_pid,
     })
 }
 
@@ -188,5 +193,28 @@ mod tests {
         let line = "$0\tmain\t@0\tdev\t%0\tclaude\t/home\tmy cool pane title\t80\t24\t1\t1";
         let pane = parse_line(line, 1).expect("should parse");
         assert_eq!(pane.pane_title, "my cool pane title");
+    }
+
+    #[test]
+    fn parse_with_pane_pid() {
+        let line = "$0\tmain\t@0\tdev\t%0\tnode\t/home\ttitle\t80\t24\t1\t1\t12345";
+        let pane = parse_line(line, 1).expect("should parse");
+        assert_eq!(pane.pane_pid, Some(12345));
+    }
+
+    #[test]
+    fn parse_without_pane_pid_defaults_to_none() {
+        // 12-field format (legacy, no pane_pid column) → pane_pid = None
+        let line = "$0\tmain\t@0\tdev\t%0\tnode\t/home\ttitle\t80\t24\t1\t1";
+        let pane = parse_line(line, 1).expect("should parse");
+        assert_eq!(pane.pane_pid, None);
+    }
+
+    #[test]
+    fn parse_pane_pid_invalid_value_defaults_to_none() {
+        // Non-numeric pane_pid (e.g., empty string from tmux formatting edge case)
+        let line = "$0\tmain\t@0\tdev\t%0\tnode\t/home\ttitle\t80\t24\t1\t1\t";
+        let pane = parse_line(line, 1).expect("should parse");
+        assert_eq!(pane.pane_pid, None);
     }
 }

@@ -24,7 +24,7 @@ use agtmux_source_codex_appserver::source::SourceState as CodexSourceState;
 use agtmux_source_poller::source::{PollerSourceState, poll_pane};
 use agtmux_tmux_v5::{
     PaneGenerationTracker, TmuxCommandRunner, TmuxExecutor, TmuxPaneInfo, capture_pane, list_panes,
-    to_pane_snapshot,
+    scan_all_processes, to_pane_snapshot,
 };
 
 use crate::cli::DaemonOpts;
@@ -263,6 +263,12 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
         st.last_panes = panes.clone();
     }
 
+    // 2.5. Scan all processes once per tick for deep agent identification (T-128).
+    // Executed in a blocking thread to avoid starving the async runtime.
+    let process_map = tokio::task::spawn_blocking(scan_all_processes)
+        .await
+        .unwrap_or_default();
+
     // 3. Capture each pane and build snapshots
     let mut snapshots = Vec::with_capacity(panes.len());
 
@@ -284,7 +290,13 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
             };
 
         let st = state.lock().await;
-        let snapshot = to_pane_snapshot(pane, capture_lines, &st.generation_tracker, now);
+        let snapshot = to_pane_snapshot(
+            pane,
+            capture_lines,
+            &st.generation_tracker,
+            now,
+            Some(&process_map),
+        );
         drop(st);
         snapshots.push(snapshot);
     }

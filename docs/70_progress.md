@@ -79,6 +79,127 @@
 
 ---
 
+### T-128: Process-tree agent identification — Design Decision
+
+#### Remaining problem after T-127
+
+Live `agtmux list-panes` after T-127 fix showed:
+- `%35` (Codex/node, CWD=test-session) → `codex deterministic` ✓ (fixed by T-126/T-127)
+- `%297` (Claude Code/node, CWD=test-session) → `codex deterministic` ✗ (still wrong)
+
+**Root cause chain**:
+1. `%35` と `%297` は同一 CWD (`test-session`) を共有
+2. `inspect_pane_processes("node")` → `None` (neutral) — `node` は Codex も Claude Code も同一コマンドで起動するため区別不能
+3. T-124 (`build_cwd_pane_groups`) が両 pane を同一 CWD グループに入れ、Codex スレッドを `%35` + `%297` の両方に割り当てる
+4. T-127 `ambiguous_cwd_bootstrap(is_heartbeat=true)` により `last_real_activity[Claude]` が書かれない
+5. `select_winning_provider`: Claude に `last_real_activity` がない → Codex が unchallenged で勝つ
+6. 結果: `%297` が `codex deterministic` になる
+
+**本質**: `current_cmd` だけでは `node` の正体（Codex vs Claude Code）を判別できない。プロセスツリーの子プロセス argv を検査する必要がある。
+
+#### Architectural approaches compared
+
+**Claude agent 提案**:
+- **B: JSONL 専有証明** — `~/.claude/projects/<cwd>/<session>.jsonl` の最新行 timestamp と pane_pid のプロセス起動時刻を照合。pane_pid の node プロセスが JSONL ファイルを書いていた証明
+  - 問題: ファイル書き込みプロセスの追跡は macOS では `/proc` が無く `lsof` 依存。tick 毎の `lsof` は重すぎる
+- **C: jsonl_path based** — JSONL discovery で pane に紐づく JSONL が見つかれば `process_hint=Some("claude")` に昇格
+  - 問題: discovery は CWD ベースのため、同一 CWD の Codex pane も誤って claude に昇格しうる
+
+**Codex reviewer 提案**:
+- **P0: PaneBindingQuality core type** — binding に quality score (exact/inferred/fallback) を付与し UI で可視化
+  - 問題: 根本的な誤帰属を解決しない。可視性の改善のみ
+- **P1: process tree via pane_pid** ← **選択**
+  - `#{pane_pid}` を tmux フォーマットで取得 → `TmuxPaneInfo.pane_pid: Option<u32>`
+  - tick 先頭で `ps -eo pid=,ppid=,args=` を 1 回実行 → `ProcessMap` 構築
+  - `inspect_pane_processes_deep(pane_pid, process_map)` で直接子プロセスの argv を検査
+  - argv に `codex` → `Some("codex")`、`claude` (claude_desktop 除外) → `Some("claude")`、判別不能 → `Some("runtime_unknown")`
+  - `runtime_unknown` = fail-closed: tier=2 (Codex 割り当て除外) + Step 6b 除外 → unmanaged
+- **P2: CWD claim solver** — ILP 的な最適割り当て
+  - 問題: 過剰複雑。P1 の直接証拠があれば不要
+
+#### Decision: Codex P1
+
+**理由**:
+1. **直接証拠**: argv は process が Codex か Claude Code かを直接証明する — 推論ではなく事実
+2. **将来性**: Gemini CLI や他 agent も `process_hint` で自動分類。struct 変更不要
+3. **fail-closed**: `runtime_unknown` により誤帰属ではなく `unmanaged` に。偽陽性より偽陰性を選ぶ
+4. **コスト**: `ps -eo pid=,ppid=,args=` は tick 1 回 — `lsof` のような per-file コストなし
+
+#### Implementation plan (6 phases)
+
+- **Phase 1**: `pane_pid: Option<u32>` を `TmuxPaneInfo` + `LIST_PANES_FORMAT` (#{pane_pid}) に追加
+- **Phase 2**: `scan_all_processes() → ProcessMap` + `inspect_pane_processes_deep(pane_pid, map)` を `capture.rs` に実装
+  - ProcessMap: `HashMap<u32, ProcessInfo { pid, ppid, args }>` (`ps -eo pid=,ppid=,args=`)
+  - 子プロセス検索: ppid == pane_pid を全探索。argv に `codex`/`claude` を含むかチェック
+- **Phase 3**: `to_pane_snapshot` が `pane_pid` + `ProcessMap` を受け取り deep inspection を呼ぶ
+  - `pane_pid.is_none()` → `inspect_pane_processes(current_cmd)` (従来フォールバック)
+  - `process_hint` の出力: `Some("codex")` / `Some("claude")` / `Some("runtime_unknown")` / `None`
+- **Phase 4**: `pane_tier()` に `runtime_unknown` → tier=2 を追加 (Codex 割り当て除外)
+- **Phase 5**: Step 6b フィルタ — `Some("runtime_unknown")` を `Some("codex")|Some("shell")` と同様に除外
+  - T-127 ambiguous 条件 (`cwd_candidate_count > 1`) も `process_hint=Some("claude")` で精緻化可能
+- **Phase 6**: Tests (unit + live) + `just verify`
+
+#### Expected outcome
+- `%297` (Claude Code/node): `inspect_pane_processes_deep` → argv に `claude` → `process_hint=Some("claude")`
+- `%35` (Codex/node): argv に `codex` → `process_hint=Some("codex")`
+- 両 pane が正確に識別され、`%297` が `claude deterministic` に
+
+### T-128: Process-tree agent identification — Completed
+
+#### Implementation (6 phases)
+
+**Phase 1: `pane_info.rs`**
+- `LIST_PANES_FORMAT` に `\t#{pane_pid}` を追加 (13番目フィールド)
+- `TmuxPaneInfo.pane_pid: Option<u32>` を追加
+- `parse_line`: 13番目フィールドを optional でパース (`parse::<u32>().ok()`)
+- 後方互換: 12 フィールド時は `pane_pid = None`
+
+**Phase 2: `capture.rs`**
+- `ProcessInfo { pid, ppid, args }` struct を追加
+- `ProcessMap = HashMap<u32, ProcessInfo>` type alias を追加
+- `scan_all_processes() -> ProcessMap`: `ps -eo pid=,ppid=,args=` を 1 回実行
+- `parse_ps_output(output)` / `parse_ps_line(line)` private helpers
+- `inspect_pane_processes_deep(current_cmd, pane_pid, process_map)`:
+  - Fast path: `shell`/`codex`/`claude` は shallow inspection で即返す
+  - `pane_pid` 自身 + 直接子プロセスの argv を `is_claude_argv` / `is_codex_argv` でチェック
+  - 子プロセスあり・両方 miss → `Some("runtime_unknown")` (fail-closed)
+  - 子なし → shallow fallback (`None` for neutral runtime)
+- `is_claude_argv`: `"claude"` 含む && `"claude_desktop"` / `"claude-desktop"` 除外
+- `is_codex_argv`: `"codex"` 含む
+
+**Phase 3: `snapshot.rs`**
+- `to_pane_snapshot` に `process_map: Option<&ProcessMap>` 引数を追加
+- `(pane.pane_pid, process_map)` が両方 `Some` の場合 `inspect_pane_processes_deep` を呼ぶ、そうでなければ shallow
+
+**Phase 4: `codex_poller.rs`**
+- `pane_tier()`: `Some("runtime_unknown") => 3` を `shell` と同じ tier=3 に (明示 arm 追加)
+- 結果: `runtime_unknown` pane は unclaimed プールに入らず、Codex thread を受け取らない
+
+**Phase 5: `poll_loop.rs`**
+- import: `scan_all_processes` を追加
+- Step 2.5: `tokio::task::spawn_blocking(scan_all_processes).await.unwrap_or_default()` で `ProcessMap` 構築
+- `to_pane_snapshot` に `Some(&process_map)` を渡す
+
+**`lib.rs`**
+- `ProcessInfo`, `ProcessMap`, `inspect_pane_processes_deep`, `scan_all_processes` を pub re-export
+
+#### Tests (19 new)
+
+- `pane_info`: `parse_with_pane_pid`, `parse_without_pane_pid_defaults_to_none`, `parse_pane_pid_invalid_value_defaults_to_none` (3)
+- `capture` (parse_ps / deep inspect): `parse_ps_output_basic`, `parse_ps_output_empty_lines_skipped`, `parse_ps_output_no_args`, `deep_inspect_claude_child`, `deep_inspect_codex_child`, `deep_inspect_runtime_unknown_when_child_unidentifiable`, `deep_inspect_no_children_falls_back_to_shallow`, `deep_inspect_shell_fast_path`, `deep_inspect_explicit_codex_cmd_fast_path`, `deep_inspect_excludes_claude_desktop` (10)
+- `snapshot`: `snapshot_deep_inspection_claude_child`, `snapshot_deep_inspection_codex_child`, `snapshot_deep_inspection_runtime_unknown`, `snapshot_deep_inspection_no_children_falls_back` (4)
+- `codex_poller`: `pane_tier_runtime_unknown_is_tier3`, `process_thread_list_runtime_unknown_panes_never_assigned` (2)
+
+#### Gate evidence
+- 675 tests total (656 → +19), `just verify` PASS (fmt + lint + test)
+
+#### Expected live fix
+- `%35` (Codex/node): `inspect_pane_processes_deep` → child argv contains "codex" → `process_hint=Some("codex")` → tier=0 → Codex thread ✓
+- `%297` (Claude Code/node): child argv contains "claude" → `process_hint=Some("claude")` → tier=2 → deprioritized for Codex
+  - CWD 候補が `%297` のみ (codex pane 除外後) → `cwd_candidate_count=1` → `bootstrap_event(is_heartbeat=false)` → `last_real_activity[Claude]` 設定 → Claude wins ✓
+
+---
+
 ### T-126: JSONL all-pane discovery fix — Completed (3 phases)
 
 #### Root cause (confirmed)
