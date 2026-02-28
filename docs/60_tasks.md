@@ -42,10 +42,15 @@
 
 ### Phase 6 Wave 2 — CLI 表示リデザイン
 
-- [ ] T-135b (P4) Claude JSONL conversation title 抽出
-  - Source: `~/.claude/projects/<encoded>/sessions-index.json` の conversation/project title
-  - JSONL `summary` field や system エントリも候補
-  - 同一 `conversation_titles` map に Claude session_key → title を挿入
+- [x] T-135b (P4) Claude JSONL conversation title 抽出 — DONE (2026-02-28)
+  - Source: JSONL `{"type":"custom-title","customTitle":"...","sessionId":"..."}` イベント
+  - 最後に出現した `customTitle` が現在のタイトル（セッション中に複数回出現しうる）
+  - 変更ファイル 4 件:
+    - `translate.rs`: `ClaudeJsonlLine` に `custom_title: Option<String>` フィールド追加
+    - `watcher.rs`: `SessionFileWatcher` に `last_title: Option<String>` + `last_title()`/`set_title()` メソッド追加
+    - `source.rs`: `poll_files()` ループ内で `custom-title` 行を検出し `watcher.set_title()` を呼ぶ
+    - `poll_loop.rs`: `poll_files()` 直後に discoveries を走査し `st.conversation_titles[session_id] = title`
+  - 新規テスト 2 件 → 753 tests expected
   - blocked_by: T-135a (DONE)
 
 ### Phase 6 Wave 3 — CLI 全体再設計（T-139 拡張）

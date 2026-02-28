@@ -146,6 +146,15 @@ impl ClaudeJsonlSourceState {
             for line_str in &new_lines {
                 match serde_json::from_str::<ClaudeJsonlLine>(line_str) {
                     Ok(parsed) => {
+                        // T-135b: capture conversation title from custom-title events.
+                        if parsed.line_type == "custom-title" {
+                            if let Some(ref title) = parsed.custom_title
+                                && !title.is_empty()
+                            {
+                                watcher.set_title(title.clone());
+                            }
+                            continue; // no activity event from title changes
+                        }
                         if let Some(event) = translate::translate(&parsed, &ctx) {
                             emitted_real_event = true;
                             events.push(event);
@@ -664,6 +673,148 @@ mod tests {
         for ev in &events2 {
             assert!(ev.is_heartbeat, "subsequent polls always emit heartbeat");
         }
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// T-135b: an empty customTitle must not overwrite a previously set title in the watcher.
+    #[test]
+    fn poll_files_ignores_empty_custom_title() {
+        use std::fs;
+        use std::io::Write;
+
+        let tmp = std::env::temp_dir().join("agtmux-test-empty-custom-title");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).expect("test");
+
+        let jsonl_path = tmp.join("test.jsonl");
+        let mut f = fs::File::create(&jsonl_path).expect("test");
+        // Write a non-empty title first.
+        writeln!(
+            f,
+            r#"{{"type":"custom-title","customTitle":"Original Title","sessionId":"s1"}}"#
+        )
+        .expect("test");
+        drop(f);
+
+        let discoveries = vec![SessionDiscovery {
+            pane_id: "%1".to_owned(),
+            session_id: "s1".to_owned(),
+            jsonl_path: jsonl_path.clone(),
+            pane_generation: Some(1),
+            pane_birth_ts: None,
+            cwd_candidate_count: 1,
+        }];
+
+        let mut watchers = HashMap::new();
+        watchers.insert(
+            "%1".to_owned(),
+            SessionFileWatcher::new_from_start(jsonl_path.clone()),
+        );
+
+        // Poll once to set the title.
+        let _ = ClaudeJsonlSourceState::poll_files(&mut watchers, &discoveries, now());
+        assert_eq!(
+            watchers.get("%1").expect("watcher must exist").last_title(),
+            Some("Original Title"),
+            "first poll should capture the non-empty title"
+        );
+
+        // Append an empty customTitle.
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&jsonl_path)
+            .expect("test");
+        writeln!(
+            f,
+            r#"{{"type":"custom-title","customTitle":"","sessionId":"s1"}}"#
+        )
+        .expect("test");
+        drop(f);
+
+        // Poll again — last_title should remain "Original Title".
+        let _ = ClaudeJsonlSourceState::poll_files(&mut watchers, &discoveries, now());
+        assert_eq!(
+            watchers.get("%1").expect("watcher must exist").last_title(),
+            Some("Original Title"),
+            "empty customTitle should not overwrite existing title"
+        );
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// T-135b: poll_files() captures the last custom-title from custom-title JSONL events
+    /// and stores it in the watcher, while continuing to emit normal activity events.
+    #[test]
+    fn poll_files_extracts_custom_title_from_jsonl() {
+        use std::fs;
+        use std::io::Write;
+
+        let tmp = std::env::temp_dir().join("agtmux-test-custom-title");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).expect("test");
+
+        let jsonl_path = tmp.join("titled-session.jsonl");
+        let mut f = fs::File::create(&jsonl_path).expect("test");
+        // Normal assistant event (should produce an activity event)
+        writeln!(
+            f,
+            r#"{{"type":"assistant","timestamp":"2026-02-28T10:00:00Z","uuid":"u1"}}"#
+        )
+        .expect("test");
+        // First custom-title event
+        writeln!(
+            f,
+            r#"{{"type":"custom-title","customTitle":"Test Session","sessionId":"sess-001"}}"#
+        )
+        .expect("test");
+        // Second custom-title event (this should win as the last seen title)
+        writeln!(
+            f,
+            r#"{{"type":"custom-title","customTitle":"Updated Title","sessionId":"sess-001"}}"#
+        )
+        .expect("test");
+        drop(f);
+
+        let discoveries = vec![SessionDiscovery {
+            pane_id: "%5".to_owned(),
+            session_id: "sess-001".to_owned(),
+            jsonl_path: jsonl_path.clone(),
+            pane_generation: Some(1),
+            pane_birth_ts: None,
+            cwd_candidate_count: 1,
+        }];
+
+        let mut watchers = HashMap::new();
+        watchers.insert(
+            "%5".to_owned(),
+            SessionFileWatcher::new_from_start(jsonl_path),
+        );
+
+        let events = ClaudeJsonlSourceState::poll_files(&mut watchers, &discoveries, now());
+
+        // The assistant event should produce an activity event; custom-title lines are skipped.
+        assert!(
+            !events.is_empty(),
+            "should return at least one activity event"
+        );
+        assert!(
+            events.iter().any(|e| e.event_type == "activity.idle"),
+            "assistant line should produce activity.idle"
+        );
+        // custom-title lines do NOT produce events
+        assert!(
+            events.iter().all(|e| e.event_type != "custom-title"),
+            "custom-title lines should not produce events"
+        );
+
+        // The watcher should now hold the last (second) custom-title.
+        let watcher = watchers.get("%5").expect("watcher must exist");
+        assert_eq!(
+            watcher.last_title(),
+            Some("Updated Title"),
+            "last_title should be the final custom-title seen"
+        );
 
         let _ = fs::remove_dir_all(&tmp);
     }

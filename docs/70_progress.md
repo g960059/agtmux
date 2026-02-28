@@ -1878,3 +1878,40 @@ Review B-1 で指摘：E2E コントラクトスクリプトがこれらの廃�
 ### Gate evidence
 - `bash -n` syntax check: **10 scripts PASS**
 - `just verify`: **751 tests PASS** (Rust unit tests 変化なし)
+
+---
+
+## 2026-02-28 — T-135b: Claude JSONL Conversation Title Extraction
+
+### 概要
+Claude Code が JSONL ファイルに書き込む `custom-title` イベントから会話タイトルを抽出し、
+`DaemonState.conversation_titles` に格納。T-135a (Codex) と同じ map を使うため `server.rs` 変更不要。
+
+### 変更内容
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `translate.rs` | `ClaudeJsonlLine` に `custom_title: Option<String>` 追加、`timestamp` を `Option<>` 化 |
+| `watcher.rs` | `SessionFileWatcher` に `last_title: Option<String>` + `last_title()`/`set_title()` 追加 |
+| `source.rs` | `poll_files()` で `custom-title` 行を検出 → `watcher.set_title()` → `continue` |
+| `poll_loop.rs` | `poll_files()` 直後に discoveries を走査し `st.conversation_titles[session_id] = title` |
+
+### 設計メモ
+- `custom-title` イベント: `{"type":"custom-title","customTitle":"タイトル","sessionId":"uuid"}`
+- セッション中に複数回出現 → 最後の値が現在タイトル（watcher が上書き）
+- 空文字列は `if !title.is_empty()` でスキップ
+- borrow checker 制約: Vec 収集 → insert パターン（`claude_jsonl_watchers` 不変 + `conversation_titles` 可変の共存）
+- pane watcher 差し替え時（inode 変更）は `new()` で `last_title: None` リセット → 新 JSONL の custom-title まで null
+
+### Review summary
+- Reviewer 1 (codex-style): GO_WITH_CONDITIONS → 条件修正後 GO
+  - C-1: コメント修正（sessions-index.json → custom-title JSONL events） ✅
+  - C-2: 空文字列スキップテスト追加 ✅
+- Reviewer 2 (Claude): GO（blocking issues なし）
+- Orchestrator: **GO**
+
+### Gate evidence
+- `just verify`: **754 tests PASS** (751 → 753 → 754, +3 new tests)
+  - `custom_title_field_deserialized_from_custom_title_line` (translate.rs)
+  - `poll_files_extracts_custom_title_from_jsonl` (source.rs)
+  - `poll_files_ignores_empty_custom_title` (source.rs)

@@ -10,8 +10,8 @@ pub struct ClaudeJsonlLine {
     /// Line type: "user", "assistant", "tool_use", "tool_result", etc.
     #[serde(rename = "type")]
     pub line_type: String,
-    /// ISO 8601 timestamp.
-    pub timestamp: DateTime<Utc>,
+    /// ISO 8601 timestamp. Optional: some line types (e.g. "custom-title") omit it.
+    pub timestamp: Option<DateTime<Utc>>,
     /// Session ID (present on "user" type lines).
     #[serde(rename = "sessionId")]
     pub session_id: Option<String>,
@@ -19,6 +19,9 @@ pub struct ClaudeJsonlLine {
     pub cwd: Option<String>,
     /// UUID of this line entry.
     pub uuid: Option<String>,
+    /// Custom conversation title (present on "custom-title" type lines, T-135b).
+    #[serde(rename = "customTitle", default)]
+    pub custom_title: Option<String>,
 }
 
 /// Contextual info needed to translate a JSONL line into a SourceEventV2.
@@ -36,13 +39,14 @@ pub struct TranslateContext {
 pub fn translate(line: &ClaudeJsonlLine, ctx: &TranslateContext) -> Option<SourceEventV2> {
     let event_type = normalize_event_type(&line.line_type)?;
     let event_id = format!("claude-jsonl-{}", line.uuid.as_deref().unwrap_or("unknown"));
+    let observed_at = line.timestamp.unwrap_or_else(Utc::now);
 
     Some(SourceEventV2 {
         event_id,
         provider: Provider::Claude,
         source_kind: SourceKind::ClaudeJsonl,
         tier: EvidenceTier::Deterministic,
-        observed_at: line.timestamp,
+        observed_at,
         session_key: ctx.session_id.clone(),
         pane_id: ctx.pane_id.clone(),
         pane_generation: ctx.pane_generation,
@@ -83,13 +87,15 @@ mod tests {
     fn sample_line(line_type: &str) -> ClaudeJsonlLine {
         ClaudeJsonlLine {
             line_type: line_type.to_owned(),
-            timestamp: Utc
-                .with_ymd_and_hms(2026, 2, 25, 13, 0, 0)
-                .single()
-                .expect("valid datetime"),
+            timestamp: Some(
+                Utc.with_ymd_and_hms(2026, 2, 25, 13, 0, 0)
+                    .single()
+                    .expect("valid datetime"),
+            ),
             session_id: Some("c4c0766e-test".to_owned()),
             cwd: Some("/Users/vm/project".to_owned()),
             uuid: Some("uuid-001".to_owned()),
+            custom_title: None,
         }
     }
 
@@ -168,5 +174,14 @@ mod tests {
         let ev = translate(&line, &ctx()).expect("user should produce an event");
         assert_eq!(ev.event_id, "claude-jsonl-unknown");
         assert!(ev.source_event_id.is_none());
+    }
+
+    #[test]
+    fn custom_title_field_deserialized_from_custom_title_line() {
+        let line = r#"{"type":"custom-title","customTitle":"My Title","sessionId":"abc-123"}"#;
+        let parsed: ClaudeJsonlLine =
+            serde_json::from_str(line).expect("custom-title line should parse");
+        assert_eq!(parsed.line_type, "custom-title");
+        assert_eq!(parsed.custom_title.as_deref(), Some("My Title"));
     }
 }

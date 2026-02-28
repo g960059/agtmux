@@ -72,7 +72,7 @@ pub struct DaemonState {
     pub codex_supervisor: SupervisorTracker,
     /// Conversation titles keyed by session_key (T-135a/b).
     /// Codex: thread_id → name/preview from thread/list payload.
-    /// Claude: session_key → title from sessions-index.json (T-135b).
+    /// Claude: session_key → title from custom-title JSONL events (T-135b).
     pub conversation_titles: std::collections::HashMap<String, String>,
 }
 
@@ -566,6 +566,19 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
                 &discoveries,
                 Utc::now(),
             );
+            // T-135b: collect Claude conversation titles from custom-title JSONL events.
+            let title_updates: Vec<(String, String)> = discoveries
+                .iter()
+                .filter_map(|disc| {
+                    st.claude_jsonl_watchers
+                        .get(&disc.pane_id)
+                        .and_then(|w| w.last_title())
+                        .map(|title| (disc.session_id.clone(), title.to_string()))
+                })
+                .collect();
+            for (session_id, title) in title_updates {
+                st.conversation_titles.insert(session_id, title);
+            }
             for event in jsonl_events {
                 st.claude_jsonl_source.ingest(event);
             }

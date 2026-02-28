@@ -20,6 +20,8 @@ pub struct SessionFileWatcher {
     incomplete_buffer: String,
     /// True after the first poll — guards the one-shot bootstrap event emission.
     bootstrapped: bool,
+    /// Latest custom-title seen in this JSONL file (T-135b).
+    last_title: Option<String>,
 }
 
 impl SessionFileWatcher {
@@ -38,6 +40,7 @@ impl SessionFileWatcher {
             inode,
             incomplete_buffer: String::new(),
             bootstrapped: false,
+            last_title: None,
         }
     }
 
@@ -51,6 +54,16 @@ impl SessionFileWatcher {
         self.bootstrapped = true;
     }
 
+    /// Return the latest custom-title seen in this JSONL file (T-135b).
+    pub fn last_title(&self) -> Option<&str> {
+        self.last_title.as_deref()
+    }
+
+    /// Update the latest custom-title for this session (T-135b).
+    pub fn set_title(&mut self, title: String) {
+        self.last_title = Some(title);
+    }
+
     /// Create a watcher starting from position 0 (for testing).
     #[cfg(test)]
     pub fn new_from_start(path: PathBuf) -> Self {
@@ -61,6 +74,7 @@ impl SessionFileWatcher {
             inode,
             incomplete_buffer: String::new(),
             bootstrapped: false,
+            last_title: None,
         }
     }
 
