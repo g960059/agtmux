@@ -335,6 +335,76 @@ pub struct SourceCursorState {
 - `agtmux list-panes` — UDS 接続して pane states 表示（JSON or table）
 - `agtmux tmux-status` — tmux status-bar 用 single-line output
 
+#### CLI Display Contract (Phase 6 Wave 3)
+- 基本方針: default は「一覧で素早く判断できる最小情報」、必要時のみ情報密度を上げる。
+- `list-panes` default:
+  - managed: `title + activity_state + relative_time`
+  - unmanaged: `current_cmd`
+  - internal IDs（`@N/@M/%N`）は非表示
+  - `activity_state` は `Running` / `Idle` / `Waiting` 表示に正規化（`WaitingInput` / `WaitingApproval` -> `Waiting`）
+- Context density control:
+  - `--context=auto|off|full`（help: `auto` = `aggregate context to headers; show pane-level diff only`）
+  - `--path` / `-p` は v5 では提供しない（`--context=full` に統一）
+  - `-p` は list 系で未割り当てのまま固定し、別意味へ転用しない（表示密度制御は long option のみ）
+  - `auto`（default）:
+    - `cwd` と `git branch` は独立に header 集約（同一なら値、不一致/欠損混在なら `<mixed>`）
+    - pane 行 suffix は比較基準 header と異なる**フィールドのみ**表示
+    - 比較基準フィールドが `<mixed>` の場合は pane 側フィールド値を表示（欠損は `<unknown>`）
+    - 比較基準は「直近 window header」、window header がない場合は「session header」
+    - `list-windows` / `list-sessions` の window/session 行は context 集約値を常時表示（親との差分抑制なし）
+  - `off`: `cwd` / `git branch` と `mixed` marker を非表示（最小表示）
+  - `full`:
+    - `list-panes`: 各 pane 行に `cwd` と `git branch` を常時表示（session/window header は `auto` と同じ集約表示を維持）
+    - `list-windows`: 各 window 行に `cwd` と `git branch` を常時表示（1行/window を維持）
+    - `list-sessions`: 各 session 行に `cwd` と `git branch` を常時表示（1行/session を維持）
+- Header and parsing contract:
+  - session header 行: 先頭インデントなし
+  - window header 行: 先頭 2 spaces
+  - pane 行: 親行から 4 spaces 深いインデント（single-window session では session から +4、window header ありでは window から +4）
+  - session が単一 window の場合、window header は**常に省略**する（pane は session 直下へ表示）
+  - fzf/awk レシピはこのインデント契約を前提に `session:window_name` を抽出する
+- Context aggregation (`list-windows` / `list-sessions`):
+  - `cwd` と `git branch` をフィールド単位で独立集約する
+  - フィールドの不一致または欠損混在は `[field=<mixed>]` を表示する
+  - ガイダンス `(use --context=full to expand per-pane values)` は同一 session block で 1 回のみ表示する
+    - session 行に mixed がある場合: session 行へ表示
+    - session 行が mixed でない場合: 最初の mixed window 行へ表示
+- Optional summary line:
+  - `list-panes --summary` 指定時のみ pane summary（直近通知/短要約）を表示
+  - agent が明示的に提供した構造化 summary（Codex App Server / Claude hooks / Claude JSONL）に限定
+  - tmux capture/title 由来の推測値は summary として扱わない（誤誘導防止）
+  - 表示位置: pane 行の直下に 1 行（summary prefix 付き、pane 行より 2 spaces 深いインデント）
+  - summary を持たない pane では summary 行を表示しない（空行/placeholder なし）
+  - 全 pane 欠損時は全出力の末尾に 1 回だけ `(no agent summaries available)` を表示（一部欠損時は footer なし）
+  - Sentinel legend: `<mixed>` = グループ内で値が不一致/欠損混在、`<unknown>` = 当該 pane の値を取得できなかった
+
+Example (`list-panes --context=auto`):
+```
+work  [cwd=~/src/agtmux-v5] [branch=main]
+    Claude: phase6 context design        Running  12s
+    zsh
+
+docs  [cwd=<mixed>] [branch=<mixed>]  (use --context=full to expand per-pane values)
+  design  [cwd=~/src/agtmux-v5] [branch=<mixed>]
+      Codex: review FR-049 wording       Idle     3m  [branch=feature/cli-context]
+      nvim                                            [branch=<unknown>]
+```
+
+Example (`list-panes --context=auto --summary`, summary available):
+```
+work  [cwd=~/src/agtmux-v5] [branch=main]
+    Claude: phase6 context design        Running  12s
+      summary: finalize context contract wording
+```
+
+Example (`list-panes --context=auto --summary`, all summaries missing):
+```
+work  [cwd=~/src/agtmux-v5] [branch=main]
+    Claude: phase6 context design        Running  12s
+    zsh
+(no agent summaries available)
+```
+
 #### Signal Handling
 - `tokio::signal::ctrl_c()` + SIGTERM を `tokio::select!` で処理
 - Signal 受信時: poll loop 停止 → UDS listener close → socket file remove → exit 0

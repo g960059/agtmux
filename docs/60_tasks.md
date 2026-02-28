@@ -11,10 +11,73 @@
 - online/e2e source test（codex/claude）を走らせる前に `just preflight-online` を必須実行する。
 
 ## TODO
-- [ ] (none)
+
+### Phase 7 — E2E テスト本格導入
+
+- [ ] T-137 (P2) Layer 2 Contract E2E 基盤
+  - `scripts/tests/e2e/harness/{common,daemon,inject}.sh`
+  - `scripts/tests/e2e/contract/test-schema.sh`, `test-claude-state.sh`, `test-codex-state.sh`, `test-waiting-states.sh`, `test-list-consistency.sh`, `test-multi-pane.sh`, `run-all.sh`
+  - justfile `preflight-contract` / `e2e-contract` targets
+  - 実 CLI 不要: `source.ingest` RPC + socat で合成イベント注入
+  - blocked_by: T-136 (DONE)
+
+- [ ] T-138 (P3) Layer 3 Provider-Adapter Detection E2E
+  - `providers/{claude,codex,gemini}/adapter.sh` (provider-adapter パターン)
+  - `scenarios/` は provider 非依存 (Gemini 追加も adapter のみ変更)
+  - `online/run-all.sh` + `preflight-online` / `e2e-online` targets
+  - blocked_by: T-137
+
+### Phase 6 Wave 2 — CLI 表示リデザイン
+
+- [ ] T-135b (P4) Claude JSONL conversation title 抽出
+  - Source: `~/.claude/projects/<encoded>/sessions-index.json` の conversation/project title
+  - JSONL `summary` field や system エントリも候補
+  - 同一 `conversation_titles` map に Claude session_key → title を挿入
+  - blocked_by: T-135a (DONE)
+
+### Phase 6 Wave 3 — Context-aware CLI 表示
+
+- [ ] T-139 (P3) `--context=auto|off|full` 導入 (`list-panes` / `list-windows` / `list-sessions`)
+  - default `auto`: session/window header へ `cwd/git` を集約、pane 行は差分のみ表示
+  - 差分判定: 比較基準は直近 window header（fallback: session header）
+  - フィールド単位差分: `cwd` / `branch` を独立評価し、差分フィールドのみ suffix 表示
+  - `off`: `cwd/branch` と `mixed` marker を非表示、`full`: 各表示行で `cwd/branch` 常時表示
+  - `--path` / `-p` は非対応（`--context=full` のみを正規入口）。入力時は `hint: use --context=full` 付きエラー
+  - `-p` は list 系で未割り当て固定（他意味へ再利用しない）。`-p`/`--path` の reject contract（exit code + hint）を unit test 化
+  - 出力契約テスト（context compaction, フィールド差分表示, empty/missing git info）
+  - blocked_by: T-136 (DONE)
+
+- [ ] T-140 (P3) window/session context 集約 + `mixed` marker
+  - window/session 単位で fail-closed 同一性判定（全 pane で `cwd` + `branch` 一致時のみ単一値表示）
+  - 欠損/不一致が混在する場合は `[field=<mixed>]` を表示
+  - ガイダンスは同一 session block で 1 回のみ表示（session mixed 優先、なければ最初の mixed window 行）
+  - `--context=full` でも行数は増やさない（`list-windows`=1行/window, `list-sessions`=1行/session 維持）
+  - header 出力契約: session=先頭インデントなし、window=2 spaces、pane=4 spaces 以上
+  - single-window session では window header を常に省略（pane は session 直下）
+  - fzf レシピ互換: `session:window_name` 抽出ワンライナーが header 追加後も動作することをテストで確認
+  - blocked_by: T-139
+
+- [ ] T-141 (P4) `--summary` opt-in 表示（deterministic source only）
+  - pane summary は `--summary` 指定時のみ表示（default off）
+  - source 方針: agent 明示の構造化 summary（AppServer/hooks/JSONL）のみ。capture/title 推測は不採用
+  - 表示位置: pane 行の直下 1 行（pane より 2 spaces 深いインデント、summary欠損 pane は行を出さない）
+  - 全 pane 欠損時は全出力末尾 1 回のみ `(no agent summaries available)`。一部欠損時は footer なし
+  - blocked_by: T-139
+
+- [ ] T-142 (P3) CLI UX output contract fixtures（golden）
+  - 対象: `list-panes` / `list-windows` / `list-sessions`
+  - fixture 6 ケース固定:
+    - all-uniform context（全一致）
+    - branch-mixed only（cwd 一致 / branch 混在）
+    - cwd-mixed only（branch 一致 / cwd 混在）
+    - no-window-header fallback（session baseline 差分）
+    - summary-all-missing（footer 表示）
+    - summary-partial-missing（footer なし + pane別 summary 省略）
+  - 判定: `just verify` に contract snapshot test を含める
+  - blocked_by: T-140
 
 ## DOING
-- [ ] (none)
+- [ ] T-137 Contract E2E 実装中
 
 ## REVIEW
 - [ ] (none)
@@ -23,6 +86,22 @@
 - [ ] (none)
 
 ## DONE (keep short)
+- [x] T-136 (P2) Waiting 表示バグ修正
+  - `client.rs` 5箇所で `"Waiting"` → `"WaitingInput" | "WaitingApproval"` 修正。`format_windows` no-color ブランチの `{state}` → `{display_state}` 修正 (同時発見)。2 new tests. 711 → 713 tests. `just verify` PASS.
+- [x] T-135a (P3) Codex conversation title 抽出
+  - `DaemonState.conversation_titles: HashMap<session_key, String>` を追加。`poll_loop.rs`: Codex events ループで `payload["name"]`/`payload["preview"]` を抽出 → map に挿入。`server.rs`: `build_pane_list` に `conversation_title` フィールド追加。2 new tests. 690 tests total. `just verify` PASS.
+- [x] T-134 (P3) `list-windows` リデザイン + `list-sessions` 新規
+  - `cmd_list_windows()` に `show_path: bool` 追加。`format_windows()`: @N/@M 完全非表示 (window_name のみ)、%N pane ID 非表示、`[det]`/`[heur]` tag 廃止 → det=無印/heur=`~` prefix 統一、`show_path` サポート、`relative_time` 表示。`cmd_list_sessions()` + `format_sessions()` 新規: session 1行サマリー (N window、M agents、Running/Idle/Waiting、unmanaged count)。`ListSessions(ListSessionsOpts)` を cli.rs に追加 (T-133 で実施済)。12 new tests (format_windows: 1 new + 3 updated; format_sessions: 5 new; format_panes: 8 new). 707 tests total. `just verify` PASS.
+- [x] T-133 (P3) `list-panes` 表示リデザイン
+  - `cmd_list_panes(json, show_path, color)` に変更。`format_panes()`: session ヘッダー + pane サイドバー (det=無印、heur=`~` yellow、conversation_title or provider 短縮名、relative_time、`--path`/`-p` で current_path 追加)。@N/@M/`%N` ID 完全非表示。`relative_time()`, `resolve_color()`, `provider_short()` ヘルパー追加。`ListPanes(ListPanesOpts)` + `ListSessions(ListSessionsOpts)` を cli.rs/main.rs に追加。
+- [x] T-132 (P3) fzf レシピ + README
+  - `README.md` 新規作成: 概要・インストール・Quick Start (daemon/hooks/list-windows)・出力フォーマット説明・fzf ワンライナー + `.tmux.conf` スニペット (`bind-key C-w` + `alias aw`)・daemon ライフサイクル・コマンド一覧・`tmux-status` スニペット。`just verify` PASS (688 tests).
+- [x] T-131 (P3) `agtmux list-windows` コマンド
+  - `cli.rs`: `ListWindows(ListWindowsOpts)` + `--color=always/never/auto`。`client.rs`: `format_windows(panes, use_color)` (unit-testable) + `cmd_list_windows()`。階層表示: session header (N windows — X Running, Y Idle) → window header (@N name — stats) → pane lines (managed: `* provider [det] State path` / unmanaged: `— cmd [unmanaged]`)。Window sort: numeric (@ prefix 除去)。Color auto: `std::io::IsTerminal`。7 new tests. 688 tests total. `just verify` PASS.
+- [x] T-130 (P3) `build_pane_list` 不足フィールド追加
+  - `session_id`, `window_id`, `current_path` を managed/unmanaged 両方の JSON レスポンスに追加。`TmuxPaneInfo` には既に存在していたが `server.rs` で未露出。2 new tests (managed + unmanaged). 681 tests total. `just verify` PASS.
+- [x] T-129 (P2) Supervisor strict wiring
+  - `DaemonState.codex_reconnect_failures: u32` を廃止し `codex_supervisor: SupervisorTracker` に置き換え。`should_attempt` チェック: `Ready`→即時試行 / `Restarting{next_restart_ms}` → 時刻比較 / `HoldDown{until_ms}` → 期限確認。成功: `record_success()` / 失敗: `record_failure(now_ms)` → `HoldDown` 時は `warn!`、`Restart` 時は `info!` ログ。4 new tests (initial_ready, failure_advances_restarting, success_resets_ready, budget_exhaustion_holddown). 679 tests total. `just verify` PASS.
 - [x] T-128 (P1) [MVP] Process-tree agent identification — `pane_pid` + child-process argv scan
   - `TmuxPaneInfo.pane_pid: Option<u32>` + `LIST_PANES_FORMAT` に `#{pane_pid}` 追加。`scan_all_processes()` (ps -eo) + `inspect_pane_processes_deep()` を capture.rs に実装。`to_pane_snapshot` に `Option<&ProcessMap>` 追加。`pane_tier`: `runtime_unknown` → tier=3 (fail-closed)。poll_loop Step 2.5 で ProcessMap を tick 毎 1 回構築し snapshot に渡す。19 new tests. 675 tests total. `just verify` PASS.
 - [x] T-127 (P1) [MVP] Pane attribution false-positive fixes (3 bugs)

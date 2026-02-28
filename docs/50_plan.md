@@ -73,21 +73,78 @@
   - `just verify` PASS
   - `just test-source-codex` で App Server 経由の evidence flow が確認できる
 
-## Phase 4: Hardening Wave 2 (ops/security) — TODO
-- Scope (default deferred):
-  - TrustGuard enforce mode (promote warn-only → -32403 error on rejection)
-  - supervisor strict readiness/backoff/hold-down
-  - ops guardrail manager + `list_alerts`
-  - Persistence (SQLite) for DaemonState
-  - Multi-process extraction (separate source servers)
+## Phase 4: Hardening Wave 2 — Supervisor strict only
+- 実施する:
+  - T-129: Supervisor strict wiring — `SupervisorTracker` を codex_appserver 再接続ループに結線（純ロジック crate は実装済み、poll_loop.rs への wiring のみ）
+- 実施しない（理由と共に記録）:
+  - ~~TrustGuard enforce~~ → **DROPPED**: 個人利用 + 単一ユーザー環境では warn-only で十分。複数ユーザー環境のニーズが生じた時点で昇格
+  - ~~Persistence (SQLite)~~ → **DROPPED**: daemon の自然回復は 2〜4 秒（1〜2 poll tick）。tmux の pane_id は tmux server 再起動で変わるため長期保存データは有害になりうる
+  - ~~Multi-process extraction~~ → **DROPPED**: GUI バンドル版は single-process で十分。分離のニーズが生じた時点で検討
+  - ~~ops guardrail manager / list_alerts~~ → **DROPPED**: 運用規模が小さい間は不要
 
-## Phase 5: Migration / Cutover
+## Phase 5: Migration / Cutover — DROPPED
+- **理由**: v4 は production に進んでおらず、ユーザーもいない。切り替え戦略は不要。
+- ~~v4/v5 side-by-side runbook~~
+- ~~canary plan + rollback plan~~
+- ~~backup/restore runbook~~
+
+## Phase 6: CLI / TUI (新規)
+- Goal: daemon のデータを実際に使える形で提供する。tcmux の精密版として位置づけ。
+- Design principles (2026-02-28 更新):
+  - `list-panes` = サイドバー相当のフラット一覧。session ラベルあり、ペイン単位。
+    - agent pane: `provider  title  relative_time` (title = conversation title、T-135 まで provider 名 placeholder)
+    - unmanaged pane: `current_cmd`
+    - det = 無印（期待値）。heur = `~` prefix（不確かさを明示）
+    - `--json`: 旧 JSON 出力 (後方互換)。
+    - `--context=auto|off|full`:
+      - `auto` (default): `cwd`/`branch` はフィールド単位で header 集約し、pane 行は差分フィールドのみ suffix 表示
+      - `off`: `cwd`/`branch` と `mixed` marker を非表示（最小情報）
+      - `full`: 行数を増やさず、既存行へ inline で `cwd`/`branch` を常時表示
+    - `--path` / `-p` は提供しない（`--context=full` に統一、入力時は `hint: use --context=full` エラー）
+    - `-p` は list 系で未割り当て固定（後方互換不要のため、ここで short flag 意味を凍結し表記ゆれを防ぐ）
+    - `--summary`: pane summary を opt-in 表示（agent 明示データのみ）
+  - `list-windows` = window 単位の集計。@N 非表示 (window_name のみ)。1行/window。
+    - `session  window_name  [~] status  count`
+    - default `--context=auto` で window context を集約表示
+    - `full` は 1行/window を維持したまま各 window 行に `cwd`/`branch` を常時表示
+    - context 不一致/欠損混在は `[field=<mixed>] ...` を表示
+    - ガイダンス `(use --context=full to expand per-pane values)` は session block で 1 回のみ（session mixed 優先）
+    - fzf → `tmux select-window -t "session:window_name"` (@N 不要)
+  - `list-sessions` = session 単位の集計。1行/session。
+    - `session_name  N windows  [~] status`
+    - default `--context=auto`。context は header 集約で最小表示
+    - `full` は 1行/session を維持したまま各 session 行に `cwd`/`branch` を常時表示
+    - context 不一致/欠損混在は `[field=<mixed>] ...` を表示
+    - ガイダンス `(use --context=full to expand per-pane values)` は session block で 1 回のみ（session mixed 優先）
+    - fzf → `tmux switch-client -t session_name`
+  - summary は `--summary` 指定時のみ表示（default off）
+    - agent 明示の構造化 summary（AppServer/hooks/JSONL）由来のみ採用
+    - capture/title 推測値は summary に混ぜない（誤誘導防止）
+    - pane 行の直下に 1 行で表示（summary欠損 pane は行を出さない）。全 pane 欠損時のみ全出力末尾に 1 回だけ `(no agent summaries available)` を表示
+  - single-window session の `list-panes` は window header を出さない（session 直下に pane を表示）
+  - conversation title (T-135) は後続タスク。追加後に `list-panes` の title フィールドが自動充足
 - Deliverables:
-  - v4/v5 side-by-side runbook
-  - canary plan + rollback plan
-  - operator checklist
-- Optional hardening:
-  - backup/restore runbook（snapshot/restore）
+  - T-130 ✅: `build_pane_list` に不足フィールド追加（`window_id`, `session_id`, `current_path`）
+  - T-131 ✅: `agtmux list-windows` コマンド初版（T-134 でリデザイン）
+  - T-132 ✅: fzf レシピ + README 初版（T-134 完了後に更新）
+  - T-133: `list-panes` 表示リデザイン — sidebar-style human output、heur `~` marker、`--json` + context controls
+  - T-134: `list-windows` リデザイン + `list-sessions` 新規 — tcmux スタイル、@N 非表示
+  - T-135a: Codex conversation title 抽出 — `thread/list` の `name` フィールドを `conversation_titles` map 経由で `build_pane_list` に追加（最小変更: poll_loop + server の 2 ファイル）
+  - T-135b: Claude JSONL conversation title 抽出 — `sessions-index.json` から title を同一 map に挿入
+  - T-139: `--context=auto|off|full` + header context compaction（pane差分のみ表示）
+  - T-140: `list-windows` / `list-sessions` の context 集約 + `mixed` marker + fzf parse contract
+  - T-141: `--summary` opt-in 表示（deterministic source only）+ summary placement contract
+  - T-142: CLI UX output contracts（golden fixtures: 全一致 / branch混在 / cwd混在 / window-header-fallback / summary全欠損）
+  - (Post) TUI (ratatui) — インタラクティブ版（CLI で価値確認後に検討）
+  - (Post) GUI — サイドバー + tty パネル（TUI で価値確認後に検討）
+- Exit criteria:
+  - `agtmux list-panes` がサイドバーと同等の情報を人間向けに表示（heur `~` 付き）
+  - `agtmux list-windows` / `list-sessions` が tcmux スタイルで表示
+  - default 出力で情報過多にならず、`--context` / `--summary` で必要時のみ情報密度を上げられる
+  - `--path`/`-p` に依存せず `--context=full` の単一メンタルモデルで理解できる
+  - `mixed` 表示から `--context=full` への導線が明示される（`use --context=full to expand per-pane values`）
+  - fzf パイプで tmux ウィンドウ/セッション切り替えが動作
+  - 自分で日常的に使えるレベル
 
 ## Risks / Mitigations
 - Risk: docs 先行で実装が遅れる
@@ -96,11 +153,6 @@
   - Mitigation: 課題が再現した時点で Post-MVP タスクを昇格する
 
 ## Rollout
-1. Internal alpha: v4 と v5 を並走し比較
-2. Canary: 限定ユーザーで v5 を既定化
-3. Gradual default: 新規セッションを段階移行
-4. Full cutover: v5 既定化、v4 は rollback path として維持
-
-## Rollback
-- runtime selector で v4 daemon path に即時戻せること
-- migration は additive 優先で downgrade 可能にする
+- v4 は production に進んでいないため、段階移行戦略は不要。
+- CLI/TUI を自分で日常的に使い始める時点が実質的な "alpha"。
+- GUI バンドルは CLI/TUI で価値確認後に検討する。

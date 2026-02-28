@@ -6,6 +6,73 @@
 
 ---
 
+## 2026-02-27 — Phase 4/5 スコープ決定 + Phase 6 CLI/TUI 方針
+
+### 背景
+T-128 完了 (675 tests) を機に、今後の方向性を整理した。v4 が production に進んでおらずユーザーもいないため、migration strategy は不要と判断。daemon infrastructure は実質完成しており、次フェーズはユーザーが実際に触れる CLI/TUI の構築とした。
+
+### 決定: Phase 4 スコープ縮小
+
+| 項目 | 決定 | 理由 |
+|------|------|------|
+| Supervisor strict (T-129) | **実施** | Codex crash storm 防止。純ロジックは実装済み、poll_loop.rs への wiring のみ |
+| TrustGuard enforce | **DROPPED** | 個人利用 + 単一ユーザー環境。warn-only で十分。複数ユーザー環境のニーズが生じた時点で再検討 |
+| Persistence (SQLite) | **DROPPED** | daemon の自然回復は 2〜4 秒。tmux の pane_id は tmux server 再起動で変わるため長期保存データが有害になりうる。max_age_ms=10min があっても根本的解決にならない |
+| Multi-process extraction | **DROPPED** | GUI バンドル版は single-process で十分。分離のニーズが生じた時点で検討 |
+| ops guardrail manager | **DROPPED** | 運用規模が小さい間は不要 |
+
+### 決定: Phase 5 Migration — DROPPED
+v4 は production に進んでおらず、切り替え戦略は不要。runbook は参照用に docs に残るが、タスクとして追跡しない。
+
+### 決定: Phase 6 CLI/TUI — 次フェーズとして開始
+tcmux (https://github.com/k1LoW/tcmux) を参考に、daemon を backend とした精密版 CLI を構築する。
+
+**agtmux が tcmux より優れる点**:
+- `activity_state: Running / Idle / Waiting` が deterministic sources から取得可能（tcmux はプロセス検出のみ）
+- `evidence_mode: Deterministic / Heuristic` で検出根拠を明示
+- 複数 agent 並列（Codex + Claude 同一 window）を正確に区別
+
+**実装順序**: T-129 (Supervisor strict) → T-130 (API field 追加) → T-131 (list-windows) → T-132 (fzf recipe)
+
+**build_pane_list の不足フィールド確認** (T-130):
+- `window_id` (@N), `session_id` ($N), `current_path` — `TmuxPaneInfo` には存在するが `build_pane_list` で未露出
+- 追加のみで API 後方互換を維持可能
+
+---
+
+## 2026-02-27 — T-129: Supervisor strict wiring — Completed
+
+### 変更内容
+- `DaemonState.codex_reconnect_failures: u32` を廃止し `codex_supervisor: SupervisorTracker` に置き換え
+- 接続試行判断:
+  - `Ready` → 即時試行
+  - `Restarting { next_restart_ms }` → `now_ms >= next_restart_ms` になったら試行
+  - `HoldDown { until_ms }` → 期限前は `debug!` ログのみでスキップ、期限後は試行再開
+- 成功時: `record_success()` → Ready にリセット
+- 失敗時: `record_failure(now_ms)`:
+  - `Restart { after_ms }` → `info!` ログ (1s→2s→4s→…→30s)
+  - `HoldDown { duration_ms }` → `warn!` ログ (5回/10min超過→5min停止)
+
+### 旧実装との違い
+旧: カウンタベース (`backoff_ticks = 2^failures` tick を skip)
+- 問題: tick 数ベースなので poll_interval 変更で挙動が変わる
+- 問題: failure budget なし → crash storm 時に無限リトライ
+
+新: 時刻ベース (next_restart_ms, until_ms で判断)
+- poll_interval に依存しない
+- failure_budget=5/10min + holddown_ms=300s → crash storm を自動抑制
+
+### テスト (4 new)
+1. `supervisor_initial_state_is_ready` — `DaemonState::new()` で Ready
+2. `supervisor_failure_advances_to_restarting` — 1回失敗 → Restarting + after_ms=1000
+3. `supervisor_success_after_failure_resets_to_ready` — 成功で Ready に戻る
+4. `supervisor_budget_exhaustion_triggers_holddown` — 5回失敗 → HoldDown 300s
+
+### Gate evidence
+679 tests total (675 → 679), `just verify` PASS (fmt + lint + test)
+
+---
+
 ## 2026-02-27 (cont.)
 ### T-127: Pane attribution false-positive fixes — Design Decision
 
@@ -1280,3 +1347,259 @@ Codex review findings (all adopted):
 ### Learnings
 - Resolver は pure function で正しく設計されている — バグは呼び出し側のグループ化にあった
 - 同一 pane に対して複数 source が異なる `session_key` を使う構造は、pane-first grouping で解決が最もシンプル
+
+---
+
+## 2026-02-27 — Phase 6 CLI/TUI: T-130 / T-131 / T-132 Completed
+
+### T-130: build_pane_list フィールド追加
+- `session_id` ($N)、`window_id` (@N)、`current_path` を managed/unmanaged 両方の JSON レスポンスに追加
+- 変更: `crates/agtmux-runtime/src/server.rs` の `build_pane_list()` の managed/unmanaged 両ブロック
+- 2 new tests (managed + unmanaged パス確認). 681 tests total. `just verify` PASS.
+
+### T-131: agtmux list-windows コマンド
+- `cli.rs`: `ListWindows(ListWindowsOpts)` variant + `--color=always/never/auto`
+- `client.rs`:
+  - `format_windows(panes, use_color) -> String` — unit-testable な純関数
+  - 階層: `session (N windows — X Running, Y Idle)` → `@N name — stats` → pane lines
+  - managed: `* provider [det/heur] State  current_path`
+  - unmanaged: `— cmd  [unmanaged]`
+  - window sort: `@` prefix を除去して数値ソート (lexicographic 問題を解決)
+  - color auto: `std::io::IsTerminal` で TTY 判定
+  - `cmd_list_windows()` — RPC call → format → println
+- `main.rs`: `ListWindows(opts)` → `cmd_list_windows(&socket, &opts.color).await?`
+- 7 new tests. 688 tests total. `just verify` PASS.
+
+### T-132: fzf レシピ + README
+- `README.md` 新規作成:
+  - Quick Start (daemon / setup-hooks / list-windows)
+  - `agtmux list-windows` 出力フォーマット例
+  - fzf ワンライナー: `agtmux list-windows --color=always | fzf --ansi | grep -oE '@[0-9]+' | xargs tmux select-window -t`
+  - `.tmux.conf` スニペット (bind-key C-w)、`alias aw` の shell alias
+  - `tmux status-right` スニペット (`agtmux tmux-status`)
+  - コマンド一覧テーブル
+
+### Gate evidence
+688 tests total (679 → 681 → 688), `just verify` PASS (fmt + lint + test)
+
+---
+
+## 2026-02-27 — Phase 6 Wave 2 設計決定: CLI 表示リデザイン方針
+
+### 背景
+T-131 (list-windows) の初版実装後にユーザーから UI 設計フィードバックを受けた。GUI のサイドバー（スクリーンショット参照）と照合し、CLI の表示設計を根本から見直した。
+
+### 主な設計判断
+
+| 判断 | 採用 | 理由 |
+|------|------|------|
+| @N/@M (window/pane ID) 非表示 | ✅ | users は window_name で考える。@N はシステム内部の識別子。fzf は `session:window_name` で動作可能 |
+| det = 無印、heur = `~` prefix | ✅ | det が「期待される通常状態」。heur だけが例外を示す。`[det]`/`[heur]` の両表示は冗長 |
+| path はデフォルト非表示 (`--path`) | ✅ | agent title が分かれば十分。path は optional 情報 |
+| `list-panes` のデフォルト出力を JSON → human-readable に変更 | ✅ | `--json` で後方互換。daily use での可読性を優先 |
+| conversation title は後続タスク (T-135) | ✅ | 最大の価値だが取得経路未実装。T-133/T-134 で表示層を先に確定し、T-135 で data を差し込む |
+
+### conversation title の現状ギャップ
+GUI が示す最大の価値 (「think 10s」「_AGTMUX V3 Redesign」) は会話タイトル。現在の `title` フィールドは provider 名か UUID fallback。Claude JSONL の `sessions-index.json` や JSONL `summary` フィールドからの抽出が必要 (T-135)。
+
+### 3コマンド構造（確定）
+- `list-panes`: フラット・ペイン単位。sidebar 相当。pane 切り替え用 fzf。
+- `list-windows`: window 単位集計。@N 非表示、window_name のみ。window 切り替え用 fzf。
+- `list-sessions`: session 単位集計。session 切り替え用 fzf。
+
+### 実装順序
+T-133 (`list-panes` リデザイン) + T-134 (`list-windows` リデザイン + `list-sessions` 新規) → T-135 (title 抽出)
+- T-133 と T-134 は独立。並行実施可能。
+- T-135 は T-133/T-134 完了後に着手（表示層確定後に data layer 追加）。
+
+---
+
+## 2026-02-27 — T-133/T-134 CLI display redesign — Completed
+
+### T-133: list-panes redesign
+- `format_panes(panes, show_path, use_color)`: session-grouped sidebar (first-seen order), panes sorted numerically
+- det managed panes: `    {title:<30}  {rel}` (no marker)
+- heur managed panes: `  ~ {title:<30}  {rel}` (yellow `~` in color mode)
+- unmanaged panes: `    {cmd}` (dim in color mode)
+- @N/@M/%N IDs completely hidden from output
+- `--json`: JSON raw output (backward compat)
+- `--path`/`-p`: append `current_path` suffix
+- `--color=always/never/auto`
+- Helpers: `relative_time()`, `resolve_color()`, `provider_short()` (ClaudeCode→Claude)
+
+### T-134: list-windows redesign + list-sessions new
+- `format_windows(panes, show_path, use_color)`: @N IDs hidden → window_name only, %N IDs hidden, `[det]`/`[heur]` tags removed → unified `~` prefix for heur, show_path support, relative_time per pane
+- `format_sessions(panes, use_color)`: one line per session: `{name}  {N} window(s)  {M} agent(s) (Running/Idle/Waiting)  {K} unmanaged`
+- `cmd_list_sessions(socket_path, color)` added (was missing)
+- cli.rs: `ListSessions(ListSessionsOpts)` + `ListPanes(ListPanesOpts)` added; `ListWindowsOpts` got `--path`/`-p`
+
+### Tests
+- 17 new tests: 8 format_panes + 4 format_windows (updated/new) + 5 format_sessions
+- 690 → 707 total tests
+- `just verify` PASS (fmt + clippy + test)
+
+### Files changed
+- `crates/agtmux-runtime/src/client.rs`
+- `crates/agtmux-runtime/src/cli.rs`
+- `crates/agtmux-runtime/src/main.rs`
+
+## 2026-02-27 — T-133/T-134 post-review fixes
+
+### Trigger
+Dual review (Claude + Codex) on T-133/T-134 changes. Both identified issues resolved.
+
+### Claude reviewer findings (Go with changes)
+- Missing tests: `conversation_title` priority, null fallback, missing `updated_at`
+- README: `list-panes | jq .` broken without `--json`; fzf recipes use `@N` IDs (now hidden)
+
+### Codex reviewer findings (P2)
+- `README.md:47`: `agtmux list-panes | jq .` now broken → needs `--json` flag
+- `README.md` fzf section: `grep -oE '@[0-9]+'` no longer matches hidden IDs
+
+### Fixes applied
+- `README.md` fully rewritten: fixed `--json` flag, new `list-panes`/`list-sessions` sections, fzf recipes use awk-based `session:window_name` extraction (no @N dependency)
+- 4 new tests added to client.rs:
+  - `format_panes_conversation_title_overrides_provider`
+  - `format_panes_conversation_title_null_falls_back_to_provider`
+  - `format_panes_updated_at_missing_shows_no_time`
+  - `format_windows_empty_window_name_shows_unnamed`
+- 707 → 711 total tests
+- `just verify` PASS
+
+---
+
+## 2026-02-27 — T-136 Waiting 表示バグ修正 + E2E 計画策定
+
+### T-136 完了 (711 → 713 tests)
+`ActivityState::WaitingInput` / `WaitingApproval` が `format!("{:?}", ...)` で Debug 文字列 (例: `"WaitingInput"`) として JSON 出力されるが、client.rs の 5 箇所で `"Waiting"` リテラルと照合していたため、永遠にカウント 0 になるバグ。
+
+**修正箇所 (client.rs)**:
+1. `format_windows` `sess_waiting` 集計: `Some("Waiting")` → `Some("WaitingInput") | Some("WaitingApproval")`
+2. `format_windows` `win_waiting` フィルター: `.filter()` 内を `matches!()` マクロに変更
+3. `format_windows` pane 表示: `display_state` 変数で正規化 (`WaitingInput/WaitingApproval → "Waiting"`)、no-color non-heur ブランチも `{display_state}` に修正
+4. `format_sessions` `waiting` 集計: 同様
+5. 追加テスト: `format_windows_waiting_input_normalized` / `format_sessions_waiting_approval_counted`
+
+### E2E 計画 (T-137/T-138) 策定
+- 3-layer アーキテクチャ: Unit(711) / Contract E2E / Detection E2E
+- Contract E2E: `source.ingest` RPC で合成イベント注入 (実 CLI 不要)
+- Detection E2E: provider-adapter パターン (Gemini 等の追加も adapter のみ)
+- 詳細: `.claude/plans/gleaming-prancing-wilkes.md`
+
+---
+
+## 2026-02-28 — Phase 6 Wave 3 設計決定: Context-aware CLI 表示
+
+### Trigger
+CLI の情報量設計について、以下 2 パターンの長所を統合する方針を確定した。
+- Codex app: main panel に `cwd/git` など文脈、sidebar は session title 中心（高い scanability）
+- cmux: sidebar に title + summary + cwd（高い情報密度）
+
+### Decision
+- **原則**: 「default は軽く、文脈は header に集約し、差分のみ pane 行へ出す」
+- `list-panes`:
+  - default は `title + state + relative_time`（unmanaged は `current_cmd`）
+  - `--context=auto|off|full` を導入
+  - `auto`（default）: `cwd/git` を session/window header に表示し、pane ごとの差分のみ suffix 表示
+- `list-windows` / `list-sessions`:
+  - context は集約表示を基本とする
+  - 同一 window/session 内で `cwd/git` が混在する場合は `mixed` marker を表示
+- summary:
+  - `--summary` opt-in（default off）
+  - deterministic source（AppServer/hooks/JSONL）由来のみ表示
+  - capture/title 由来の推測 summary は表示しない
+
+### Why
+- daily use では pane 一覧の視認速度が最重要。context を pane 行へ常時表示するとノイズが増える。
+- 一方で CWD/branch の文脈は切替判断に有効。header 集約 + 差分表示で情報密度と可読性を両立できる。
+- summary を default 表示すると誤推測や stale 情報が混入しやすいため、opt-in + deterministic 限定で fail-closed にする。
+
+### Follow-up tasks
+- T-139: `--context=auto|off|full` 導入
+- T-140: window/session context 集約 + `mixed` marker
+- T-141: `--summary` opt-in（deterministic only）
+
+### Cross-review feedback triage (Claude x2)
+
+Adopted:
+- `auto` 差分比較基準を明文化: 直近 window header、fallback で session header
+- 差分判定条件を明文化: `cwd` または `git branch` が異なれば suffix 表示
+- `list-windows` / `list-sessions` の default を `--context=auto` で統一
+- `mixed` 表示に導線を追加: `mixed (use --context=full for detail)`
+- context 同一性判定を fail-closed 化（欠損混在も `mixed`）
+- `--path`/`-p` を `--context=full` alias として維持（互換）
+- summary 文言を user-facing に修正（agent 明示データのみ）
+- `--summary` で全欠損時の表示 `(no agent summaries available)` を追加
+- `T-141 blocked_by` を `T-135b` から `T-139` へ変更（title 抽出依存を解消）
+
+Not adopted:
+- header 行に `#` / `##` プレフィックスを必須化する提案
+  - 理由: 既存の可読性・fzf レシピ互換を維持するため、header/pane の機械判別はインデント契約（0/2/4 spaces）で固定する方針を採用
+
+### Round 2 follow-up (latest parallel review反映)
+
+追加で採用:
+- `full` の command別仕様を明文化:
+  - `list-panes`: pane 行に `cwd/branch` 常時表示
+  - `list-windows`: 1行/window を維持しつつ `cwd/branch` 常時表示
+  - `list-sessions`: 1行/session を維持しつつ `cwd/branch` 常時表示
+- `auto` の OR/AND 混同を回避するため、`cwd` / `branch` をフィールド単位で独立判定に統一
+- `mixed` 判定をフィールド単位 fail-closed として再明確化（不一致/欠損混在）
+- summary の表示位置を固定（pane 行直下）。全欠損時メッセージは出力末尾 1 回のみ
+- 例示を spec に合わせて修正（session レベルでも `mixed` が可視化されるケース）
+- UX 出力契約の golden fixture タスクを追加（T-142、5ケース固定）
+
+### Round 3 follow-up (parallel review反映)
+
+追加で採用:
+- `off` モードの出力契約を明文化（`cwd/branch` + `mixed` marker を非表示）
+- `list-windows` / `list-sessions` の `auto` は window/session 行の集約 context を常時表示（親との差分抑制なし）
+- `mixed` 表示を `[field=mixed]` へ統一し、`(use --context=full for detail)` は行末 1 回のみ表示（重複抑制）
+- `full` の集約コマンド仕様を再明確化（1行/window, 1行/session 維持 + 集約値表示）
+- pane 側欠損値表記を `<unknown>` に統一
+- summary 欠損メッセージの表示位置を「全出力末尾 1 回のみ」に固定
+- `--path` は互換 alias として維持しつつ、`-p` は deprecated として整理
+- `design` 例をルールと整合する形へ更新（session/window の field-labeled `mixed`、pane差分表示）
+
+### Round 4 follow-up (parallel review反映 + root policy update)
+
+追加で採用:
+- `--path` / `-p` を完全廃止。context 詳細化は `--context=full` のみ（後方互換なし方針）
+- `list-panes --context=full` の header 挙動を固定（session/window header は `auto` 集約表示を維持）
+- `single-window session` の window header は「省略可能」ではなく「常に省略」に固定
+- `mixed` ガイダンスの適用単位を明文化（mixed 行ごとに 1 回、同一行で重複なし）
+- summary 欠損 pane の挙動を固定（summary 行を出さない、placeholder なし）
+- `deterministic-only` という内向き用語を、user-facing には「agent 明示の構造化 summary」の語に置換
+
+### Round 5 follow-up (parallel review反映)
+
+追加で採用:
+- `auto` と `full` の違いを明確化（`auto` は差分/混在フィールドのみ pane suffix、`full` は全表示行で context 表示）
+- mixed sentinel を `<mixed>` に統一し、欠損 `<unknown>` と同じ表記規約へ揃える
+- mixed ガイダンスの重複抑制を強化（同一 session block の最上位 mixed 行のみ表示）
+- `--summary` の all-missing 例を修正（pane 行を維持し、末尾 footer を追加）
+- summary 行インデント規約を明文化（pane 行 +2 spaces）
+- summary partial-missing ケースを golden fixture に追加（T-142: 5→6 ケース）
+
+### Round 6 follow-up (parallel review反映)
+
+追加で採用:
+- FR-049a を新設し、single-window session の window header 省略を spec 本文へ昇格
+- `list-panes auto` の header/pane の責務分離を FR-050 に追記（header 常時集約表示、差分ルールは pane のみ）
+- `full` の「行数を増やさない」を「既存行への inline 追加」として再定義
+- `--summary all-missing` 例を修正（pane 行を保持し、末尾 footer を追加）
+- pane インデント規約を「親行 +4 spaces」に明文化
+
+### Round 7 follow-up (parallel review反映)
+
+追加で採用:
+- mixed ガイダンス表示位置を deterministic に固定（session mixed 優先、なければ最初の mixed window 行）
+- `--path` / `-p` 入力時の fail-closed エラー文言（`hint: use --context=full`）を仕様化
+- `full` の「行数不変」説明を inline 追加の文言へ統一
+
+### Round 8 follow-up (root policy update)
+
+追加で採用:
+- `-p` 方針を根本確定: list 系では未割り当てのまま固定し、別意味 short flag に再利用しない
+- 表示密度制御の入口を `--context=...` の long option に一本化（メンタルモデルを 1 つに固定）
+- T-139 に reject contract test（`-p` / `--path` の exit code + hint）を追加し、仕様逸脱を防止
