@@ -74,6 +74,10 @@
 - Poller fallback受入基準:
   - `docs/20_spec.md` (FR-032〜FR-033)
   - `docs/40_design.md` (Main -> Test Strategy)
+- CLI context-aware 表示方針:
+  - `docs/20_spec.md` (FR-048〜FR-052)
+  - `docs/40_design.md` (Main -> Runtime Integration -> CLI Display Contract)
+  - `docs/50_plan.md` (Phase 6 design principles)
 - Post-MVP hardening (ack/registry/supervisor/snapshot):
   - `docs/20_spec.md` (FR-018〜FR-020, FR-034〜FR-047)
   - `docs/40_design.md` (Appendix)

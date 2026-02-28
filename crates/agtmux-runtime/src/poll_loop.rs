@@ -10,6 +10,9 @@ use tokio::time::{Duration, interval};
 
 use agtmux_core_v5::types::{GatewayPullRequest, Provider, PullEventsRequest, SourceKind};
 use agtmux_daemon_v5::projection::DaemonProjection;
+use agtmux_daemon_v5::supervisor::{
+    RestartDecision, RestartPolicy, SupervisorState, SupervisorTracker,
+};
 use agtmux_gateway::cursor_hardening::{
     CursorRecoveryAction, CursorWatermarks, InvalidCursorTracker,
 };
@@ -64,8 +67,13 @@ pub struct DaemonState {
     pub codex_appserver_client: Option<CodexAppServerClient>,
     /// True if App Server was ever connected (triggers reconnection on death).
     pub codex_appserver_had_connection: bool,
-    /// Consecutive failed reconnection attempts (for exponential backoff).
-    pub codex_reconnect_failures: u32,
+    /// Supervisor state machine for Codex App Server reconnection (T-129).
+    /// Tracks backoff delay + failure budget + hold-down; replaces hand-rolled counter.
+    pub codex_supervisor: SupervisorTracker,
+    /// Conversation titles keyed by session_key (T-135a/b).
+    /// Codex: thread_id → name/preview from thread/list payload.
+    /// Claude: session_key → title from sessions-index.json (T-135b).
+    pub conversation_titles: std::collections::HashMap<String, String>,
 }
 
 impl DaemonState {
@@ -126,7 +134,8 @@ impl DaemonState {
             codex_capture_tracker: CodexCaptureTracker::new(),
             codex_appserver_client: None, // Spawned asynchronously in run_daemon
             codex_appserver_had_connection: false,
-            codex_reconnect_failures: 0,
+            codex_supervisor: SupervisorTracker::new(RestartPolicy::default()),
+            conversation_titles: std::collections::HashMap::new(),
         }
     }
 }
@@ -359,28 +368,58 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
             };
             st = state.lock().await;
             st.codex_appserver_client = client_taken;
-            st.codex_reconnect_failures = 0; // connection healthy
             Some(events)
         } else if client_taken.is_some() || st.codex_appserver_had_connection {
-            // Process exited — attempt reconnection with exponential backoff (B4)
-            tracing::info!("codex app-server process exited, attempting reconnect");
+            // Process exited — attempt reconnection via SupervisorTracker (T-129).
+            // Backoff: 1s → 2s → 4s → … → 30s (capped). Budget: 5 failures / 10min → 5min hold-down.
             drop(client_taken); // drop dead process
-            let backoff_ticks = 2u32.saturating_pow(st.codex_reconnect_failures.min(6)); // max ~64 ticks
-            if st.codex_reconnect_failures == 0 || st.codex_reconnect_failures % backoff_ticks == 0
-            {
+            let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+            let should_attempt = match st.codex_supervisor.state() {
+                SupervisorState::Ready => true,
+                SupervisorState::Restarting {
+                    next_restart_ms, ..
+                } => now_ms >= *next_restart_ms,
+                SupervisorState::HoldDown { until_ms } => {
+                    if now_ms < *until_ms {
+                        tracing::debug!(
+                            "codex app-server: hold-down active, {}s remaining",
+                            until_ms.saturating_sub(now_ms) / 1000
+                        );
+                        false
+                    } else {
+                        true // hold-down expired
+                    }
+                }
+            };
+            if should_attempt {
+                tracing::info!("codex app-server process exited, attempting reconnect");
                 drop(st);
                 let new_client = CodexAppServerClient::spawn().await;
                 st = state.lock().await;
                 if new_client.is_some() {
                     tracing::info!("codex app-server reconnected");
-                    st.codex_reconnect_failures = 0;
+                    st.codex_supervisor.record_success();
                     st.codex_appserver_had_connection = true;
                 } else {
-                    st.codex_reconnect_failures = st.codex_reconnect_failures.saturating_add(1);
+                    let decision = st.codex_supervisor.record_failure(now_ms);
+                    match decision {
+                        RestartDecision::HoldDown { duration_ms } => {
+                            tracing::warn!(
+                                "codex app-server: failure budget exhausted, hold-down {}s",
+                                duration_ms / 1000
+                            );
+                        }
+                        RestartDecision::Restart { after_ms } => {
+                            tracing::info!(
+                                "codex app-server: reconnect failed, retry in {}ms",
+                                after_ms
+                            );
+                        }
+                        RestartDecision::Ready => {}
+                    }
                 }
                 st.codex_appserver_client = new_client;
             } else {
-                st.codex_reconnect_failures = st.codex_reconnect_failures.saturating_add(1);
                 st.codex_appserver_client = None;
             }
             None // no events this tick
@@ -399,6 +438,16 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
     {
         tracing::debug!("codex app-server: {} events from thread/list", events.len());
         for event in events {
+            // T-135a: extract conversation title (name / preview) from thread payload.
+            // Stored by session_key (= thread_id) so build_pane_list can look it up.
+            let title = event.payload["name"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .or_else(|| event.payload["preview"].as_str().filter(|s| !s.is_empty()));
+            if let Some(t) = title {
+                st.conversation_titles
+                    .insert(event.session_id.clone(), t.to_string());
+            }
             st.codex_source.ingest(event);
         }
     }
@@ -1465,5 +1514,69 @@ mod tests {
             2,
             "both panes must be tracked in last_panes"
         );
+    }
+
+    // ─── T-129: Supervisor strict wiring ─────────────────────────────
+
+    #[test]
+    fn supervisor_initial_state_is_ready() {
+        // DaemonState::new() must initialise codex_supervisor in Ready state.
+        let state = DaemonState::new();
+        assert_eq!(
+            *state.codex_supervisor.state(),
+            SupervisorState::Ready,
+            "supervisor must start in Ready state"
+        );
+        assert!(!state.codex_supervisor.is_hold_down());
+    }
+
+    #[test]
+    fn supervisor_failure_advances_to_restarting() {
+        // After one reconnect failure, supervisor enters Restarting with a backoff delay.
+        let mut state = DaemonState::new();
+        let now_ms = 1_000_000u64;
+        let decision = state.codex_supervisor.record_failure(now_ms);
+        // Default policy: initial_backoff_ms=1000, attempt 0 → after_ms=1000
+        assert_eq!(decision, RestartDecision::Restart { after_ms: 1_000 });
+        assert!(matches!(
+            state.codex_supervisor.state(),
+            SupervisorState::Restarting { .. }
+        ));
+    }
+
+    #[test]
+    fn supervisor_success_after_failure_resets_to_ready() {
+        // After a successful reconnect, supervisor returns to Ready and clears history.
+        let mut state = DaemonState::new();
+        let now_ms = 1_000_000u64;
+        state.codex_supervisor.record_failure(now_ms);
+        assert!(matches!(
+            state.codex_supervisor.state(),
+            SupervisorState::Restarting { .. }
+        ));
+        state.codex_supervisor.record_success();
+        assert_eq!(
+            *state.codex_supervisor.state(),
+            SupervisorState::Ready,
+            "supervisor must return to Ready after success"
+        );
+    }
+
+    #[test]
+    fn supervisor_budget_exhaustion_triggers_holddown() {
+        // 5 consecutive failures within 10-minute window → HoldDown 5 minutes.
+        let mut state = DaemonState::new();
+        let mut last_decision = RestartDecision::Ready;
+        for i in 0..5 {
+            last_decision = state.codex_supervisor.record_failure(i * 1_000);
+        }
+        assert_eq!(
+            last_decision,
+            RestartDecision::HoldDown {
+                duration_ms: 300_000
+            },
+            "5th failure must trigger 5-minute hold-down"
+        );
+        assert!(state.codex_supervisor.is_hold_down());
     }
 }

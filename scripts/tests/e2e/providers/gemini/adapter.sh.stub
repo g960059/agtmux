@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# providers/gemini/adapter.sh.stub — Gemini provider adapter stub for future implementation
+#
+# Gemini CLI integration is not yet implemented.
+# When implementing, define the following 3 functions and remove this file,
+# replacing it with adapter.sh:
+#
+#   launch_provider    PANE_ID WORKDIR [TASK]
+#   wait_until_provider_running  PANE_ID [TIMEOUT_S]
+#   wait_until_provider_idle     PANE_ID [TIMEOUT_S]
+#
+# scenarios/*.sh is provider-agnostic; no changes needed there.
+# Only this adapter.sh file needs to be implemented.
+#
+# Example detection path for Gemini:
+#   - If Gemini supports a hooks mechanism: source.ingest via UDS
+#   - If Gemini supports a JSONL/log path: dedicated source crate
+#   - Fallback: heuristic (process-tree detection)
+#
+# Reference implementations: providers/claude/adapter.sh, providers/codex/adapter.sh
+
+echo "Gemini adapter not yet implemented. Set PROVIDER=claude or PROVIDER=codex." >&2
+exit 1

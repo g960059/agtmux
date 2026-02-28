@@ -1603,3 +1603,278 @@ Not adopted:
 - `-p` 方針を根本確定: list 系では未割り当てのまま固定し、別意味 short flag に再利用しない
 - 表示密度制御の入口を `--context=...` の long option に一本化（メンタルモデルを 1 つに固定）
 - T-139 に reject contract test（`-p` / `--path` の exit code + hint）を追加し、仕様逸脱を防止
+
+---
+
+## 2026-02-28 — T-136: Waiting 表示バグ修正 — Completed
+
+### 問題
+`server.rs:328` が `format!("{:?}", pane.activity_state)` で Debug 文字列 (`"WaitingInput"`, `"WaitingApproval"`) を出力していたが、`client.rs` は `"Waiting"` で照合していた。全 5 箇所で永久に 0 になるバグ。
+
+### 修正内容
+`crates/agtmux-runtime/src/client.rs`:
+- `sess_waiting` 集計: `Some("Waiting")` → `Some("WaitingInput") | Some("WaitingApproval")`
+- `win_waiting` filter: 同上
+- pane 着色 (2 箇所): `"Waiting" => yellow` → `"WaitingInput" | "WaitingApproval" => yellow "Waiting"`
+- `format_sessions` waiting 集計: 同上
+- テスト 2 件追加: `format_panes_waiting_input_counted`, `format_sessions_waiting_approval_counted`
+
+### Gate evidence
+- 713 tests total, `just verify` PASS
+
+---
+
+## 2026-02-28 — T-137: Layer 2 Contract E2E 基盤 — Completed
+
+### 新規ファイル
+- `scripts/tests/e2e/harness/common.sh` — `wait_for_agtmux_state`, `assert_field`, `log`, `fail`, `pass`, `register_cleanup`
+- `scripts/tests/e2e/harness/daemon.sh` — `daemon_start`, `daemon_stop` (UDS ready polling)
+- `scripts/tests/e2e/harness/inject.sh` — `inject_claude_event`, `inject_codex_event`, event loop variants
+- `scripts/tests/e2e/contract/test-schema.sh` — required JSON fields, types, ranges
+- `scripts/tests/e2e/contract/test-claude-state.sh` — tool_start→Running, idle→Idle, wait_for_approval→Waiting
+- `scripts/tests/e2e/contract/test-codex-state.sh` — thread.active→Running, thread.idle→Idle, recovery
+- `scripts/tests/e2e/contract/test-waiting-states.sh` — WaitingInput/WaitingApproval → "Waiting" 表示
+- `scripts/tests/e2e/contract/test-list-consistency.sh` — list-windows/list-sessions vs list-panes 整合性
+- `scripts/tests/e2e/contract/test-multi-pane.sh` — 同一 session 複数 pane 独立管理
+- `scripts/tests/e2e/contract/run-all.sh` — 全テスト実行 + 集計
+- `justfile`: `preflight-contract`, `e2e-contract` targets 追加
+
+### 主要バグ (発見・修正済み)
+1. `jq -n` → `jq -nc`: pretty-print JSON は server `read_line` で最初の `{` 行しか読まれずパース失敗
+2. `inject_*_event_loop` の `$()` ブロック: bash `$()` パイプの write-end を background subshell が継承 → `>/dev/null &` で修正
+3. inject.sh の event_type 誤り: `task.running`/`task.idle` は `parse_activity_state()` に未定義 → `thread.active`/`thread.idle` に修正
+
+### Gate evidence
+- `just e2e-contract`: 6 passed, 0 failed
+
+---
+
+## 2026-02-28 — T-138: Layer 3 Provider-Adapter Detection E2E — Completed
+
+### 新規ファイル
+
+**Adapters** (provider-specific, 3 functions each: launch_provider / wait_until_provider_running / wait_until_provider_idle):
+- `scripts/tests/e2e/providers/claude/adapter.sh` — claude --dangerously-skip-permissions -p; tmux capture pattern detection
+- `scripts/tests/e2e/providers/codex/adapter.sh` — codex --full-auto; tmux capture pattern detection
+- `scripts/tests/e2e/providers/gemini/adapter.sh.stub` — stub with implementation guide
+
+**Scenarios** (provider-agnostic; sourced adapter is interchangeable):
+- `scenarios/single-agent-lifecycle.sh` — Running → Idle lifecycle + evidence_mode=deterministic
+- `scenarios/multi-agent-same-session.sh` — 2 agents same session, different CWD → both managed
+- `scenarios/same-cwd-multi-pane.sh` — T-124 regression: 2 panes same CWD → both managed
+- `scenarios/provider-switch.sh` — PROVIDER_A stops → PROVIDER_B starts in same pane (cross-provider arbitration)
+
+**Orchestrator**:
+- `online/run-all.sh` — PROVIDER= env var, E2E_SKIP_SCENARIOS support, auto-skip platform-specific tests
+
+### 3層アーキテクチャ完成
+
+| Layer | コマンド | 必要物 |
+|-------|---------|--------|
+| Layer 1: Unit | `just verify` (713 tests) | Rust のみ |
+| Layer 2: Contract | `just e2e-contract` (6 tests) | tmux + python3 + jq |
+| Layer 3: Detection | `just e2e-online-claude` / `just e2e-online-codex` | tmux + Claude/Codex CLI + auth |
+
+### Gate evidence
+- 全ファイル syntax check PASS (`bash -n` for all scripts)
+- adapter path resolution test PASS
+- live CLI test: requires `just preflight-online` (ANTHROPIC_API_KEY / OPENAI_API_KEY)
+
+---
+
+## 2026-02-28 — Post-review fixes (Reviewer A NB-4 + Reviewer B B-1)
+
+### B-1 Critical: test-waiting-states.sh False Confidence — FIXED
+
+**問題**: `test-waiting-states.sh` が `tool_start` (→ Running) のみ inject し、
+`WaitingApproval`/`WaitingInput` 状態を一切生成していなかった。
+`assert_not_contains "WaitingApproval"` が Trivially true (pane は Running のため)。
+
+**根本原因**: `inject_claude_event` は `hook_type: "wait_for_approval"` を
+`translate.rs` の `normalize_event_type()` を通じて `lifecycle.unknown` → `ActivityState::Unknown` にマップ。
+`WaitingApproval` を生成する hook type が Claude hooks に存在しなかった。
+
+**修正**: `inject_codex_event_loop` で `event_type: "lifecycle.waiting_approval"` / `"lifecycle.waiting_input"` を注入。
+`CodexRawEvent.event_type` は plain `String` なので any event_type を受け付ける。
+`parse_activity_state("lifecycle.waiting_approval")` → `ActivityState::WaitingApproval` が確定的に機能。
+
+**結果**: Scenario 1 で WaitingApproval 到達を `wait_for_agtmux_state` で確認してから assertions を実行。
+Scenario 2 で WaitingInput も同様に確認。6 つのアサーション (list-windows/list-sessions 表示 + JSON raw 保全) が全て実 False→True のチェックに。
+
+### NB-4 Non-blocking: ANSI padding in format_windows — FIXED
+
+**問題**: `{state_str:<7}` で ANSI escape code 込みの文字列を pad すると、
+escape bytes を含む raw 長を基準に pad するため color mode では列が揃わない。
+例: `"\x1b[32mRunning\x1b[0m"` (14 bytes) の :<7 は追加 padding なし → "Idle" との列ズレ。
+
+**修正**: pad を color code 付与の前に実施:
+```rust
+let padded = format!("{display_state:<7}");
+let state_str = match display_state {
+    "Running" => format!("\x1b[32m{padded}\x1b[0m"),
+    "Waiting" => format!("\x1b[33m{padded}\x1b[0m"),
+    _ => padded,
+};
+// format string から :<7 を削除
+```
+heur + det の 2 箇所を修正。
+
+### Gate evidence
+- `just verify`: 713 tests PASS
+- `just e2e-contract`: 6 passed, 0 failed
+- `test-waiting-states.sh`: WaitingApproval・WaitingInput 両方の状態到達を実証してから assertions
+
+---
+
+## 2026-02-28 — E2E coverage向上 (test-freshness-fallback, test-error-state, evidence_mode in online scenarios)
+
+### 追加: contract/test-freshness-fallback.sh
+
+**カバー内容**: DOWN_THRESHOLD (15s) 経過後に `evidence_mode` が `"deterministic"` → `"heuristic"` に切り替わる契約。
+resolver.rs Step 4: `Freshness::Stale|Down → winner_tier = EvidenceTier::Heuristic`。
+`tick_freshness()` は `evidence_mode` のみ変更し `presence` は変えない。
+Phase 4 でも検証: 再 inject → `"deterministic"` に戻ることを確認。
+
+### 追加: contract/test-error-state.sh
+
+**カバー内容**: `lifecycle.error` → `ActivityState::Error` 状態の生成・表示・JSON passthrough。
+3 シナリオ: Error 初期到達 / Running→Error 遷移 / Error→Running 回復。
+`display_state` の `other => other` branch で "Error" はそのまま表示（WaitingApproval と異なり正規化なし）。
+
+### 追加: evidence_mode=deterministic check in online scenarios
+
+- `multi-agent-same-session.sh`: 2 pane 両方に `evidence_mode=deterministic` 確認追加
+- `same-cwd-multi-pane.sh`: 2 pane 両方に `evidence_mode=deterministic` 確認追加  
+- `provider-switch.sh`: PROVIDER_A Running / PROVIDER_B Running の両フェーズに `evidence_mode=deterministic` 確認追加
+- `single-agent-lifecycle.sh`: 既存の `evidence_mode=deterministic` 確認そのまま維持
+
+### Gate evidence
+- `just e2e-contract`: **8 passed, 0 failed** (6→8 tests)
+- freshness test 実測: inject 停止後 11s で `"heuristic"` に切り替わりを確認 (DOWN_THRESHOLD=15s 以内)
+
+---
+
+## 2026-02-28 — CLI 全体再設計決定 (T-139 拡張)
+
+### 背景
+
+T-139 は当初 `--context=auto|off|full` フラグの追加として計画されていたが、
+3案のコンペレビュー（opus × 3: Minimal/Density/Workflow）を経て、ユーザー合意の下で
+「CLI 全体の再設計」に昇格。後方互換不要（現ユーザー=開発者のみ）。
+
+### 採用設計 (コンペ結果の統合)
+
+| 決定事項 | 採用元 | 内容 |
+|----------|--------|------|
+| bare `agtmux` = hierarchical tree | A/B案 | 全体構造把握。C案の triage は `agtmux ls --flat` 相当 |
+| `agtmux ls --group=session\|pane` | B案 | 粒度選択フラグで list-* 3コマンドを統合 |
+| `agtmux pick` 組み込み | C案 | fzf picker を 1st class コマンドに |
+| `agtmux watch` | C案 | htop 風ライブダッシュボード |
+| `agtmux wait` | C案 | `--idle`/`--no-waiting` でブロック待機 |
+| `agtmux bar --tmux` | C案 | tmux カラーコード専用フラグ |
+| `agtmux json` 分離 | C案 | 人間向けコマンドから `--json` を完全排除 |
+| cwd = 末尾2セグメント | 独自 | worktree 環境での長パス問題を解決 |
+| branch = `[branch]` ASCII括弧 | 共通 | 環境依存なし。`--icons` で Nerd Font opt-in |
+
+### 廃止コマンド
+`list-panes` / `list-windows` / `list-sessions` / `tmux-status` / `status`
+
+### タスク分解
+- T-139a: CLI Core (コマンド骨格 + ls + triage) — **実装開始**
+- T-139b: Navigation (pick) — blocked_by T-139a
+- T-139c: Monitor (watch + bar) — blocked_by T-139a
+- T-139d: Script (wait + json) — blocked_by T-139a
+
+---
+
+## 2026-02-28 — T-139a: CLI Core 実装完了
+
+### 設計変更の主な判断
+
+**client-side git branch resolution を選択**:
+daemon の hot path (poll_loop.rs) で `git rev-parse` を実行するとブロッキングリスクがあるため、
+CLI 側で unique CWD ごとに非同期実行する方式を採用。
+`server.rs` は `"git_branch": null` のプレースホルダーを返すのみ。
+
+**bare `agtmux` = `Ls(default)`**:
+`Option<Command>` + `subcommand_required = false` で bare invocation を `ls` にフォールバック。
+
+### 新規ファイル
+- `context.rs`: `short_path`, `git_branch_for_path`, `truncate_branch`, `consensus_str`, `build_branch_map` 等
+- `cmd_ls.rs`: `format_ls_tree` / `format_ls_session` / `format_ls_pane` / `cmd_ls`
+
+### テスト
+- 新規: context 11件 + cmd_ls 24件 + client(bar) 6件 = 41件追加
+- 削除: 旧 `format_panes/format_windows/format_sessions` ~28件
+- 純増: +13件, 711 → 724 tests
+
+### Gate evidence
+- `just verify`: **724 tests PASS**
+
+---
+
+## 2026-02-28 — T-139b/c/d: CLI Navigation / Monitor / Script 実装完了
+
+### T-139b: `agtmux pick`
+- `cmd_pick.rs` 新規: `format_pick_candidates`, `cmd_pick`
+- `fzf` 検出 (`which fzf`) → stdin pipe → stdout parse → `tmux switch-client -t {pane_id}`
+- `--dry-run`: fzf 起動なし、候補一覧のみ表示
+- `--waiting`: WaitingInput/WaitingApproval pane のみ表示
+- 3 new tests
+
+### T-139c: `agtmux watch`
+- `cmd_watch.rs` 新規: ANSI `\x1b[2J\x1b[H` クリア + `format_ls_tree` ループ
+- `tokio::signal::ctrl_c()` で Ctrl-C 終了
+- `--interval N` (秒): デフォルト 2s
+- crossterm 追加依存なし
+- 2 new tests
+
+### T-139d: `agtmux wait` + `agtmux json`
+- `cmd_wait.rs` 新規: `WaitCondition { Idle, NoWaiting }`, `condition_met()`, exit code 0/1/2/3
+  - `--idle`: 全 managed pane が Idle/Error/Unknown になるまで待機
+  - `--no-waiting`: WaitingInput/WaitingApproval pane がゼロになるまで待機
+  - `--session`: セッション名フィルタ; `--timeout`: タイムアウト秒; `--quiet`: 進捗非表示
+  - `\r` progress line (tty 判定)
+  - 8 new tests
+- `cmd_json.rs` 新規: schema v1 `{version:1, panes:[...]}`, normalize helpers
+  - `normalize_activity_state`: `"WaitingApproval"` → `"waiting_approval"` 等
+  - `normalize_provider`: `"ClaudeCode"` → `"claude"` 等
+  - `--health`: daemon 疎通確認のみ
+  - 14 new tests
+
+### `cli.rs` + `main.rs` 更新
+- `LsOpts`, `BarOpts`, `PickOpts`, `WatchOpts`, `WaitOpts`, `JsonOpts` 全 opts 確定
+- `main.rs`: `Wait` コマンドのみ `std::process::exit(exit_code)` で精密 exit code
+
+### Gate evidence
+- `just verify`: **751 tests PASS** (724 → 751, 純増 +27)
+
+---
+
+## 2026-02-28 — T-140: E2E Contract Script CLI Migration
+
+### 背景
+T-139 CLI 再設計で `list-panes --json`, `list-windows`, `list-sessions` 等が廃止された。
+Review B-1 で指摘：E2E コントラクトスクリプトがこれらの廃止コマンドを直接呼び出しており `just e2e-contract` が壊れる状態だった。
+
+### 変更内容
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `harness/common.sh` | `jq_get`: `list-panes --json` → `agtmux json`, `.[]` → `.panes[]` / debug も同様 |
+| `test-schema.sh` | JSON schema v1 検証に変更（`type == "object"`, `.panes | type == "array"`, snake_case VALID_STATES） |
+| `test-waiting-states.sh` | `list-windows` → `agtmux ls` / `list-sessions` → `agtmux ls --group=session` / activity_state 期待値 → snake_case |
+| `test-error-state.sh` | `list-windows` → `agtmux ls` / activity_state → snake_case |
+| `test-list-consistency.sh` | JSON ground truth: `list-panes --json` → `agtmux json` + `.panes[]` jq path / human views → `agtmux ls` |
+| `test-multi-pane.sh` | `list-sessions` → `agtmux ls --group=session` / activity_state → snake_case |
+| `test-freshness-fallback.sh` | activity_state "Running" → "running" |
+| `test-claude-state.sh` / `test-codex-state.sh` | activity_state → snake_case |
+
+### 設計メモ
+- `presence` ("managed"/"unmanaged") と `evidence_mode` ("deterministic"/"heuristic"/"none") は schema v1 でも **変化なし**
+- `activity_state` のみ snake_case 正規化: "Running" → "running", "WaitingApproval" → "waiting_approval" 等
+- `wait_for_agtmux_state` の期待値が snake_case になったことで、provider-agnostic な detection E2E (Layer 3) も `jq_get` 経由なら自動的に恩恵を受ける
+
+### Gate evidence
+- `bash -n` syntax check: **10 scripts PASS**
+- `just verify`: **751 tests PASS** (Rust unit tests 変化なし)

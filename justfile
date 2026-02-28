@@ -88,3 +88,42 @@ test-e2e-batch:
 
 test-e2e-matrix:
     @bash scripts/tests/run-e2e-matrix.sh
+
+# ── Layer 2: Contract E2E (no real CLI needed) ────────────────────────────
+
+preflight-contract:
+    @echo "[preflight-contract] tmux"
+    @command -v tmux  >/dev/null || { echo "tmux not found"; exit 1; }
+    @tmux -V >/dev/null
+    @echo "[preflight-contract] socat or python3 (for UDS injection)"
+    @command -v socat >/dev/null || command -v python3 >/dev/null || command -v python >/dev/null || { echo "socat or python3 required (brew install socat)"; exit 1; }
+    @echo "[preflight-contract] jq"
+    @command -v jq    >/dev/null || { echo "jq not found (brew install jq)"; exit 1; }
+    @echo "[preflight-contract] agtmux binary"
+    @test -x target/release/agtmux || test -x target/debug/agtmux || command -v agtmux >/dev/null || { echo "agtmux not built — run: cargo build -p agtmux-runtime"; exit 1; }
+    @echo "[preflight-contract] OK"
+
+e2e-contract: preflight-contract
+    @cargo build -p agtmux-runtime --quiet
+    @bash scripts/tests/e2e/contract/run-all.sh
+
+# ── Layer 3: Detection E2E (real CLI required) ────────────────────────────
+# Default timeout: 600s per run. Override: E2E_ONLINE_TIMEOUT=<seconds>
+
+e2e-online: preflight-online
+    @cargo build -p agtmux-runtime --quiet
+    @PROVIDER="${PROVIDER:-claude}" \
+     bash -c 'timeout "${E2E_ONLINE_TIMEOUT:-600}" bash scripts/tests/e2e/online/run-all.sh \
+              || { ec=$?; [ $ec -eq 124 ] && echo "[ERROR] e2e-online timed out after ${E2E_ONLINE_TIMEOUT:-600}s" >&2; exit $ec; }'
+
+e2e-online-claude: preflight-online
+    @cargo build -p agtmux-runtime --quiet
+    @PROVIDER=claude \
+     bash -c 'timeout "${E2E_ONLINE_TIMEOUT:-600}" bash scripts/tests/e2e/online/run-all.sh \
+              || { ec=$?; [ $ec -eq 124 ] && echo "[ERROR] e2e-online-claude timed out after ${E2E_ONLINE_TIMEOUT:-600}s" >&2; exit $ec; }'
+
+e2e-online-codex: preflight-online
+    @cargo build -p agtmux-runtime --quiet
+    @PROVIDER=codex \
+     bash -c 'timeout "${E2E_ONLINE_TIMEOUT:-600}" bash scripts/tests/e2e/online/run-all.sh \
+              || { ec=$?; [ $ec -eq 124 ] && echo "[ERROR] e2e-online-codex timed out after ${E2E_ONLINE_TIMEOUT:-600}s" >&2; exit $ec; }'

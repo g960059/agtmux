@@ -14,18 +14,31 @@
 
 ### Phase 7 — E2E テスト本格導入
 
-- [ ] T-137 (P2) Layer 2 Contract E2E 基盤
+- [x] T-140 (P2) E2E コントラクトスクリプト CLI 移行 — DONE (2026-02-28)
+  - T-139 で廃止されたコマンド群を新 CLI に置き換え（follow-up from T-139 review B-1）
+  - 変更ファイル 9 件:
+    - `harness/common.sh`: `jq_get` / debug → `agtmux json`, `.panes[]` jq path
+    - `test-schema.sh`: `agtmux json` schema v1、object/array 検証に変更
+    - `test-waiting-states.sh`: `list-windows` → `agtmux ls`、`list-sessions` → `agtmux ls --group=session`、activity_state 期待値 → snake_case
+    - `test-error-state.sh`: `list-windows` → `agtmux ls`、activity_state → snake_case
+    - `test-list-consistency.sh`: `list-panes --json` → `json`、`list-sessions`/`list-windows` → `agtmux ls`、jq filter → snake_case
+    - `test-multi-pane.sh`: `list-sessions` → `agtmux ls --group=session`、activity_state → snake_case
+    - `test-freshness-fallback.sh`: `activity_state: "running"`（snake_case）
+    - `test-claude-state.sh` / `test-codex-state.sh`: `activity_state` → snake_case
+  - Gate: `bash -n` syntax check PASS (10 scripts); `just verify` 751 tests PASS
+
+- [x] T-137 (P2) Layer 2 Contract E2E 基盤 — DONE (2026-02-28)
   - `scripts/tests/e2e/harness/{common,daemon,inject}.sh`
   - `scripts/tests/e2e/contract/test-schema.sh`, `test-claude-state.sh`, `test-codex-state.sh`, `test-waiting-states.sh`, `test-list-consistency.sh`, `test-multi-pane.sh`, `run-all.sh`
   - justfile `preflight-contract` / `e2e-contract` targets
-  - 実 CLI 不要: `source.ingest` RPC + socat で合成イベント注入
-  - blocked_by: T-136 (DONE)
+  - Gate: `just e2e-contract` 6 passed, 0 failed
 
-- [ ] T-138 (P3) Layer 3 Provider-Adapter Detection E2E
-  - `providers/{claude,codex,gemini}/adapter.sh` (provider-adapter パターン)
-  - `scenarios/` は provider 非依存 (Gemini 追加も adapter のみ変更)
-  - `online/run-all.sh` + `preflight-online` / `e2e-online` targets
-  - blocked_by: T-137
+- [x] T-138 (P3) Layer 3 Provider-Adapter Detection E2E — DONE (2026-02-28)
+  - `providers/claude/adapter.sh`, `providers/codex/adapter.sh`, `providers/gemini/adapter.sh.stub`
+  - `scenarios/single-agent-lifecycle.sh`, `multi-agent-same-session.sh`, `same-cwd-multi-pane.sh`, `provider-switch.sh`
+  - `online/run-all.sh` (PROVIDER= env var, E2E_SKIP_SCENARIOS support)
+  - justfile: `e2e-online`, `e2e-online-claude`, `e2e-online-codex` targets 追加済み
+  - Gate: syntax check PASS; live CLI run requires `just preflight-online`
 
 ### Phase 6 Wave 2 — CLI 表示リデザイン
 
@@ -35,49 +48,41 @@
   - 同一 `conversation_titles` map に Claude session_key → title を挿入
   - blocked_by: T-135a (DONE)
 
-### Phase 6 Wave 3 — Context-aware CLI 表示
+### Phase 6 Wave 3 — CLI 全体再設計（T-139 拡張）
 
-- [ ] T-139 (P3) `--context=auto|off|full` 導入 (`list-panes` / `list-windows` / `list-sessions`)
-  - default `auto`: session/window header へ `cwd/git` を集約、pane 行は差分のみ表示
-  - 差分判定: 比較基準は直近 window header（fallback: session header）
-  - フィールド単位差分: `cwd` / `branch` を独立評価し、差分フィールドのみ suffix 表示
-  - `off`: `cwd/branch` と `mixed` marker を非表示、`full`: 各表示行で `cwd/branch` 常時表示
-  - `--path` / `-p` は非対応（`--context=full` のみを正規入口）。入力時は `hint: use --context=full` 付きエラー
-  - `-p` は list 系で未割り当て固定（他意味へ再利用しない）。`-p`/`--path` の reject contract（exit code + hint）を unit test 化
-  - 出力契約テスト（context compaction, フィールド差分表示, empty/missing git info）
-  - blocked_by: T-136 (DONE)
+T-139〜T-142 を統合し CLI を全面再設計（後方互換不要）。
+設計概要: `.claude/plans/gleaming-prancing-wilkes.md` 参照（実装承認済み 2026-02-28）。
 
-- [ ] T-140 (P3) window/session context 集約 + `mixed` marker
-  - window/session 単位で fail-closed 同一性判定（全 pane で `cwd` + `branch` 一致時のみ単一値表示）
-  - 欠損/不一致が混在する場合は `[field=<mixed>]` を表示
-  - ガイダンスは同一 session block で 1 回のみ表示（session mixed 優先、なければ最初の mixed window 行）
-  - `--context=full` でも行数は増やさない（`list-windows`=1行/window, `list-sessions`=1行/session 維持）
-  - header 出力契約: session=先頭インデントなし、window=2 spaces、pane=4 spaces 以上
-  - single-window session では window header を常に省略（pane は session 直下）
-  - fzf レシピ互換: `session:window_name` 抽出ワンライナーが header 追加後も動作することをテストで確認
-  - blocked_by: T-139
+- [x] T-139a (P2) CLI Core — コマンド骨格 + `ls` + triage — DONE (2026-02-28)
+  - `cli.rs`: 全コマンド再定義（廃止: list-panes/list-windows/list-sessions/tmux-status/status）
+  - `context.rs`: `short_path`, `git_branch_for_path`, `truncate_branch`, `consensus_str`, `build_branch_map`, `relative_time`, `resolve_color`, `provider_short` (新規)
+  - `cmd_ls.rs`: `format_ls_tree` / `format_ls_session` / `format_ls_pane` + `cmd_ls` (新規)
+  - `client.rs`: 旧 format 関数削除、新 `cmd_bar` / `format_bar`（`--tmux` フラグ対応）
+  - `server.rs`: `"git_branch": null` フィールド追加（client-side branch resolution を選択）
+  - `main.rs`: ルーティング更新、bare `agtmux` → `Ls(default)`
+  - 新規テスト 41 件、旧テスト ~28 件削除、净増 +13、724 tests total
+  - Gate: `just verify` 724 tests PASS
 
-- [ ] T-141 (P4) `--summary` opt-in 表示（deterministic source only）
-  - pane summary は `--summary` 指定時のみ表示（default off）
-  - source 方針: agent 明示の構造化 summary（AppServer/hooks/JSONL）のみ。capture/title 推測は不採用
-  - 表示位置: pane 行の直下 1 行（pane より 2 spaces 深いインデント、summary欠損 pane は行を出さない）
-  - 全 pane 欠損時は全出力末尾 1 回のみ `(no agent summaries available)`。一部欠損時は footer なし
-  - blocked_by: T-139
+- [x] T-139b (P3) Navigation — pick — DONE (2026-02-28)
+  - `cmd_pick.rs`: `format_pick_candidates`, `cmd_pick` — fzf 統合 + tmux switch-client
+  - `--dry-run`: 候補一覧表示のみ / `--waiting`: Waiting pane のみフィルタ
+  - 3 new tests
+  - Gate: `just verify` 724 → 727 tests (counted in T-139b/c/d 合計)
 
-- [ ] T-142 (P3) CLI UX output contract fixtures（golden）
-  - 対象: `list-panes` / `list-windows` / `list-sessions`
-  - fixture 6 ケース固定:
-    - all-uniform context（全一致）
-    - branch-mixed only（cwd 一致 / branch 混在）
-    - cwd-mixed only（branch 一致 / cwd 混在）
-    - no-window-header fallback（session baseline 差分）
-    - summary-all-missing（footer 表示）
-    - summary-partial-missing（footer なし + pane別 summary 省略）
-  - 判定: `just verify` に contract snapshot test を含める
-  - blocked_by: T-140
+- [x] T-139c (P3) Monitor — watch + bar — DONE (2026-02-28)
+  - `cmd_watch.rs`: ANSI クリア (`\x1b[2J\x1b[H`) + `format_ls_tree` ループ + Ctrl-C 終了
+  - `--interval N`: 更新間隔（秒）; crossterm 不使用（依存追加なし）
+  - 2 new tests
+  - Gate: `just verify` PASS (T-139b/c/d 合計で確認)
+
+- [x] T-139d (P3) Script — wait + json — DONE (2026-02-28)
+  - `cmd_wait.rs`: `WaitCondition { Idle, NoWaiting }`, exit code 0/1/2/3, `\r` progress 表示
+  - `cmd_json.rs`: schema v1 `{version:1, panes:[...]}`, normalize helpers, `--health`
+  - 8 + 14 = 22 new tests
+  - Gate: `just verify` 724 → 751 tests PASS (+27 net for T-139b/c/d)
 
 ## DOING
-- [ ] T-137 Contract E2E 実装中
+- [ ] (none)
 
 ## REVIEW
 - [ ] (none)

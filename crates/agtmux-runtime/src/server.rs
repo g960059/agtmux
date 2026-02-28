@@ -327,11 +327,16 @@ pub(crate) fn build_pane_list(state: &DaemonState) -> serde_json::Value {
             },
             "activity_state": format!("{:?}", pane.activity_state),
             "provider": pane.provider.map(|p| p.as_str()),
+            "conversation_title": state.conversation_titles.get(&pane.session_key),
             "title": title_decision.title,
             "title_quality": format!("{:?}", title_decision.quality),
+            "session_id": tmux_info.map(|t| &t.session_id),
             "session_name": tmux_info.map(|t| &t.session_name),
+            "window_id": tmux_info.map(|t| &t.window_id),
             "window_name": tmux_info.map(|t| &t.window_name),
             "current_cmd": tmux_info.map(|t| &t.current_cmd),
+            "current_path": tmux_info.map(|t| &t.current_path),
+            "git_branch": serde_json::Value::Null,
             "updated_at": pane.updated_at,
         }));
     }
@@ -354,9 +359,13 @@ pub(crate) fn build_pane_list(state: &DaemonState) -> serde_json::Value {
                 "presence": PanePresence::Unmanaged,
                 "title": title_decision.title,
                 "title_quality": format!("{:?}", title_decision.quality),
+                "session_id": tmux_pane.session_id,
                 "session_name": tmux_pane.session_name,
+                "window_id": tmux_pane.window_id,
                 "window_name": tmux_pane.window_name,
                 "current_cmd": tmux_pane.current_cmd,
+                "current_path": tmux_pane.current_path,
+                "git_branch": serde_json::Value::Null,
             }));
         }
     }
@@ -1302,5 +1311,178 @@ mod tests {
         assert!(state.trust_guard.is_registered("codex_appserver"));
         assert!(state.trust_guard.is_registered("claude_hooks"));
         assert!(state.trust_guard.is_registered("claude_jsonl"));
+    }
+
+    // T-130: window_id / session_id / current_path exposed in list_panes response
+    #[test]
+    fn build_pane_list_includes_window_session_path_for_unmanaged() {
+        let mut state = make_state();
+        state.last_panes = vec![TmuxPaneInfo {
+            pane_id: "%10".to_string(),
+            session_id: "$3".to_string(),
+            session_name: "work".to_string(),
+            window_id: "@7".to_string(),
+            window_name: "editor".to_string(),
+            current_cmd: "zsh".to_string(),
+            current_path: "/home/user/project".to_string(),
+            ..Default::default()
+        }];
+
+        let result = build_pane_list(&state);
+        let arr = result.as_array().expect("array");
+        let pane = &arr[0];
+        assert_eq!(pane["pane_id"], "%10");
+        assert_eq!(pane["presence"], "unmanaged");
+        assert_eq!(pane["session_id"], "$3");
+        assert_eq!(pane["window_id"], "@7");
+        assert_eq!(pane["current_path"], "/home/user/project");
+    }
+
+    #[test]
+    fn build_pane_list_includes_window_session_path_for_managed() {
+        use agtmux_core_v5::types::SourceKind;
+
+        let mut state = make_state();
+        let now = Utc::now();
+        let snapshot = agtmux_source_poller::source::PaneSnapshot {
+            pane_id: "%20".to_string(),
+            pane_title: String::new(),
+            current_cmd: "claude".to_string(),
+            process_hint: Some("claude".to_string()),
+            capture_lines: vec!["\u{256D} Claude Code".to_string()],
+            captured_at: now,
+        };
+        state.poller.poll_batch(&[snapshot]);
+        let pull_req = agtmux_core_v5::types::PullEventsRequest {
+            cursor: None,
+            limit: 100,
+        };
+        let poller_resp = state.poller.pull_events(&pull_req, now);
+        state
+            .gateway
+            .ingest_source_response(SourceKind::Poller, poller_resp);
+        let gw_resp = state
+            .gateway
+            .pull_events(&agtmux_core_v5::types::GatewayPullRequest {
+                cursor: None,
+                limit: 100,
+            });
+        state.daemon.apply_events(gw_resp.events, now);
+
+        state.last_panes = vec![TmuxPaneInfo {
+            pane_id: "%20".to_string(),
+            session_id: "$5".to_string(),
+            session_name: "agents".to_string(),
+            window_id: "@12".to_string(),
+            window_name: "main".to_string(),
+            current_cmd: "claude".to_string(),
+            current_path: "/Users/user/repo".to_string(),
+            ..Default::default()
+        }];
+
+        let result = build_pane_list(&state);
+        let arr = result.as_array().expect("array");
+        let managed = arr.iter().find(|p| p["pane_id"] == "%20").expect("%20");
+        assert_eq!(managed["presence"], "managed");
+        assert_eq!(managed["session_id"], "$5");
+        assert_eq!(managed["window_id"], "@12");
+        assert_eq!(managed["current_path"], "/Users/user/repo");
+    }
+
+    // T-135a: conversation_title exposed from DaemonState.conversation_titles
+    #[test]
+    fn build_pane_list_includes_conversation_title_when_available() {
+        let mut state = make_state();
+        let now = Utc::now();
+        let snapshot = agtmux_source_poller::source::PaneSnapshot {
+            pane_id: "%30".to_string(),
+            pane_title: String::new(),
+            current_cmd: "codex".to_string(),
+            process_hint: Some("codex".to_string()),
+            capture_lines: vec![],
+            captured_at: now,
+        };
+        state.poller.poll_batch(&[snapshot]);
+        let pull_req = agtmux_core_v5::types::PullEventsRequest {
+            cursor: None,
+            limit: 100,
+        };
+        let poller_resp = state.poller.pull_events(&pull_req, now);
+        state
+            .gateway
+            .ingest_source_response(SourceKind::Poller, poller_resp);
+        let gw_resp = state
+            .gateway
+            .pull_events(&agtmux_core_v5::types::GatewayPullRequest {
+                cursor: None,
+                limit: 100,
+            });
+        state.daemon.apply_events(gw_resp.events, now);
+
+        // Simulate T-135a: conversation_titles populated by Codex poller
+        // session_key for the managed pane is its source session_key from the event
+        let managed_panes = state.daemon.list_panes();
+        let pane = managed_panes
+            .iter()
+            .find(|p| p.pane_instance_id.pane_id == "%30")
+            .expect("managed pane %30");
+        state
+            .conversation_titles
+            .insert(pane.session_key.clone(), "TUI prototype".to_string());
+
+        state.last_panes = vec![agtmux_tmux_v5::TmuxPaneInfo {
+            pane_id: "%30".to_string(),
+            current_cmd: "codex".to_string(),
+            ..Default::default()
+        }];
+
+        let result = build_pane_list(&state);
+        let arr = result.as_array().expect("array");
+        let managed = arr.iter().find(|p| p["pane_id"] == "%30").expect("%30");
+        assert_eq!(managed["conversation_title"], "TUI prototype");
+    }
+
+    #[test]
+    fn build_pane_list_conversation_title_null_when_absent() {
+        let mut state = make_state();
+        let now = Utc::now();
+        let snapshot = agtmux_source_poller::source::PaneSnapshot {
+            pane_id: "%31".to_string(),
+            pane_title: String::new(),
+            current_cmd: "codex".to_string(),
+            process_hint: Some("codex".to_string()),
+            capture_lines: vec![],
+            captured_at: now,
+        };
+        state.poller.poll_batch(&[snapshot]);
+        let pull_req = agtmux_core_v5::types::PullEventsRequest {
+            cursor: None,
+            limit: 100,
+        };
+        let poller_resp = state.poller.pull_events(&pull_req, now);
+        state
+            .gateway
+            .ingest_source_response(SourceKind::Poller, poller_resp);
+        let gw_resp = state
+            .gateway
+            .pull_events(&agtmux_core_v5::types::GatewayPullRequest {
+                cursor: None,
+                limit: 100,
+            });
+        state.daemon.apply_events(gw_resp.events, now);
+        state.last_panes = vec![agtmux_tmux_v5::TmuxPaneInfo {
+            pane_id: "%31".to_string(),
+            current_cmd: "codex".to_string(),
+            ..Default::default()
+        }];
+
+        let result = build_pane_list(&state);
+        let arr = result.as_array().expect("array");
+        let managed = arr.iter().find(|p| p["pane_id"] == "%31").expect("%31");
+        // No entry in conversation_titles → field is null
+        assert!(
+            managed["conversation_title"].is_null(),
+            "conversation_title should be null when absent"
+        );
     }
 }
