@@ -3,6 +3,28 @@
 version = 4
 
 [[package]]
+name = "agtmux"
+version = "0.1.0"
+dependencies = [
+ "agtmux-core-v5",
+ "agtmux-daemon-v5",
+ "agtmux-gateway",
+ "agtmux-source-claude-hooks",
+ "agtmux-source-claude-jsonl",
+ "agtmux-source-codex-appserver",
+ "agtmux-source-poller",
+ "agtmux-tmux-v5",
+ "anyhow",
+ "chrono",
+ "clap",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "agtmux-core-v5"
 version = "0.1.0"
 dependencies = [
@@ -29,28 +51,6 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "agtmux-runtime"
-version = "0.1.0"
-dependencies = [
- "agtmux-core-v5",
- "agtmux-daemon-v5",
- "agtmux-gateway",
- "agtmux-source-claude-hooks",
- "agtmux-source-claude-jsonl",
- "agtmux-source-codex-appserver",
- "agtmux-source-poller",
- "agtmux-tmux-v5",
- "anyhow",
- "chrono",
- "clap",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
