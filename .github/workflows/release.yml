@@ -1,0 +1,179 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    outputs:
+      val: ${{ steps.plan.outputs.val }}
+      tag: ${{ steps.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install cargo-dist
+        uses: cargo-dist/cargo-dist-action@v0.28.0
+
+      - name: cargo dist plan
+        id: plan
+        shell: bash
+        run: |
+          cargo dist plan --output-format=json > dist-plan.json
+          echo "val=$(cat dist-plan.json)" >> "$GITHUB_OUTPUT"
+          echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload dist-plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-plan
+          path: dist-plan.json
+
+  build-local-artifacts:
+    name: build-local-artifacts (${{ matrix.target }})
+    needs: plan
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-14
+          - target: x86_64-apple-darwin
+            runner: macos-13
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install cargo-dist
+        uses: cargo-dist/cargo-dist-action@v0.28.0
+
+      - name: Build artifacts
+        shell: bash
+        run: cargo dist build --target=${{ matrix.target }} --artifacts=local
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-${{ matrix.target }}
+          path: dist/artifacts/
+
+  build-global-artifacts:
+    name: build-global-artifacts (linux-musl)
+    needs: plan
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install cargo-dist
+        uses: cargo-dist/cargo-dist-action@v0.28.0
+
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build aarch64-unknown-linux-musl
+        run: cross build --release --target aarch64-unknown-linux-musl --locked -p agtmux-runtime
+
+      - name: Build x86_64-unknown-linux-musl
+        run: cross build --release --target x86_64-unknown-linux-musl --locked -p agtmux-runtime
+
+      - name: Package artifacts
+        shell: bash
+        run: |
+          mkdir -p dist/artifacts
+          for target in aarch64-unknown-linux-musl x86_64-unknown-linux-musl; do
+            archive="agtmux-${{ needs.plan.outputs.tag }}-${target}.tar.gz"
+            tar -czf "dist/artifacts/${archive}" \
+              -C "target/${target}/release" agtmux
+          done
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-linux-musl
+          path: dist/artifacts/
+
+  host:
+    name: host
+    needs:
+      - plan
+      - build-local-artifacts
+      - build-global-artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cargo-dist
+        uses: cargo-dist/cargo-dist-action@v0.28.0
+
+      - name: Download dist-plan
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-plan
+          path: .
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: artifacts-*
+          path: dist/artifacts/
+          merge-multiple: true
+
+      - name: Create GitHub Release and upload artifacts
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: cargo dist host --steps=upload --steps=release
+
+  publish-homebrew-formula:
+    name: publish-homebrew-formula
+    needs: host
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cargo-dist
+        uses: cargo-dist/cargo-dist-action@v0.28.0
+
+      - name: Download dist-plan
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-plan
+          path: .
+
+      - name: Publish Homebrew formula to tap
+        shell: bash
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: cargo dist host --steps=announce
+
+  attest:
+    name: attest
+    needs:
+      - host
+      - build-local-artifacts
+      - build-global-artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: artifacts-*
+          path: dist/artifacts/
+          merge-multiple: true
+
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: 'dist/artifacts/*'

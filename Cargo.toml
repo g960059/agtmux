@@ -12,6 +12,12 @@ members = [
 ]
 resolver = "2"
 
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/g960059/agtmux"
+
 [workspace.dependencies]
 agtmux-core-v5 = { path = "crates/agtmux-core-v5" }
 agtmux-source-codex-appserver = { path = "crates/agtmux-source-codex-appserver" }
@@ -30,3 +36,16 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2"
 anyhow = "1"
+
+[workspace.metadata.dist]
+cargo-dist-version = "0.28.0"
+ci = ["github"]
+installers = ["homebrew", "shell"]
+tap = "g960059/homebrew-agtmux"
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+]
+pr-run-mode = "plan"

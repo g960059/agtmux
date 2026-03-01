@@ -87,7 +87,38 @@ T-139〜T-142 を統合し CLI を全面再設計（後方互換不要）。
   - Gate: `just verify` 724 → 751 tests PASS (+27 net for T-139b/c/d)
 
 ## DOING
-- [ ] (none)
+
+### Phase 7 — Distribution Infrastructure
+
+- [ ] T-D01 (P1) LICENSE + Cargo.toml メタデータ整備
+  - `LICENSE` (MIT) をルートに追加
+  - workspace `Cargo.toml`: `[workspace.package]` に `license`, `repository`, `edition` を追加
+  - `crates/agtmux-runtime/Cargo.toml`: `description`, `keywords`, `categories` を追加
+  - blocked_by: なし
+
+- [ ] T-D02 (P1) cargo-dist 設定
+  - workspace `Cargo.toml` に `[workspace.metadata.dist]` を追加
+  - targets: `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`
+  - installers: `["homebrew", "shell"]`, tap: `g960059/homebrew-agtmux`
+  - `cargo dist init` を実行し生成ファイルを確認
+  - blocked_by: T-D01
+
+- [ ] T-D03 (P1) GitHub Actions release workflow
+  - `.github/workflows/release.yml`: tag push → verify → cross-compile → GitHub Release → tap 更新 → smoke test
+  - `.github/workflows/ci.yml`: PR時 verify のみ
+  - Artifact Attestation を有効化
+  - blocked_by: T-D02
+
+- [ ] T-D04 (P1) Homebrew formula テンプレート
+  - `Formula/agtmux.rb` を作成（cargo-dist が自動生成する場合はその出力を確認）
+  - `test do` ブロックに `agtmux --version` を含める
+  - blocked_by: T-D02
+
+- [ ] T-D05 (P1) README Install セクション更新
+  - 冒頭に brew / curl / cargo の3チャネルを記載
+  - アンインストール手順を明記
+  - Windows はスコープ外と明記
+  - blocked_by: T-D03
 
 ## REVIEW
 - [ ] (none)

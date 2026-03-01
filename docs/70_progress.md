@@ -6,6 +6,45 @@
 
 ---
 
+## 2026-02-28 — Phase 7 Distribution 戦略決定
+
+### 背景
+
+Phase 6 CLI 再設計（T-139〜T-140）が完了し、CLI として使える状態になった。
+次のステップとして、AIツールが乱立する現市場ではインストールの容易さが採用の必須条件と判断し、
+配布戦略を序盤から固めることにした。
+
+Claude Orchestrator / Claude subagent / Codex (gpt-5.3-codex) の3者による独立した案を競合させ、
+以下の統合方針を決定した。
+
+### 決定: 配布チャネル
+
+| チャネル | 判断 | 理由 |
+|---------|------|------|
+| Homebrew tap (macOS) | **Primary** | ターゲット層の最短導線、`brew upgrade` でアップデート |
+| curl installer + musl binary (Linux) | **Secondary** | glibc 依存ゼロで全ディストロ対応 |
+| cargo install (Rust ユーザー) | **Tertiary** | crates.io publish で信頼感向上 |
+| homebrew/core | **Long-term** | ~75 stars + 30日公開実績で申請判断 |
+| Windows / winget / scoop | **Scope-out** | tmux 非対応のため明示的に除外 |
+
+### 決定: 設計上の制約
+
+- `self-update` は実装しない（Homebrew との衝突回避、Codex 提案採用）
+- `agtmux --version` は tmux なしでも成功すること（Homebrew `test do` の前提、Claude subagent 提案採用）
+- musl static binary で Linux 対応（Claude subagent 提案採用）
+- Artifact Attestation を初日から有効化（Codex 提案採用）
+
+### 決定: ツールチェーン
+
+- `cargo-dist`（axodotdev）を採用: Homebrew tap 自動更新・install.sh 生成・GitHub Actions 生成を一括カバー
+- musl cross-compile は `cross` クレートで Docker ベースビルドに統一
+
+### 詳細
+
+`docs/55_distribution.md` を新規作成し、完全な戦略を記録。
+
+---
+
 ## 2026-02-27 — Phase 4/5 スコープ決定 + Phase 6 CLI/TUI 方針
 
 ### 背景

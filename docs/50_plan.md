@@ -146,6 +146,22 @@
   - fzf パイプで tmux ウィンドウ/セッション切り替えが動作
   - 自分で日常的に使えるレベル
 
+## Phase 7: Distribution Infrastructure (新規)
+
+- Goal: 初日から `brew install g960059/tap/agtmux` が通る状態を作る。詳細 → `docs/55_distribution.md`
+- Design: cargo-dist + GitHub Actions + Homebrew tap + musl static binary
+- Deliverables:
+  - T-D01: LICENSE + Cargo.toml メタデータ整備（description, repository, license, keywords, categories）
+  - T-D02: cargo-dist 設定（`[workspace.metadata.dist]` + `cargo dist init`）
+  - T-D03: GitHub Actions release workflow（`.github/workflows/release.yml`）
+  - T-D04: Homebrew formula テンプレート（`Formula/agtmux.rb`）
+  - T-D05: README Install セクション更新（brew / curl / cargo の3チャネル）
+- Exit criteria:
+  - `git tag v0.1.0 && git push --tags` で GitHub Release + Homebrew formula 更新が自動実行される
+  - `brew install g960059/tap/agtmux && agtmux --version` が通ること
+  - README の Install セクションに3チャネル（brew / curl / cargo）が記載されていること
+  - `just verify` PASS
+
 ## Risks / Mitigations
 - Risk: docs 先行で実装が遅れる
   - Mitigation: `[MVP]` のみで Phase 1-2 を完了させる
