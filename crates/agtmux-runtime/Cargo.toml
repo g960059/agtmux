@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 description = "Real-time AI agent state monitor for tmux"
 keywords = ["tmux", "ai", "agent", "monitor", "cli"]
 categories = ["command-line-utilities", "development-tools"]
