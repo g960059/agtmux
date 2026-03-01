@@ -82,8 +82,35 @@ async fn main() -> anyhow::Result<()> {
             cmd_json::cmd_json(&socket_path, opts.health).await?;
         }
         cli::Command::SetupHooks(opts) => {
-            let path = setup_hooks::apply_hooks(&opts)?;
-            println!("hooks written to {}", path.display());
+            if opts.check {
+                let result = setup_hooks::check_hooks(&opts.scope)?;
+                let settings_path = setup_hooks::settings_path(&opts.scope)?;
+                println!("Hook configuration check ({}):", settings_path.display());
+                for (hook_type, status) in &result.statuses {
+                    let mark = match status {
+                        setup_hooks::HookStatus::Registered => "✓",
+                        setup_hooks::HookStatus::Missing => "✗",
+                    };
+                    let status_str = match status {
+                        setup_hooks::HookStatus::Registered => "registered",
+                        setup_hooks::HookStatus::Missing => "NOT registered",
+                    };
+                    println!("  {mark} {hook_type:<20} {status_str}");
+                }
+                if result.all_registered() {
+                    println!("All {} hooks registered.", result.statuses.len());
+                } else {
+                    let missing = result.missing();
+                    eprintln!(
+                        "{} hook(s) missing. Run `agtmux setup-hooks` to fix.",
+                        missing.len()
+                    );
+                    std::process::exit(1);
+                }
+            } else {
+                let path = setup_hooks::apply_hooks(&opts)?;
+                println!("hooks written to {}", path.display());
+            }
         }
     }
 

@@ -21,6 +21,7 @@ use agtmux_gateway::latency_window::{LatencyEvaluation, LatencyWindow};
 use agtmux_gateway::source_registry::SourceRegistry;
 use agtmux_gateway::trust_guard::TrustGuard;
 use agtmux_source_claude_hooks::source::SourceState as ClaudeSourceState;
+use agtmux_source_claude_jsonl::discovery::{PaneDiscoveryHint, discovery_from_transcript_path};
 use agtmux_source_claude_jsonl::source::ClaudeJsonlSourceState;
 use agtmux_source_claude_jsonl::watcher::SessionFileWatcher;
 use agtmux_source_codex_appserver::source::SourceState as CodexSourceState;
@@ -74,6 +75,9 @@ pub struct DaemonState {
     /// Codex: thread_id → name/preview from thread/list payload.
     /// Claude: session_key → title from custom-title JSONL events (T-135b).
     pub conversation_titles: std::collections::HashMap<String, String>,
+    /// pane_id → transcript JSONL path, populated by SessionStart hooks.
+    /// Used for P1 (highest-priority) JSONL discovery in poll_tick.
+    pub transcript_path_hints: std::collections::HashMap<String, std::path::PathBuf>,
 }
 
 impl DaemonState {
@@ -136,6 +140,7 @@ impl DaemonState {
             codex_appserver_had_connection: false,
             codex_supervisor: SupervisorTracker::new(RestartPolicy::default()),
             conversation_titles: std::collections::HashMap::new(),
+            transcript_path_hints: std::collections::HashMap::new(),
         }
     }
 }
@@ -516,12 +521,7 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
             .map(|s| (s.pane_id.as_str(), s.current_cmd.as_str()))
             .collect();
 
-        let candidate_pane_cwds: Vec<(
-            String,
-            String,
-            Option<u64>,
-            Option<chrono::DateTime<chrono::Utc>>,
-        )> = panes
+        let candidate_pane_cwds: Vec<PaneDiscoveryHint> = panes
             .iter()
             .filter(|p| {
                 let hint = snapshot_hint.get(p.pane_id.as_str()).copied().flatten();
@@ -545,17 +545,35 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
                     .get(&p.pane_id)
                     .map(|(g, b)| (Some(g), Some(b)))
                     .unwrap_or((None, None));
-                (
-                    p.pane_id.clone(),
-                    p.current_path.clone(),
-                    pane_gen,
-                    pane_birth,
-                )
+                PaneDiscoveryHint {
+                    pane_id: p.pane_id.clone(),
+                    cwd: p.current_path.clone(),
+                    pane_generation: pane_gen,
+                    pane_birth_ts: pane_birth,
+                    pane_pid: p.pane_pid,
+                }
             })
             .collect();
 
         if !candidate_pane_cwds.is_empty() {
-            let discoveries = ClaudeJsonlSourceState::discover_sessions(&candidate_pane_cwds);
+            // P3: CWD-based discovery
+            let mut discoveries = ClaudeJsonlSourceState::discover_sessions(&candidate_pane_cwds);
+
+            // P1: transcript_path hints (SessionStart hook payload) override P3.
+            for hint in &candidate_pane_cwds {
+                if let Some(hint_path) = st.transcript_path_hints.get(&hint.pane_id) {
+                    if let Some(hint_disc) = discovery_from_transcript_path(
+                        &hint.pane_id,
+                        hint_path,
+                        hint.pane_generation,
+                        hint.pane_birth_ts,
+                    ) {
+                        // Replace or append: remove any CWD-based discovery for this pane.
+                        discoveries.retain(|d| d.pane_id != hint.pane_id);
+                        discoveries.push(hint_disc);
+                    }
+                }
+            }
             // Use Utc::now() (not poll_tick's `now`) so the bootstrap event's observed_at
             // is guaranteed to be AFTER the Codex App Server events (which also use Utc::now()
             // during their async network call in Step 6a).  This ensures
@@ -627,6 +645,32 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
         },
         now,
     );
+
+    // 8b-hint: Cache transcript_path from SessionStart for P1 JSONL discovery.
+    // Also evict stale hints on SessionEnd.
+    for event in &claude_response.events {
+        if let Some(pane_id) = &event.pane_id {
+            match event.event_type.as_str() {
+                "lifecycle.start" => {
+                    if let Some(path_str) = event
+                        .payload
+                        .get("transcript_path")
+                        .and_then(|v| v.as_str())
+                    {
+                        if !path_str.is_empty() {
+                            st.transcript_path_hints
+                                .insert(pane_id.clone(), std::path::PathBuf::from(path_str));
+                        }
+                    }
+                }
+                "lifecycle.end" => {
+                    st.transcript_path_hints.remove(pane_id);
+                }
+                _ => {}
+            }
+        }
+    }
+
     st.gateway
         .ingest_source_response(SourceKind::ClaudeHooks, claude_response);
 

@@ -86,6 +86,62 @@ T-139〜T-142 を統合し CLI を全面再設計（後方互換不要）。
   - 8 + 14 = 22 new tests
   - Gate: `just verify` 724 → 751 tests PASS (+27 net for T-139b/c/d)
 
+## TODO
+
+### Phase 8 — Sources Enhancement
+
+OSC シーケンス調査（2026-03-01）と外部レポート評価に基づき合意した改善方針。
+方針詳細: `docs/70_progress.md` (2026-03-01 エントリ)、`docs/80_decisions/ADR-20260301-osc-architecture.md`。
+Phase 7 (Distribution) と独立して実施可能。
+
+- [x] T-E01 (P1) Hooks coverage expansion — DONE (2026-03-01)
+  - `translate.rs`: 6 new hook type mappings (SessionStart/SessionEnd/PermissionRequest/UserPromptSubmit/PostToolUseFailure/PreCompact)
+  - `setup_hooks.rs`: HOOK_TYPES 5→11
+  - `poll_loop.rs`: transcript_path_hints in DaemonState, Step 8b scan + P1 overlay in Step 6b
+  - `discovery.rs`: `discovery_from_transcript_path()` public helper
+  - Gate: `just verify` PASS (760+ tests)
+
+- [x] T-E02 (P2) JSONL fd-based discovery — DONE (2026-03-01)
+  - `discovery.rs`: `PaneDiscoveryHint` struct, `discover_jsonl_via_lsof()`, updated `discover_sessions()` signature
+  - `source.rs`: updated call site
+  - `poll_loop.rs`: Step 6b uses `Vec<PaneDiscoveryHint>` with pane_pid
+  - Priority chain: P1 (transcript_path) > P2 (lsof) > P3 (CWD)
+  - Gate: `just verify` PASS
+
+- [x] T-E03 (P2) setup-hooks coverage verification + check subcommand — DONE (2026-03-01)
+  - `cli.rs`: `--check` flag on SetupHooksOpts
+  - `setup_hooks.rs`: `HookStatus`, `HookCheckResult`, `check_hooks()`
+  - `main.rs`: branch on `opts.check`
+  - Gate: `just verify` PASS
+
+- [ ] T-E03a (P3) check_hooks() integration test — follow-up from RP review
+  - **目的**: `check_hooks()` を temp settings.json に対して呼び出す integration test (partially registered case)
+  - **変更対象**: `crates/agtmux-runtime/src/setup_hooks.rs` test module
+  - blocked_by: T-E03
+
+- [ ] T-E03b (P3) poll_loop P1 transcript_path hint integration test — follow-up from RP review
+  - **目的**: SessionStart hook event が transcript_path_hints を populate し、次 tick で JSONL discovery に使われることを確認する poll_loop integration test
+  - **変更対象**: `crates/agtmux-runtime/src/poll_loop.rs` test module
+  - blocked_by: T-E01
+
+- [ ] T-E04 (P3) OSC Tap source — C-017 `agtmux-source-osc-tap` [Post-MVP]
+  - **目的**: tmux `pipe-pane` 経由で OSC 9;4 progress bar シグナルを取得する semi-deterministic source
+  - **前提条件**: tmux 3.3+、pipe-pane 先占競合なし（capability-gated）
+  - **変更対象**:
+    - 新規 crate `crates/agtmux-source-osc-tap/`
+      - `OscTapManager`: pane 単位の pipe-pane 起動/停止/先占チェック
+      - `OscParser`: OSC 9;4 バイトストリーム解析（BEL `\x07` / ST `\x1b\\` 両終端対応）
+      - `OscTapSource`: SourceEventV2 への変換（confidence: 0.92）
+    - `crates/agtmux-core-v5/src/types.rs`: `SourceKind::OscTap` 追加
+    - `crates/agtmux-runtime/src/poll_loop.rs`: capability check → tap 起動/停止 wiring
+    - source rank: `hooks (0) > jsonl (1) > osc_tap (2) > poller (3)`
+  - **制約**:
+    - OSC 133 は採用しない（Claude Code が emit しない、issue #26235 open）
+    - OSC 不在は negative evidence に使用しない
+    - pipe-pane 先占競合時は graceful skip して poller fallback
+  - **Gate**: `just verify` PASS + OSC 9;4 シーケンスのユニットテスト PASS
+  - blocked_by: T-E01, T-E02
+
 ## DOING
 
 ### Phase 7 — Distribution Infrastructure

@@ -62,6 +62,15 @@
   - **Fallback path**: App Server 利用不可時のみ、tmux capture から `codex exec --json` の NDJSON を parse
   - **T-119**: `thread/list` の `cwd` パラメータで tmux pane cwd とマッチングし thread ↔ pane 対応を確立
 - Claude: `agtmux-source-claude-hooks`
+  - **登録済み hook events**: `PreToolUse`, `PostToolUse`, `Notification`, `Stop`, `SubagentStop`
+  - **T-E01 追加対象 hook events**（Phase 8）:
+    - `SessionEnd` → `lifecycle.end` + `reason` フィールド（即時セッション終了検出、15s void 解消）
+    - `PermissionRequest` → `activity.waiting_approval`（WaitingApproval の deterministic 化）
+    - `SessionStart` → `lifecycle.start` + `transcript_path` を JSONL source に転送（primary discovery）
+    - `UserPromptSubmit` → `activity.user_input`（Running の upstream 検出）
+    - `PostToolUseFailure` → `lifecycle.error` + `is_interrupt` フィールド
+    - `PreCompact` → `lifecycle.compacting`（JSONL watcher との compaction タイミング調整）
+  - **Setup**: `agtmux setup-hooks` で `~/.claude/settings.json` を自動更新（ゼロ摩擦化）
 
 #### Reuse strategy (from v4)
 - Reuse as crate/module:
@@ -168,6 +177,9 @@ pub struct SourceCursorState {
   - Claude: `hooks (rank 0) > jsonl (rank 1) > poller (rank 2)`
   - Note: Codex appserver は公式 API (`docs/codex-appserver-api-reference.md`) を使用。独自プロトコルは禁止。
   - Note: Claude JSONL は hooks 未登録環境での deterministic fallback。hooks が有効な場合は hooks が rank 優先。
+- Source rank policy (Post-MVP, after T-E04):
+  - Claude: `hooks (rank 0) > jsonl (rank 1) > osc_tap (rank 2) > poller (rank 3)`
+  - Note: osc_tap は capability-gated（tmux 3.3+）。利用不可環境では rank から除外される。
 - Presence rule:
   - deterministic/heuristic 切替は `presence` を変更しない
   - `presence=managed` は agent session がある限り維持
@@ -511,14 +523,24 @@ Claude Code は hooks を登録しなくても、プロジェクト単位の JSO
 │   └── ...
 ```
 
-##### CWD-based Session Discovery
+##### Session Discovery — 3-tier Priority (T-E01/T-E02 で拡張)
+
 ```
-tmux pane cwd (from list_panes)
-  → canonicalize() (symlink/worktree 解決)
-  → encode path: /Users/vm/foo → -Users-vm-foo
-  → ~/.claude/projects/{encoded}/sessions-index.json
-  → entries[].projectPath == canonical_cwd && !isSidechain && modified 最新
-  → fullPath → JSONL file
+Priority 1 (Primary): transcript_path from hook payload
+  SessionStart hook payload.transcript_path → 直接 JSONL ファイルパス
+  → hooks が登録済みの場合は sessions-index.json parse 不要
+  → pane_id は hook payload.cwd と tmux pane cwd の照合で確定
+
+Priority 2 (Secondary): fd-based discovery (T-E02)
+  pane_pid (from TmuxPaneInfo.pane_pid)
+    macOS: lsof -p {pid} -F n | grep "\.jsonl$"
+    Linux: /proc/{pid}/fd/* readlink scan
+  → 複数 hit: mtime 最新を選択
+  → ambiguous CWD 問題を根本解決（プロセスが開いているファイルを直接特定）
+
+Priority 3 (Tertiary, existing): CWD-based discovery
+  tmux pane cwd → canonicalize() → encode path → sessions-index.json lookup
+  → Fallback。hooks 未登録 + fd 取得不可環境でのみ使用
 ```
 
 Poller が Claude と検出した pane のみ JSONL lookup を行う。
@@ -533,8 +555,14 @@ Poller が Claude と検出した pane のみ JSONL lookup を行う。
 - `"user"` → `"activity.user_input"` (Running)
 - `"tool_use"` → `"activity.running"` (Running)
 - `"tool_result"` → `"activity.tool_complete"` (Idle)
+- `"progress"` → `"activity.running"` (Running) — hook 実行中のリアルタイムシグナル（実装済み）
 - `"assistant"` → `"activity.idle"` (Idle)
+- `"custom-title"` → title resolver へ転送（`SessionFileWatcher.set_title()`、実装済み）
 - `tier = Deterministic`, `confidence = 1.0`, `provider = Claude`, `source_kind = ClaudeJsonl`
+
+##### Additional binding fields (全 record 共通)
+- `cwd` フィールド: JSONL record 内の CWD で pane binding を補強（sessions-index.json 不要の direct match）
+- `gitBranch` フィールド: pane の git branch との照合で binding 偽陽性を低減（補助シグナル）
 
 ##### poll_tick Step 6b
 ```
@@ -622,6 +650,60 @@ resolver::resolve (tier 選択) → last_real_activity 更新 → select_winning
 - `project_pane()` で `event.event_type` → `parse_activity_state()` で投影
 - `list_panes` API 応答に `activity_state` と `provider` フィールドを追加
 - 既存の session-level activity_state に加え、pane-level でも Running/Idle/WaitingApproval 等が参照可能に
+
+#### OSC Tap Integration (Post-MVP — C-017, T-E04)
+
+##### 背景と制約
+
+- Claude Code が emit する OSC シーケンス: `OSC 9;4` (progress bar), `OSC 9` (notification), `OSC 2/0` (title), `OSC 8` (hyperlinks)
+- **OSC 133 は採用しない**: Claude Code が現時点で emit しない（GitHub issue #26235: open feature request）。OSC 133 は bash/zsh の shell integration スクリプトが emit するもので、TUI アプリ（Claude Code）は emit 対象外。
+- `capture-pane -p` は escape sequence を含まない → `pipe-pane` でバイトストリームを取得する必要がある
+
+##### OSC 9;4 シグナル
+
+Claude Code は処理中に以下を emit:
+```
+\033]9;4;3;0\007   state=3 (indeterminate) → Claude is thinking / running
+\033]9;4;0;0\007   state=0 (remove)        → Claude done / idle
+\033]9;4;2;0\007   state=2 (error)         → error state
+```
+
+##### pipe-pane による取得
+
+```
+// pipe-pane 起動: poller が Claude pane と判定した時点
+tmux pipe-pane -t {pane_id} 'cat >&{agtmux_fifo_fd}'
+
+// OscTapManager per-pane 管理
+pub struct OscTapManager {
+    active_taps: HashMap<String, OscTapHandle>, // pane_id → tap
+    event_tx: Sender<(String, OscEvent)>,
+}
+// pane close 時に自動 untap
+// 先占競合チェック: pipe-pane は同時に 1 つしか設定できない
+//   → 既存 pipe-pane があれば skip、poller fallback を使用
+```
+
+##### Source rank (Post-MVP)
+
+```
+hooks (rank 0)    deterministic — lifecycle/activity
+jsonl (rank 1)    deterministic — file-based
+osc_tap (rank 2)  semi-deterministic — OSC 9;4 signal (confidence: 0.92)
+poller (rank 3)   heuristic — capture-based fallback
+```
+
+##### Capability gate
+
+- `capability_registry` に `osc_tap: bool` を宣言
+- tmux version < 3.3: `osc_tap = false`（pipe-pane 動作不安定）
+- pipe-pane 先占競合: `osc_tap = false`（graceful skip）
+- OSC 9;4 不在 = **negative evidence に使用しない**（tmux `allow-passthrough` 設定や端末種別で emit されない環境が存在する）
+
+##### 重要な警告
+
+- tmux pipe-pane は pane あたり 1 プロセスのみ設定可能。既存ユーザーが独自 pipe-pane を使用している場合は osc_tap を自動無効化する。
+- 将来 Claude Code が OSC 133 を実装した場合（issue #26235 resolve 時）は、osc_tap の rank 昇格と hooks との統合を ADR で再検討する。
 
 ## Appendix (Post-MVP Hardening; non-blocking for Phase 1-2)
 

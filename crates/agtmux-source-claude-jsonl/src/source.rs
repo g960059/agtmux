@@ -10,7 +10,7 @@ use agtmux_core_v5::types::{
 use chrono::{DateTime, Utc};
 use tracing::warn;
 
-use crate::discovery::{self, SessionDiscovery};
+use crate::discovery::{self, PaneDiscoveryHint, SessionDiscovery};
 use crate::translate::{self, ClaudeJsonlLine, TranslateContext};
 use crate::watcher::SessionFileWatcher;
 
@@ -215,12 +215,9 @@ impl ClaudeJsonlSourceState {
         events
     }
 
-    /// Discover sessions for given pane CWDs.
-    #[allow(clippy::type_complexity)]
-    pub fn discover_sessions(
-        pane_cwds: &[(String, String, Option<u64>, Option<DateTime<Utc>>)],
-    ) -> Vec<SessionDiscovery> {
-        discovery::discover_sessions(pane_cwds)
+    /// Discover sessions for given pane hints.
+    pub fn discover_sessions(hints: &[PaneDiscoveryHint]) -> Vec<SessionDiscovery> {
+        discovery::discover_sessions(hints)
     }
 }
 

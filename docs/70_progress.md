@@ -1920,6 +1920,106 @@ Review B-1 で指摘：E2E コントラクトスクリプトがこれらの廃�
 
 ---
 
+## 2026-03-01 — OSC シーケンス調査と Phase 8 Sources Enhancement 方針決定
+
+### 背景
+
+Claude Code の OSC シーケンス実態を調査し、2 つの外部レポート（agtmux-architecture-proposal.md、claude_osc_agtmux_assessment_2026-03-01.md）を評価した。
+調査・評価内容: hooks 新イベント群、JSONL 新 record types、OSC 9;4 via pipe-pane、fd-based JSONL discovery。
+
+### 調査で確認された Claude Code OSC シーケンス
+
+| Sequence | 内容 | agtmux での利用可否 |
+|----------|------|------------------|
+| OSC 9;4 | Progress bar (state=3: thinking, state=0: done) | ✅ pipe-pane 経由で取得可（Post-MVP） |
+| OSC 9 | Desktop notification | △ tmux passthrough 要 |
+| OSC 2/0 | Terminal title (`/rename` 時のみ) | tmux `pane_title` 変数経由でアクセス可 |
+| OSC 8 | Clickable hyperlinks | ✗ tmux 内 broken、検出用途なし |
+| **OSC 133** | **Shell integration** | **✗ Claude Code が emit しない（issue #26235: open FR）** |
+
+### 外部レポートの評価
+
+**Architecture Proposal の問題点**:
+- OSC 133 を「Claude Code が emit するシーケンス」として rank-0 に置いているが、**これは事実誤認**。
+  OSC 133 は bash/zsh/fish の shell integration スクリプトが emit するもの。Claude Code 自体は emit しない。
+  GitHub issue #26235 が「OSC 133 を実装してほしい」という open feature request として存在する（＝現在は出ていない）。
+- `pipe-pane` 実験で OSC 133 を取得できたとする結果は、pane 内の shell integration スクリプトによるものと推定。
+- fd-based discovery は本物の洞察。Hooks deprecated 方針は premature。
+
+**OSC Assessment Report**: 技術的に正確。OSC 133 が open feature request であることを正しく把握。保守的だが妥当。
+
+### 合意した方針（Phase 8 Sources Enhancement）
+
+1. **Hooks は維持・拡張**
+   - 新 hook events 追加（SessionEnd, PermissionRequest, SessionStart+transcript_path, UserPromptSubmit, PostToolUseFailure, PreCompact）
+   - `agtmux setup-hooks` でゼロ摩擦化（手動編集不要）
+   - Hooks が不可欠な理由: WaitingApproval の deterministic 化、SessionEnd による 15s void 解消、transcript_path による JSONL direct binding
+
+2. **JSONL: fd-based discovery を parallel path として追加**
+   - Priority: transcript_path (P1) → fd-based/lsof/procfs (P2) → CWD-based (P3, existing fallback)
+   - 同一 CWD の複数 pane 問題を根本解決
+
+3. **OSC 9;4 via pipe-pane を Post-MVP で optional semi-deterministic source として追加**
+   - rank: hooks(0) > jsonl(1) > osc_tap(2) > poller(3)
+   - capability-gated（tmux 3.3+、pipe-pane 先占確認）
+   - OSC 不在は negative evidence に使用しない
+
+4. **OSC 133 は採用しない**（issue #26235 が close されるまで）
+
+### 既実装の確認
+
+調査中に以下が Phase 8 相当の実装として既に完了していることを確認:
+- `progress` record → `"activity.running"` 変換: JSONL source 実装済み
+- `custom-title` 抽出: T-135b で実装済み
+- `setup-hooks` CLI command: T-112 で実装済み
+
+### 関連 docs 更新（本日）
+
+- `docs/30_architecture.md`: C-017 `agtmux-source-osc-tap` [Post-MVP] 追加
+- `docs/20_spec.md`: FR-053〜FR-060 追加、FR-030 に Post-MVP rank 追記
+- `docs/40_design.md`: 新 hooks 一覧、3-tier JSONL discovery、OSC Tap セクション追加
+- `docs/60_tasks.md`: Phase 8 タスク T-E01〜T-E04 追加
+- `docs/80_decisions/ADR-20260301-osc-architecture.md`: 新規作成
+
+## 2026-03-01 — Phase 8 T-E01〜T-E03 実装完了
+
+### 概要
+
+Phase 8 Sources Enhancement の MVP タスク（T-E01、T-E02、T-E03）を実装。
+Review Pack: `docs/85_reviews/RP-TE01-TE02-TE03-sources-enhancement.md` → verdict: **GO_WITH_CONDITIONS**
+（2 条件 = T-E03a / T-E03b として follow-up タスク登録済み、次 PR で対応）
+
+### 変更内容
+
+| タスク | ファイル | 変更内容 |
+|--------|---------|---------|
+| T-E01 | `translate.rs` | 6 new hook type mappings (SessionStart/End/PermissionRequest/UserPromptSubmit/PostToolUseFailure/PreCompact) + 6 test cases |
+| T-E01 | `setup_hooks.rs` | HOOK_TYPES 5→11 |
+| T-E01 | `discovery.rs` | `discovery_from_transcript_path()` 追加、`session_id_from_jsonl_path` を public 化 |
+| T-E01 | `poll_loop.rs` | `DaemonState.transcript_path_hints` 追加、Step 8b で SessionStart/End をスキャン、Step 6b で P1 overlay |
+| T-E02 | `discovery.rs` | `PaneDiscoveryHint` struct 追加、`discover_jsonl_via_lsof()` 追加（P2 tier）、`discover_sessions()` signature 更新 |
+| T-E02 | `source.rs` | `discover_sessions` call site 更新 |
+| T-E02 | `poll_loop.rs` | Step 6b を `Vec<PaneDiscoveryHint>` に更新、pane_pid を populate |
+| T-E03 | `cli.rs` | `SetupHooksOpts` に `--check` フラグ追加 |
+| T-E03 | `setup_hooks.rs` | `HookStatus`、`HookCheckResult`、`check_hooks()` 追加 |
+| T-E03 | `main.rs` | SetupHooks arm で `opts.check` 分岐 |
+
+### Gate 証跡
+
+- `just verify`: PASS（760+ tests, 0 failed）
+- `cargo fmt --check`: PASS
+- `cargo clippy -D warnings`: PASS
+
+### Discovery priority 確定
+
+```
+P1: transcript_path (SessionStart hook payload) — poll_loop.rs Step 6b overlay
+P2: fd-based (lsof -F n -p {pane_pid})         — discover_sessions 内、P3 の前
+P3: CWD-based (sessions-index + latest .jsonl)  — discover_sessions フォールバック
+```
+
+---
+
 ## 2026-02-28 — T-135b: Claude JSONL Conversation Title Extraction
 
 ### 概要

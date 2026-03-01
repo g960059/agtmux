@@ -106,7 +106,7 @@
 - FR-027 `[MVP]`: title-only guard を適用し、title_match のみ（process_hint/cmd_match/capture_match いずれも false）の場合は `current_cmd` に関係なく managed 昇格させない。pane_title は stale になりやすいため、単独シグナルとしては信頼できない。
 - FR-028 `[MVP]`: heuristic `no-agent` は連続2観測で `unmanaged` へ降格する。deterministic signature が fresh の間は `managed` を維持する。
 - FR-029 `[MVP]`: poller由来の状態補正は `8s` running昇格窓、`45s` running降格窓、`max(4s,2*poll_interval)` idle安定窓を採用する。
-- FR-030 `[MVP]`: source rank は provider別に固定し、MVPでは `Codex: appserver > poller`、`Claude: hooks > jsonl > poller` とする（将来 source 追加時は rank を拡張）。
+- FR-030 `[MVP]`: source rank は provider別に固定し、MVPでは `Codex: appserver > poller`、`Claude: hooks > jsonl > poller` とする（将来 source 追加時は rank を拡張）。Post-MVP では `Claude: hooks (0) > jsonl (1) > osc_tap (2) > poller (3)` に拡張する（FR-060）。
 - FR-031 `[MVP]`: `managed/unmanaged` 判定に env 変数の存在を必須条件として使わない（補助シグナルとしてのみ許可）。
 - FR-031a `[MVP]`: daemon の `apply_events()` はイベントを `pane_id` でグループ化し（fallback: `session_to_pane` → `session_key`）、同一 pane の全ソースイベントが同一 resolver batch で処理されることを保証する。`session_key` 単位のグループ化は禁止する（異なる source が異なる `session_key` を使うため、cross-source tier 抑制が機能しない）。
 - FR-032 `[MVP]`: poller fallback の受入基準は固定し、リリース可否は `weighted F1 >= 0.85` かつ `waiting recall >= 0.85` を必須とする。
@@ -131,6 +131,14 @@
 - FR-050 `[MVP]`: context 集約は `cwd` と `git branch` を**フィールド単位で独立判定**する。各フィールドで「対象グループの全 pane が正規化済み同一値」なら header に単一値表示し、それ以外（不一致/欠損混在）は `<mixed>` とする（fail-closed）。`list-panes` の `auto` では、session/window header 行は常に集約 context を表示し、pane 行のみが差分ルールの対象になる。pane suffix では、比較基準 header（直近 window header、fallback: session header）に対して差分があるフィールドのみ表示し、基準が `<mixed>` のフィールドは pane 側値を表示する（欠損は `<unknown>`）。mixed 表示は `[field=<mixed>]` 形式で出す。ガイダンス ` (use --context=full to expand per-pane values)` は同一 session block で 1 回だけ表示し、表示位置は「session 行に mixed がある場合は session 行、ない場合は最初の mixed window 行」とする。
 - FR-051 `[MVP]`: pane summary（直近通知/短い要約）は `list-panes` の `--summary` opt-in とし、agent が明示的に出力した構造化 summary（AppServer/hooks/JSONL 経由）由来のみ表示対象とする。capture/title 由来の推測 summary は表示しない。summary は pane 行の直下に 1 行で表示し、対応 pane 行より 2 spaces 深いインデントとする。summary を持たない pane では空行/プレースホルダを出さず省略する。`--summary` 指定時に全 pane で summary が欠損している場合は全出力の末尾に 1 回だけ `(no agent summaries available)` を表示し、一部のみ欠損の場合は footer を出さない。
 - FR-052 `[MVP]`: v5 CLI は `--path` / `-p` を提供しない。context 詳細表示は `--context=full` のみを正式入口とする。`--path` / `-p` が入力された場合は fail-closed でエラーを返し、`hint: use --context=full` を表示する。`-p` は v5 の list 系コマンドでは**未割り当て**とし、別意味の short flag として再利用しない（根本方針: 表示密度制御は long option を唯一入口にする）。
+- FR-053 `[MVP]`: Claude hooks source は `SessionEnd` イベントを登録し、session 終了を即時検出する。reason フィールド（`clear`, `logout`, `prompt_input_exit`, `bypass_permissions_disabled`, `other`）を payload に含める。これにより deterministic session 終了検出の void（従来最大 60s）を秒以下に短縮する。
+- FR-054 `[MVP]`: Claude hooks source は `PermissionRequest` イベントを登録し、`activity_state = WaitingApproval` を deterministic に検出する。tool_name フィールドにより「どのツールの許可待ちか」まで確定的に分かる（従来は capture-based heuristic のみ）。
+- FR-055 `[MVP]`: Claude hooks source は `SessionStart` イベントを登録する。payload の `transcript_path` フィールドを Claude JSONL source に転送し、JSONL watcher の primary discovery path として使用する（CWD-based discovery に優先）。`source` フィールド（`startup`, `resume`, `clear`, `compact`）により session の起動種別を区別できる。
+- FR-056 `[MVP]`: Claude hooks source は `UserPromptSubmit` イベントを登録し、ユーザー入力直後の Running 状態を deterministic に検出する（JSONL 書き込みより upstream での検出）。
+- FR-057 `[MVP]`: Claude hooks source は `PostToolUseFailure` イベントを登録し、ツール実行失敗による Error 状態を deterministic に検出する。`is_interrupt` フィールドによりユーザー中断 vs ツールエラーを区別できる。
+- FR-058 `[MVP]`: Claude JSONL source は fd-based discovery（macOS: `lsof -p {pid} -F n`、Linux: `/proc/{pid}/fd/*` readlink）を CWD-based discovery と並走する secondary discovery path として追加する。同一 CWD に複数 pane が存在する場合の ambiguity 問題を根本解決する。
+- FR-059 `[MVP]`: Claude JSONL source の discovery priority は以下の順とする：Primary: hook payload `transcript_path`（直接パス）→ Secondary: fd-based discovery → Tertiary: CWD-based discovery（既存、fallback）。Primary が利用可能な場合は sessions-index.json の parse が不要になる。
+- FR-060 `[Post-MVP]`: OSC Tap source（C-017）は tmux `pipe-pane` 経由で PTY バイトを取得し、Claude Code が emit する `OSC 9;4` (progress bar) シーケンスを semi-deterministic source として提供する。source rank は `hooks (0) > jsonl (1) > osc_tap (2) > poller (3)`。capability-gated（tmux 3.3+、pipe-pane 先占確認）。OSC 不在は negative evidence として使用しない。**OSC 133 は Claude Code が現時点で emit しないため採用しない**（GitHub issue #26235: open feature request）。
 
 ## Non-functional Requirements
 - Phase gate:

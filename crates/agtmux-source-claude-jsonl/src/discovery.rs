@@ -11,6 +11,18 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use tracing::warn;
 
+/// Input hint for a candidate pane during JSONL session discovery.
+#[derive(Debug, Clone)]
+pub struct PaneDiscoveryHint {
+    pub pane_id: String,
+    pub cwd: String,
+    pub pane_generation: Option<u64>,
+    pub pane_birth_ts: Option<chrono::DateTime<chrono::Utc>>,
+    /// PID of the process running in this pane (tmux `#{pane_pid}`).
+    /// Used for fd-based P2 discovery via lsof.
+    pub pane_pid: Option<u32>,
+}
+
 /// Entry in the `sessions-index.json` file.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -66,13 +78,8 @@ pub fn encode_path(path: &str) -> String {
         .collect()
 }
 
-/// Discover JSONL session files for the given pane CWDs.
-///
-/// `pane_cwds` is a list of `(pane_id, canonical_cwd, pane_generation, pane_birth_ts)`.
-#[allow(clippy::type_complexity)]
-pub fn discover_sessions(
-    pane_cwds: &[(String, String, Option<u64>, Option<DateTime<Utc>>)],
-) -> Vec<SessionDiscovery> {
+/// Discover JSONL session files for the given pane hints.
+pub fn discover_sessions(hints: &[PaneDiscoveryHint]) -> Vec<SessionDiscovery> {
     let claude_projects_dir = match home_dir() {
         Some(home) => home.join(".claude").join("projects"),
         None => {
@@ -81,21 +88,20 @@ pub fn discover_sessions(
         }
     };
 
-    discover_sessions_in_projects_dir(pane_cwds, &claude_projects_dir)
+    discover_sessions_in_projects_dir(hints, &claude_projects_dir)
 }
 
-#[allow(clippy::type_complexity)]
 fn discover_sessions_in_projects_dir(
-    pane_cwds: &[(String, String, Option<u64>, Option<DateTime<Utc>>)],
+    hints: &[PaneDiscoveryHint],
     claude_projects_dir: &Path,
 ) -> Vec<SessionDiscovery> {
     // Resolve canonical CWD once per pane to avoid redundant filesystem calls.
-    let canonical_cwds: Vec<String> = pane_cwds
+    let canonical_cwds: Vec<String> = hints
         .iter()
-        .map(|(_, cwd, _, _)| {
-            std::fs::canonicalize(cwd)
+        .map(|hint| {
+            std::fs::canonicalize(&hint.cwd)
                 .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| cwd.clone())
+                .unwrap_or_else(|_| hint.cwd.clone())
         })
         .collect();
 
@@ -109,10 +115,27 @@ fn discover_sessions_in_projects_dir(
 
     let mut results = Vec::new();
 
-    for ((pane_id, _cwd, pane_gen, pane_birth), canonical_cwd) in
-        pane_cwds.iter().zip(&canonical_cwds)
-    {
+    for (hint, canonical_cwd) in hints.iter().zip(&canonical_cwds) {
         let cwd_candidate_count = *cwd_count.get(canonical_cwd.as_str()).unwrap_or(&1);
+
+        // P2: fd-based discovery (lsof) — higher confidence than CWD-based
+        if let Some(pane_pid) = hint.pane_pid {
+            if let Some((session_id, jsonl_path)) =
+                discover_jsonl_via_lsof(pane_pid, claude_projects_dir)
+            {
+                results.push(SessionDiscovery {
+                    pane_id: hint.pane_id.clone(),
+                    session_id,
+                    jsonl_path,
+                    pane_generation: hint.pane_generation,
+                    pane_birth_ts: hint.pane_birth_ts,
+                    cwd_candidate_count: 1, // fd-based is unambiguous
+                });
+                continue; // skip P3 for this pane
+            }
+        }
+
+        // P3: CWD-based discovery (existing fallback)
         let project_dir = claude_projects_dir.join(encode_path(canonical_cwd));
         let Some((session_id, jsonl_path)) = discover_project_session(&project_dir, canonical_cwd)
         else {
@@ -120,11 +143,11 @@ fn discover_sessions_in_projects_dir(
         };
 
         results.push(SessionDiscovery {
-            pane_id: pane_id.clone(),
+            pane_id: hint.pane_id.clone(),
             session_id,
             jsonl_path,
-            pane_generation: *pane_gen,
-            pane_birth_ts: *pane_birth,
+            pane_generation: hint.pane_generation,
+            pane_birth_ts: hint.pane_birth_ts,
             cwd_candidate_count,
         });
     }
@@ -248,13 +271,61 @@ fn discover_latest_jsonl_file(project_dir: &Path) -> Option<(String, PathBuf)> {
     best.map(|(path, _)| (session_id_from_jsonl_path(&path), path))
 }
 
+/// Attempt to find an open Claude Code JSONL file for a given PID using `lsof`.
+///
+/// Returns the first matching `(session_id, jsonl_path)` found.
+/// Returns `None` if lsof is not available, fails, or finds no JSONL files.
+fn discover_jsonl_via_lsof(pid: u32, claude_projects_dir: &Path) -> Option<(String, PathBuf)> {
+    use std::process::Command;
+    use std::time::SystemTime;
+
+    let output = Command::new("lsof")
+        .args(["-F", "n", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+
+    // lsof returns non-zero if the pid has no open files matching, but stdout may still have data.
+    // We proceed with whatever stdout we got.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let projects_prefix = claude_projects_dir.to_string_lossy();
+
+    let mut best: Option<(PathBuf, SystemTime)> = None;
+
+    for line in stdout.lines() {
+        // lsof -F n output: lines starting with 'n' are file names
+        let Some(path_str) = line.strip_prefix('n') else {
+            continue;
+        };
+        let path = Path::new(path_str);
+        if !is_jsonl_file(path) {
+            continue;
+        }
+        // Must be inside claude_projects_dir
+        if !path_str.starts_with(projects_prefix.as_ref()) {
+            continue;
+        }
+        if let Ok(meta) = std::fs::metadata(path) {
+            let modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+            let is_better = match &best {
+                None => true,
+                Some((_, best_modified)) => modified > *best_modified,
+            };
+            if is_better {
+                best = Some((path.to_path_buf(), modified));
+            }
+        }
+    }
+
+    best.map(|(path, _)| (session_id_from_jsonl_path(&path), path))
+}
+
 fn is_jsonl_file(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
         .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
 }
 
-fn session_id_from_jsonl_path(path: &Path) -> String {
+pub fn session_id_from_jsonl_path(path: &Path) -> String {
     path.file_stem()
         .and_then(|stem| stem.to_str())
         .filter(|stem| !stem.is_empty())
@@ -265,6 +336,27 @@ fn session_id_from_jsonl_path(path: &Path) -> String {
                 .map(ToOwned::to_owned)
         })
         .unwrap_or_else(|| "unknown-session".to_owned())
+}
+
+/// Create a [`SessionDiscovery`] directly from a transcript path provided by a SessionStart hook.
+/// Returns `None` if the file does not exist.
+pub fn discovery_from_transcript_path(
+    pane_id: &str,
+    jsonl_path: &std::path::Path,
+    pane_generation: Option<u64>,
+    pane_birth_ts: Option<chrono::DateTime<chrono::Utc>>,
+) -> Option<SessionDiscovery> {
+    if !jsonl_path.exists() {
+        return None;
+    }
+    Some(SessionDiscovery {
+        pane_id: pane_id.to_owned(),
+        session_id: session_id_from_jsonl_path(jsonl_path),
+        jsonl_path: jsonl_path.to_path_buf(),
+        pane_generation,
+        pane_birth_ts,
+        cwd_candidate_count: 1,
+    })
 }
 
 /// Read and parse a `sessions-index.json` file.
@@ -448,7 +540,13 @@ mod tests {
         fs::write(&new_jsonl, "{}\n").expect("test");
         fs::write(project_dir.join("README.txt"), "ignore").expect("test");
 
-        let pane_cwds = vec![("%42".to_owned(), canonical_cwd, Some(9), None)];
+        let pane_cwds = vec![PaneDiscoveryHint {
+            pane_id: "%42".to_owned(),
+            cwd: canonical_cwd,
+            pane_generation: Some(9),
+            pane_birth_ts: None,
+            pane_pid: None,
+        }];
         let discoveries = discover_sessions_in_projects_dir(&pane_cwds, &claude_projects_dir);
 
         assert_eq!(discoveries.len(), 1);
@@ -476,13 +574,45 @@ mod tests {
         let jsonl_path = project_dir.join("fallback-session.jsonl");
         fs::write(&jsonl_path, "{}\n").expect("test");
 
-        let pane_cwds = vec![("%11".to_owned(), canonical_cwd, None, None)];
+        let pane_cwds = vec![PaneDiscoveryHint {
+            pane_id: "%11".to_owned(),
+            cwd: canonical_cwd,
+            pane_generation: None,
+            pane_birth_ts: None,
+            pane_pid: None,
+        }];
         let discoveries = discover_sessions_in_projects_dir(&pane_cwds, &claude_projects_dir);
 
         assert_eq!(discoveries.len(), 1);
         assert_eq!(discoveries[0].pane_id, "%11");
         assert_eq!(discoveries[0].session_id, "fallback-session");
         assert_eq!(discoveries[0].jsonl_path, jsonl_path);
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn discovery_from_transcript_path_returns_none_when_file_missing() {
+        let nonexistent = std::path::Path::new("/tmp/agtmux-nonexistent-session-abc.jsonl");
+        let result = discovery_from_transcript_path("%5", nonexistent, Some(3), None);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn discovery_from_transcript_path_returns_some_when_file_exists() {
+        let tmp = unique_temp_dir("transcript-hint");
+        let jsonl_path = tmp.join("my-session-id.jsonl");
+        fs::write(&jsonl_path, "{}\n").expect("test");
+
+        let result = discovery_from_transcript_path("%7", &jsonl_path, Some(2), None);
+        assert!(result.is_some());
+        let disc = result.expect("test");
+        assert_eq!(disc.pane_id, "%7");
+        assert_eq!(disc.session_id, "my-session-id");
+        assert_eq!(disc.jsonl_path, jsonl_path);
+        assert_eq!(disc.pane_generation, Some(2));
+        assert!(disc.pane_birth_ts.is_none());
+        assert_eq!(disc.cwd_candidate_count, 1);
 
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -519,9 +649,27 @@ mod tests {
         }
 
         let pane_cwds = vec![
-            ("%1".to_owned(), shared_canonical.clone(), None, None),
-            ("%2".to_owned(), shared_canonical.clone(), None, None),
-            ("%3".to_owned(), solo_canonical.clone(), None, None),
+            PaneDiscoveryHint {
+                pane_id: "%1".to_owned(),
+                cwd: shared_canonical.clone(),
+                pane_generation: None,
+                pane_birth_ts: None,
+                pane_pid: None,
+            },
+            PaneDiscoveryHint {
+                pane_id: "%2".to_owned(),
+                cwd: shared_canonical.clone(),
+                pane_generation: None,
+                pane_birth_ts: None,
+                pane_pid: None,
+            },
+            PaneDiscoveryHint {
+                pane_id: "%3".to_owned(),
+                cwd: solo_canonical.clone(),
+                pane_generation: None,
+                pane_birth_ts: None,
+                pane_pid: None,
+            },
         ];
         let discoveries = discover_sessions_in_projects_dir(&pane_cwds, &claude_projects_dir);
 
@@ -537,5 +685,13 @@ mod tests {
         assert_eq!(d3.cwd_candidate_count, 1, "%3 has unique CWD → count 1");
 
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn discover_jsonl_via_lsof_nonexistent_pid_returns_none() {
+        let tmp = std::env::temp_dir();
+        // PID 999999999 is almost certainly invalid → lsof returns error or empty
+        let result = discover_jsonl_via_lsof(999999999, &tmp);
+        assert!(result.is_none());
     }
 }

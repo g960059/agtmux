@@ -45,11 +45,15 @@ pub fn translate(raw: &ClaudeHookEvent) -> SourceEventV2 {
 /// Map Claude hook types to normalized event_type strings.
 fn normalize_event_type(hook_type: &str) -> String {
     match hook_type {
-        "session_start" => "lifecycle.start".to_owned(),
-        "session_end" => "lifecycle.end".to_owned(),
+        "session_start" | "SessionStart" => "lifecycle.start".to_owned(),
+        "session_end" | "SessionEnd" => "lifecycle.end".to_owned(),
         "tool_start" | "thinking" => "lifecycle.running".to_owned(),
         "tool_end" | "idle" => "lifecycle.idle".to_owned(),
         "error" => "lifecycle.error".to_owned(),
+        "PermissionRequest" => "activity.waiting_approval".to_owned(),
+        "UserPromptSubmit" => "activity.user_input".to_owned(),
+        "PostToolUseFailure" => "lifecycle.error".to_owned(),
+        "PreCompact" => "lifecycle.compacting".to_owned(),
         _ => "lifecycle.unknown".to_owned(),
     }
 }
@@ -97,12 +101,18 @@ mod tests {
     fn event_type_normalization() {
         let cases = [
             ("session_start", "lifecycle.start"),
+            ("SessionStart", "lifecycle.start"),
             ("session_end", "lifecycle.end"),
+            ("SessionEnd", "lifecycle.end"),
             ("tool_start", "lifecycle.running"),
             ("thinking", "lifecycle.running"),
             ("tool_end", "lifecycle.idle"),
             ("idle", "lifecycle.idle"),
             ("error", "lifecycle.error"),
+            ("PermissionRequest", "activity.waiting_approval"),
+            ("UserPromptSubmit", "activity.user_input"),
+            ("PostToolUseFailure", "lifecycle.error"),
+            ("PreCompact", "lifecycle.compacting"),
         ];
         for (hook_type, expected) in cases {
             let raw = sample_event(hook_type, None);

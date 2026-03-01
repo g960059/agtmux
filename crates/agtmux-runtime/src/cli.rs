@@ -140,6 +140,10 @@ pub struct SetupHooksOpts {
     /// Path to the hook script (auto-detected if omitted)
     #[arg(long)]
     pub hook_script: Option<String>,
+
+    /// Check current hook registration status without writing (exits 1 if any hooks missing)
+    #[arg(long)]
+    pub check: bool,
 }
 
 /// Default socket path using $USER for per-user isolation.

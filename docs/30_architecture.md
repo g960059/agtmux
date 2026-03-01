@@ -44,6 +44,12 @@
   - SLO window判定、alert発火、snapshot/restore 実行状態を管理
 - C-014 `[Post-MVP]`: `source registry manager`（logical component）
   - source endpoint の登録/失効/復帰（`pending/active/stale/revoked`）を管理
+- C-017 `[Post-MVP]`: `agtmux-source-osc-tap`（Semi-deterministic）
+  - tmux `pipe-pane` 経由で PTY バイトストリームを取得し、Claude Code が emit する OSC 9;4 (progress bar) シーケンスを解析
+  - state=3 (indeterminate) → Running (confidence: 0.92)、state=0 (remove) → Idle
+  - capability-gated: tmux 3.3+ + pipe-pane 先占確認
+  - **OSC 133 は Claude Code が現時点で emit しないため採用しない**（GitHub issue #26235: open feature request）
+  - OSC 不在は negative evidence として使用しない（emit しない端末環境が存在するため）
 - C-015 `[MVP]`: `agtmux-tmux-v5`
   - tmux backend IO（subprocess executor, pane listing, capture, process inspection, pane generation tracking）。Pure IO boundary, no business logic.
 - C-016 `[MVP]`: `agtmux-runtime`
@@ -107,6 +113,7 @@
    |- [agtmux-source-codex-appserver]
    |- [agtmux-source-claude-hooks]
    |- [agtmux-source-claude-jsonl]
+   |- [agtmux-source-osc-tap]   [Post-MVP: pipe-pane OSC 9;4]
    '- [agtmux-source-poller]
 
 source-* --pull--> gateway --pull--> daemon --push--> clients
