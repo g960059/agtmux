@@ -52,6 +52,8 @@ tap = "g960059/homebrew-tap"
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-musl", "x86_64-apple-darwin", "x86_64-unknown-linux-musl"]
 # Which actions to run on pull requests
 pr-run-mode = "plan"
+# Allow manually-added jobs (ci-gate) without dist regenerating the file
+allow-dirty = ["ci"]
 # Path that installers should place binaries in
 install-path = "CARGO_HOME"
 # Whether to install an updater program
