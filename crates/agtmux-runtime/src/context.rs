@@ -87,6 +87,8 @@ pub fn consensus_str<'a>(items: impl Iterator<Item = Option<&'a str>>) -> Option
 }
 
 /// Relative-time helper: seconds -> human string.
+///
+/// Tiers: just now / Xm / Xh / Xd (≤13d) / Xw (2–8w) / Xmo (≥2mo)
 pub fn relative_time(seconds: i64) -> String {
     let s = seconds.unsigned_abs();
     if s < 60 {
@@ -95,10 +97,12 @@ pub fn relative_time(seconds: i64) -> String {
         format!("{}m", s / 60)
     } else if s < 86400 {
         format!("{}h", s / 3600)
-    } else if s < 86400 * 30 {
+    } else if s < 86400 * 14 {
         format!("{}d", s / 86400)
-    } else {
+    } else if s < 86400 * 60 {
         format!("{}w", s / (86400 * 7))
+    } else {
+        format!("{}mo", s / (86400 * 30))
     }
 }
 
@@ -230,5 +234,28 @@ mod tests {
     #[test]
     fn relative_time_hours() {
         assert_eq!(relative_time(7200), "2h");
+    }
+
+    #[test]
+    fn relative_time_days() {
+        // 137h = 493200s — should show days, not hours
+        assert_eq!(relative_time(137 * 3600), "5d");
+        assert_eq!(relative_time(86400 * 5), "5d");
+        // boundary: 13 days is still "d"
+        assert_eq!(relative_time(86400 * 13), "13d");
+    }
+
+    #[test]
+    fn relative_time_weeks() {
+        // 14 days transitions to weeks
+        assert_eq!(relative_time(86400 * 14), "2w");
+        assert_eq!(relative_time(86400 * 21), "3w");
+    }
+
+    #[test]
+    fn relative_time_months() {
+        // 60+ days transitions to months
+        assert_eq!(relative_time(86400 * 60), "2mo");
+        assert_eq!(relative_time(86400 * 90), "3mo");
     }
 }
