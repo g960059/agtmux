@@ -132,6 +132,32 @@ const JSONL_ACTIVE_THRESHOLD_SECS: u64 = 25;
 /// Idle threshold: emit thread.idle for recently completed sessions.
 const JSONL_IDLE_THRESHOLD_SECS: u64 = 120;
 
+/// Returns true when any process keeps `path` open with write access.
+///
+/// Uses `lsof -Fan` field output mode: the `a` field contains the access
+/// mode character — `w` (write-only) or `u` (read/write) — on its own line.
+/// This is used as a fallback activity signal when JSONL mtime is stale.
+fn is_file_write_open(path: &std::path::Path) -> bool {
+    let output = match std::process::Command::new("lsof")
+        .arg("-Fan") // field output: access-mode (a) + name (n)
+        .arg(path)
+        .output()
+    {
+        Ok(out) => out,
+        Err(_) => return false, // lsof not available
+    };
+
+    if output.stdout.is_empty() {
+        return false;
+    }
+
+    // In -F field output each access-mode record is a line "a<mode>",
+    // where <mode> is "r" (read), "w" (write), or "u" (read/write).
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .any(|line| line == "aw" || line == "au")
+}
+
 /// Metadata read from the `session_meta` first line of a Codex JSONL rollout file.
 struct JsonlSessionMeta {
     cwd: String,
@@ -246,7 +272,7 @@ pub(crate) fn scan_jsonl_sessions(
         .to_string();
     let sessions_base = format!("{home}/.codex/sessions");
 
-    let collect_candidates = |date: &str| -> Vec<(std::path::PathBuf, u64)> {
+    let collect_candidates = |date: &str| -> Vec<(std::path::PathBuf, u64, bool)> {
         let dir = std::path::PathBuf::from(format!("{sessions_base}/{date}"));
         let Ok(iter) = std::fs::read_dir(&dir) else {
             return Vec::new();
@@ -262,8 +288,17 @@ pub(crate) fn scan_jsonl_sessions(
                     .and_then(|m| m.modified().ok())
                     .and_then(|mtime| mtime.elapsed().ok())
                     .map(|d| d.as_secs())?;
-                if age_secs <= JSONL_IDLE_THRESHOLD_SECS {
-                    Some((path, age_secs))
+
+                // Codex may keep a session file open without bumping mtime.
+                // In that case, write-open is stronger evidence than age.
+                let is_write_open = if age_secs > JSONL_ACTIVE_THRESHOLD_SECS {
+                    is_file_write_open(&path)
+                } else {
+                    false
+                };
+
+                if age_secs <= JSONL_IDLE_THRESHOLD_SECS || is_write_open {
+                    Some((path, age_secs, is_write_open))
                 } else {
                     None // Historical — skip
                 }
@@ -275,7 +310,10 @@ pub(crate) fn scan_jsonl_sessions(
     candidates.extend(collect_candidates(&yesterday));
 
     // Sort by age ascending so we process the most-recently-written files first.
-    candidates.sort_by_key(|(_, age)| *age);
+    candidates.sort_by_key(|(_, age, write_open)| {
+        let is_active = *age <= JSONL_ACTIVE_THRESHOLD_SECS || *write_open;
+        (!is_active, *age) // active first, then newer first
+    });
 
     // Pre-sort panes by tier so that when multiple panes share a CWD, the highest-priority
     // pane (tier 0 = explicit codex, tier 1 = neutral runtime) wins the assignment.
@@ -301,7 +339,7 @@ pub(crate) fn scan_jsonl_sessions(
         yesterday
     );
 
-    for (path, age_secs) in candidates {
+    for (path, age_secs, write_open) in candidates {
         let meta = match read_jsonl_session_meta(&path) {
             Some(m) => m,
             None => {
@@ -310,7 +348,7 @@ pub(crate) fn scan_jsonl_sessions(
             }
         };
 
-        let is_active = age_secs <= JSONL_ACTIVE_THRESHOLD_SECS;
+        let is_active = age_secs <= JSONL_ACTIVE_THRESHOLD_SECS || write_open;
         let event_type = if is_active {
             "thread.active"
         } else {
@@ -318,9 +356,10 @@ pub(crate) fn scan_jsonl_sessions(
         };
 
         tracing::debug!(
-            "jsonl-scan: {:?} age={}s cwd={} type={}",
+            "jsonl-scan: {:?} age={}s write_open={} cwd={} type={}",
             path.file_name(),
             age_secs,
+            write_open,
             meta.cwd,
             event_type
         );
@@ -364,6 +403,7 @@ pub(crate) fn scan_jsonl_sessions(
                 payload: serde_json::json!({
                     "cwd": meta.cwd,
                     "jsonl_age_secs": age_secs,
+                    "jsonl_write_open": write_open,
                     "source": "jsonl_scan",
                     // T-135a-bis: task instructions used as conversation title.
                     "instructions": meta.instructions,

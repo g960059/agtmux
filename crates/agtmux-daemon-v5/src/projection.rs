@@ -661,8 +661,9 @@ fn parse_activity_state(event_type: &str) -> ActivityState {
         "activity.user_input" => ActivityState::Running,
         "activity.idle" | "lifecycle.idle" | "activity.end" | "activity.stop" | "lifecycle.end"
         | "lifecycle.stop" => ActivityState::Idle,
-        // Claude JSONL: tool_complete means a tool finished (agent is deciding next step)
-        "activity.tool_complete" => ActivityState::Idle,
+        // Claude JSONL: tool_complete is followed by model inference before assistant output.
+        // Treat as Running to avoid transient idle flaps under high load.
+        "activity.tool_complete" => ActivityState::Running,
         "activity.waiting_input" | "lifecycle.waiting_input" => ActivityState::WaitingInput,
         "activity.waiting_approval" | "lifecycle.waiting_approval" => {
             ActivityState::WaitingApproval
@@ -926,7 +927,7 @@ mod tests {
         );
         assert_eq!(
             parse_activity_state("activity.tool_complete"),
-            ActivityState::Idle
+            ActivityState::Running
         );
 
         // Codex App Server namespace
