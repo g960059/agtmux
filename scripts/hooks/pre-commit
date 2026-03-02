@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Pre-commit: auto-fix Rust formatting and re-stage changed files.
+set -euo pipefail
+
+# Run rustfmt and capture which files changed
+cargo fmt --all 2>&1
+
+# Re-stage any files that rustfmt modified
+changed=$(git diff --name-only)
+if [ -n "$changed" ]; then
+    echo "[pre-commit] rustfmt fixed formatting in:"
+    echo "$changed" | sed 's/^/  /'
+    git add $changed
+fi
