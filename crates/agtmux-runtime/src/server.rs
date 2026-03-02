@@ -27,13 +27,59 @@ pub async fn run_server(socket_path: &str, state: Arc<Mutex<DaemonState>>) -> an
         std::fs::set_permissions(socket_dir, std::fs::Permissions::from_mode(0o700))?;
     }
 
-    // Check for stale socket
+    // Check for stale or live socket
     if std::path::Path::new(socket_path).exists() {
-        if tokio::net::UnixStream::connect(socket_path).await.is_err() {
-            std::fs::remove_file(socket_path)?;
-            tracing::info!("removed stale socket at {socket_path}");
-        } else {
-            anyhow::bail!("another daemon is already running at {socket_path}");
+        match tokio::net::UnixStream::connect(socket_path).await {
+            Err(_) => {
+                // Stale socket — remove and continue
+                std::fs::remove_file(socket_path)?;
+                tracing::info!("removed stale socket at {socket_path}");
+            }
+            Ok(mut stream) => {
+                // Live daemon: query its PID then send SIGTERM to replace it
+                let request = "{\"method\":\"daemon.info\"}\n";
+                let old_pid: Option<u32> = if stream.write_all(request.as_bytes()).await.is_ok() {
+                    let mut reader = BufReader::new(&mut stream);
+                    let mut line = String::new();
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        reader.read_line(&mut line),
+                    )
+                    .await
+                    {
+                        Ok(Ok(_)) => serde_json::from_str::<serde_json::Value>(&line)
+                            .ok()
+                            .and_then(|v| v["result"]["pid"].as_u64())
+                            .and_then(|n| u32::try_from(n).ok()),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                drop(stream);
+
+                if let Some(pid) = old_pid {
+                    tracing::info!("replacing existing daemon (pid={pid})");
+                    let _ = std::process::Command::new("kill")
+                        .args(["-TERM", &pid.to_string()])
+                        .status();
+                    // Wait up to 3 s for the old daemon to exit and remove its socket
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+                    while std::path::Path::new(socket_path).exists()
+                        && std::time::Instant::now() < deadline
+                    {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                } else {
+                    tracing::warn!(
+                        "could not query PID from existing daemon; forcing socket removal"
+                    );
+                }
+                // Remove socket if still present (old daemon didn't clean up in time)
+                if std::path::Path::new(socket_path).exists() {
+                    std::fs::remove_file(socket_path)?;
+                }
+            }
         }
     }
 
