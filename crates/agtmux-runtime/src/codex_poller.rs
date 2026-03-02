@@ -28,6 +28,7 @@ use std::hash::{Hash, Hasher};
 use std::time::{Duration, Instant};
 
 use agtmux_source_codex_appserver::translate::CodexRawEvent;
+use agtmux_tmux_v5::ProcessMap;
 use chrono::{DateTime, Utc};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
@@ -49,6 +50,10 @@ pub struct PaneCwdInfo {
     /// Examples: `Some("codex")`, `Some("claude")`, `None` for neutral shells.
     /// Used for 3-tier assignment priority: codex(0) > neutral(1) > competing-agent(2).
     pub process_hint: Option<String>,
+    /// PID of the shell started in this pane (tmux `#{pane_pid}`).
+    /// Used for process-first codex JSONL detection: find child codex processes,
+    /// then find their open JSONL files via lsof — bypasses CWD ambiguity and date limits.
+    pub pane_pid: Option<u32>,
 }
 
 /// Correlated pane identity for a Codex thread.
@@ -132,30 +137,100 @@ const JSONL_ACTIVE_THRESHOLD_SECS: u64 = 25;
 /// Idle threshold: emit thread.idle for recently completed sessions.
 const JSONL_IDLE_THRESHOLD_SECS: u64 = 120;
 
-/// Returns true when any process keeps `path` open with write access.
+/// Return true when the `args` string belongs to a Codex CLI process.
 ///
-/// Uses `lsof -Fan` field output mode: the `a` field contains the access
-/// mode character — `w` (write-only) or `u` (read/write) — on its own line.
-/// This is used as a fallback activity signal when JSONL mtime is stale.
-fn is_file_write_open(path: &std::path::Path) -> bool {
-    let output = match std::process::Command::new("lsof")
-        .arg("-Fan") // field output: access-mode (a) + name (n)
-        .arg(path)
-        .output()
-    {
-        Ok(out) => out,
-        Err(_) => return false, // lsof not available
-    };
-
-    if output.stdout.is_empty() {
+/// Matches both the compiled binary (`codex`) and Node.js invocations
+/// (`node /path/to/codex/dist/cli.mjs`).  Explicitly excludes agtmux
+/// processes whose paths happen to contain the string "codex".
+fn is_codex_process_args(args: &str) -> bool {
+    if args.contains("/agtmux") {
         return false;
     }
+    // Binary: "codex" or "codex --full-auto ..."
+    let first_token = args.split_whitespace().next().unwrap_or("");
+    let binary_name = std::path::Path::new(first_token)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(first_token);
+    if binary_name == "codex" {
+        return true;
+    }
+    // Node.js wrapper: "node .../codex/dist/cli.mjs ..."
+    args.contains("codex") && (binary_name == "node" || binary_name == "node_modules")
+}
 
-    // In -F field output each access-mode record is a line "a<mode>",
-    // where <mode> is "r" (read), "w" (write), or "u" (read/write).
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .any(|line| line == "aw" || line == "au")
+/// Scan the open file descriptors of `pid` for a Codex JSONL session file.
+///
+/// Uses `lsof -p <pid> -Fan` (field output mode: access-mode + name).
+/// Returns `(path, is_write_open)` for the first matching file found, or
+/// `None` if no JSONL under `sessions_base` is currently open by `pid`.
+fn find_open_jsonl_for_pid(pid: u32, sessions_base: &str) -> Option<(std::path::PathBuf, bool)> {
+    let output = std::process::Command::new("lsof")
+        .args(["-p", &pid.to_string(), "-Fan"])
+        .output()
+        .ok()?;
+
+    if output.stdout.is_empty() {
+        return None;
+    }
+
+    // lsof -Fan field output format (per open-file record):
+    //   f<fd>   — file descriptor number (starts a new record)
+    //   a<mode> — access mode: r=read, w=write-only, u=read/write
+    //   n<path> — file name / path
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut current_write_open = false;
+
+    for line in text.lines() {
+        match line.as_bytes().first() {
+            Some(b'f') => {
+                // Start of a new fd record — reset access mode.
+                current_write_open = false;
+            }
+            Some(b'a') => {
+                let mode = &line[1..];
+                current_write_open = mode == "w" || mode == "u";
+            }
+            Some(b'n') => {
+                let path_str = &line[1..];
+                if path_str.starts_with(sessions_base) && path_str.ends_with(".jsonl") {
+                    return Some((std::path::PathBuf::from(path_str), current_write_open));
+                }
+                // Reset for the next record.
+                current_write_open = false;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Process-first Codex JSONL detection.
+///
+/// Given a pane's shell PID, searches `process_map` for direct child
+/// processes that look like Codex, then probes each child's open file
+/// descriptors for a JSONL session file under `sessions_base`.
+///
+/// Returns `(jsonl_path, is_write_open)` for the first match found.
+/// Returns `None` when no running Codex child owns an open session file.
+fn find_codex_child_jsonl(
+    pane_pid: u32,
+    process_map: &ProcessMap,
+    sessions_base: &str,
+) -> Option<(std::path::PathBuf, bool)> {
+    // Collect direct children of this pane's shell that look like Codex.
+    let codex_children: Vec<u32> = process_map
+        .values()
+        .filter(|p| p.ppid == pane_pid && is_codex_process_args(&p.args))
+        .map(|p| p.pid)
+        .collect();
+
+    for child_pid in codex_children {
+        if let Some(result) = find_open_jsonl_for_pid(child_pid, sessions_base) {
+            return Some(result);
+        }
+    }
+    None
 }
 
 /// Metadata read from the `session_meta` first line of a Codex JSONL rollout file.
@@ -249,71 +324,36 @@ fn read_jsonl_session_meta(path: &std::path::Path) -> Option<JsonlSessionMeta> {
     Some(JsonlSessionMeta { cwd, instructions })
 }
 
-/// Scan today's Codex JSONL session files and emit deterministic events for
-/// panes whose CWD matches a recently active/idle rollout.
+/// Scan Codex JSONL session files and emit deterministic events for panes with
+/// a currently running Codex process.
 ///
-/// This is the primary detection path for *currently running* `codex --full-auto`
-/// sessions, which the App Server's `thread/list` cannot see until after completion.
+/// ## Detection strategy
+///
+/// **Pass 1 — Process-first** (preferred): For each pane with a known shell
+/// PID (`pane_pid`), find child Codex processes in `process_map` and probe
+/// their open file descriptors via `lsof`.  This approach:
+/// - Ties the JSONL directly to the exact pane (no CWD ambiguity)
+/// - Works for session files in any date directory (bypasses today/yesterday limit)
+/// - Is unaffected by stale background Codex processes sharing the same CWD
+///
+/// **Pass 2 — CWD-based** (fallback): For panes not yet matched, scan
+/// today's and yesterday's JSONL directories and match by CWD.  Used when
+/// `pane_pid` is unavailable or the child process search yields nothing.
+///
+/// **Pass 3 — Historical enrichment**: For tier-0/1 panes still unmatched,
+/// search the last 7 days of JSONL files to populate a correct last-activity
+/// timestamp (`actual_activity_at`).
 pub(crate) fn scan_jsonl_sessions(
     pane_cwds: &[PaneCwdInfo],
     now: DateTime<Utc>,
+    process_map: &ProcessMap,
 ) -> Vec<CodexRawEvent> {
     let home = match std::env::var("HOME") {
         Ok(h) if !h.is_empty() => h,
         _ => return Vec::new(),
     };
 
-    // Scan today's sessions directory, and also yesterday's to handle cross-midnight sessions.
-    // A session that started before midnight and is still running after midnight would only
-    // appear in yesterday's directory and would be missed if we only check today.
-    let today = now.format("%Y/%m/%d").to_string();
-    let yesterday = (now - chrono::Duration::days(1))
-        .format("%Y/%m/%d")
-        .to_string();
     let sessions_base = format!("{home}/.codex/sessions");
-
-    let collect_candidates = |date: &str| -> Vec<(std::path::PathBuf, u64, bool)> {
-        let dir = std::path::PathBuf::from(format!("{sessions_base}/{date}"));
-        let Ok(iter) = std::fs::read_dir(&dir) else {
-            return Vec::new();
-        };
-        iter.flatten()
-            .filter_map(|entry| {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                    return None;
-                }
-                let age_secs = std::fs::metadata(&path)
-                    .ok()
-                    .and_then(|m| m.modified().ok())
-                    .and_then(|mtime| mtime.elapsed().ok())
-                    .map(|d| d.as_secs())?;
-
-                // Codex may keep a session file open without bumping mtime.
-                // In that case, write-open is stronger evidence than age.
-                let is_write_open = if age_secs > JSONL_ACTIVE_THRESHOLD_SECS {
-                    is_file_write_open(&path)
-                } else {
-                    false
-                };
-
-                if age_secs <= JSONL_IDLE_THRESHOLD_SECS || is_write_open {
-                    Some((path, age_secs, is_write_open))
-                } else {
-                    None // Historical — skip
-                }
-            })
-            .collect()
-    };
-
-    let mut candidates = collect_candidates(&today);
-    candidates.extend(collect_candidates(&yesterday));
-
-    // Sort by age ascending so we process the most-recently-written files first.
-    candidates.sort_by_key(|(_, age, write_open)| {
-        let is_active = *age <= JSONL_ACTIVE_THRESHOLD_SECS || *write_open;
-        (!is_active, *age) // active first, then newer first
-    });
 
     // Pre-sort panes by tier so that when multiple panes share a CWD, the highest-priority
     // pane (tier 0 = explicit codex, tier 1 = neutral runtime) wins the assignment.
@@ -331,15 +371,130 @@ pub(crate) fn scan_jsonl_sessions(
     // Track which panes have already been matched to avoid double-assignment.
     let mut matched_panes: HashSet<String> = HashSet::new();
 
+    // ── Pass 1: Process-first detection ──────────────────────────────────────
+    //
+    // For panes with a known shell PID, look for child Codex processes in the
+    // process map and probe their open file descriptors.  This correctly handles:
+    //   - Sessions whose JSONL lives in an old date directory (false negatives)
+    //   - Background Codex processes sharing the same CWD (false positives)
+    for pane in &sorted_panes {
+        let Some(pane_pid) = pane.pane_pid else {
+            continue;
+        };
+        let Some((path, is_write_open)) =
+            find_codex_child_jsonl(pane_pid, process_map, &sessions_base)
+        else {
+            continue;
+        };
+
+        let Some(meta) = read_jsonl_session_meta(&path) else {
+            tracing::debug!(
+                "jsonl-process-first: pane={} pane_pid={} skip {:?} (no session_meta)",
+                pane.pane_id,
+                pane_pid,
+                path.file_name()
+            );
+            continue;
+        };
+
+        let age_secs = std::fs::metadata(&path)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|mtime| mtime.elapsed().ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(u64::MAX);
+
+        tracing::debug!(
+            "jsonl-process-first: pane={} pane_pid={} {:?} age={}s write_open={}",
+            pane.pane_id,
+            pane_pid,
+            path.file_name(),
+            age_secs,
+            is_write_open
+        );
+
+        let session_id = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| format!("jsonl-{s}"))
+            .unwrap_or_else(|| format!("jsonl-{}", pane.pane_id));
+
+        events.push(CodexRawEvent {
+            id: format!("jsonlproc-{}-{}", pane.pane_id, now.timestamp_millis()),
+            event_type: "thread.active".to_string(),
+            session_id,
+            timestamp: now,
+            pane_id: Some(pane.pane_id.clone()),
+            pane_generation: pane.generation,
+            pane_birth_ts: pane.birth_ts,
+            payload: serde_json::json!({
+                "cwd": meta.cwd,
+                "jsonl_age_secs": age_secs,
+                "jsonl_write_open": is_write_open,
+                "source": "process_first",
+                "instructions": meta.instructions,
+            }),
+            is_heartbeat: false,
+            actual_activity_at: None,
+        });
+
+        matched_panes.insert(pane.pane_id.clone());
+    }
+
+    // ── Pass 2: CWD-based scan (fallback for panes without pane_pid) ──────────
+    //
+    // Scan today's + yesterday's JSONL directories and match by CWD.
+    // `is_file_write_open` is intentionally NOT used here: it would flag any
+    // process that has the file open, including background processes from other
+    // panes that happen to share the same CWD — the root cause of false positives.
+
+    let today = now.format("%Y/%m/%d").to_string();
+    let yesterday = (now - chrono::Duration::days(1))
+        .format("%Y/%m/%d")
+        .to_string();
+
+    let collect_candidates = |date: &str| -> Vec<(std::path::PathBuf, u64)> {
+        let dir = std::path::PathBuf::from(format!("{sessions_base}/{date}"));
+        let Ok(iter) = std::fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        iter.flatten()
+            .filter_map(|entry| {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                    return None;
+                }
+                let age_secs = std::fs::metadata(&path)
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|mtime| mtime.elapsed().ok())
+                    .map(|d| d.as_secs())?;
+
+                if age_secs <= JSONL_IDLE_THRESHOLD_SECS {
+                    Some((path, age_secs))
+                } else {
+                    None // Historical — skip (process-first handles still-running cases)
+                }
+            })
+            .collect()
+    };
+
+    let mut candidates = collect_candidates(&today);
+    candidates.extend(collect_candidates(&yesterday));
+
+    // Sort: active (mtime-fresh) sessions first, then newer first.
+    candidates.sort_by_key(|(_, age)| *age);
+
     tracing::debug!(
-        "jsonl-scan: {} candidates, {} eligible panes (today={}, yesterday={})",
+        "jsonl-scan: {} candidates, {} eligible panes (today={}, yesterday={}), {} already matched",
         candidates.len(),
         sorted_panes.len(),
         today,
-        yesterday
+        yesterday,
+        matched_panes.len(),
     );
 
-    for (path, age_secs, write_open) in candidates {
+    for (path, age_secs) in candidates {
         let meta = match read_jsonl_session_meta(&path) {
             Some(m) => m,
             None => {
@@ -348,7 +503,7 @@ pub(crate) fn scan_jsonl_sessions(
             }
         };
 
-        let is_active = age_secs <= JSONL_ACTIVE_THRESHOLD_SECS || write_open;
+        let is_active = age_secs <= JSONL_ACTIVE_THRESHOLD_SECS;
         let event_type = if is_active {
             "thread.active"
         } else {
@@ -356,10 +511,9 @@ pub(crate) fn scan_jsonl_sessions(
         };
 
         tracing::debug!(
-            "jsonl-scan: {:?} age={}s write_open={} cwd={} type={}",
+            "jsonl-scan: {:?} age={}s cwd={} type={}",
             path.file_name(),
             age_secs,
-            write_open,
             meta.cwd,
             event_type
         );
@@ -403,7 +557,6 @@ pub(crate) fn scan_jsonl_sessions(
                 payload: serde_json::json!({
                     "cwd": meta.cwd,
                     "jsonl_age_secs": age_secs,
-                    "jsonl_write_open": write_open,
                     "source": "jsonl_scan",
                     // T-135a-bis: task instructions used as conversation title.
                     "instructions": meta.instructions,
@@ -419,7 +572,7 @@ pub(crate) fn scan_jsonl_sessions(
         }
     }
 
-    // ── Historical enrichment pass ──────────────────────────────────────────────
+    // ── Pass 3: Historical enrichment ────────────────────────────────────────────
     //
     // For heuristic codex panes not matched by the fresh scan (all their JSONL files are
     // older than JSONL_IDLE_THRESHOLD_SECS), search the past 7 days for the most-recently
@@ -1547,6 +1700,7 @@ mod tests {
             generation,
             birth_ts,
             process_hint: hint.map(String::from),
+            pane_pid: None,
         }
     }
 

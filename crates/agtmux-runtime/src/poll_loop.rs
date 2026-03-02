@@ -360,6 +360,7 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
                     .iter()
                     .find(|s| s.pane_id == pane.pane_id)
                     .and_then(|s| s.process_hint.clone()),
+                pane_pid: pane.pane_pid,
             }
         })
         .collect();
@@ -477,7 +478,7 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
     // Runs outside poll_threads to ensure running codex sessions are always detected, even when
     // the App Server is slow or unavailable.  See codex_poller module doc for details.
     {
-        let jsonl_events = scan_jsonl_sessions(&pane_cwds_for_codex, now);
+        let jsonl_events = scan_jsonl_sessions(&pane_cwds_for_codex, now, &process_map);
         if !jsonl_events.is_empty() {
             tracing::debug!("codex jsonl-scan: {} events", jsonl_events.len());
         }
