@@ -620,10 +620,9 @@ pub(crate) fn scan_jsonl_sessions(
                     .and_then(|mtime| mtime.elapsed().ok())
                     .map(|d| d.as_secs())
                     .unwrap_or(u64::MAX);
-                // Skip files already handled by the fresh scan.
-                if age_secs <= JSONL_IDLE_THRESHOLD_SECS {
-                    continue;
-                }
+                // Pass 2 only covers today + yesterday.  A JSONL in an older date dir
+                // (e.g. 2026/02/23) with a fresh mtime means Codex is still writing to
+                // that file — do NOT skip it.
                 if age_secs > HISTORICAL_ENRICHMENT_SECS {
                     continue;
                 }
@@ -656,13 +655,20 @@ pub(crate) fn scan_jsonl_sessions(
             .map(|s| format!("jsonl-{s}"))
             .unwrap_or_else(|| format!("jsonl-{}", pane.pane_id));
 
-        let actual_activity_at = now - chrono::Duration::seconds(age_secs as i64);
+        // Branch: a fresh file in an old date dir means Codex is still writing.
+        let (hist_event_type, hist_activity_at) = if age_secs <= JSONL_ACTIVE_THRESHOLD_SECS {
+            ("thread.active", None)
+        } else {
+            let ts = now - chrono::Duration::seconds(age_secs as i64);
+            ("thread.idle", Some(ts))
+        };
 
         tracing::debug!(
-            "jsonl-history: pane={} session={} age={}s cwd={}",
+            "jsonl-history: pane={} session={} age={}s type={} cwd={}",
             pane.pane_id,
             session_id,
             age_secs,
+            hist_event_type,
             meta.cwd
         );
 
@@ -672,7 +678,7 @@ pub(crate) fn scan_jsonl_sessions(
                 pane.pane_id,
                 path.file_stem().and_then(|s| s.to_str()).unwrap_or("?")
             ),
-            event_type: "thread.idle".to_string(),
+            event_type: hist_event_type.to_string(),
             session_id,
             timestamp: now,
             pane_id: Some(pane.pane_id.clone()),
@@ -685,7 +691,7 @@ pub(crate) fn scan_jsonl_sessions(
                 "instructions": meta.instructions,
             }),
             is_heartbeat: false,
-            actual_activity_at: Some(actual_activity_at),
+            actual_activity_at: hist_activity_at,
         });
         matched_panes.insert(pane.pane_id.clone());
     }
@@ -741,9 +747,12 @@ fn build_cwd_pane_groups(pane_cwds: &[PaneCwdInfo]) -> HashMap<String, Vec<PaneC
 }
 
 /// Maximum per-CWD thread/list queries per poll tick.
-/// Set to 1 so the single CWD query (≤4 s) + the global query (≤1 s)
-/// fits inside the 8-second outer `poll_threads` timeout.
-const MAX_CWD_QUERIES_PER_TICK: usize = 1;
+///
+/// With multiple CWDs (e.g. vm-agtmux + test-session), capping at 1 causes
+/// starvation: only the highest-priority CWD is ever queried, so sessions in
+/// other CWDs never get an App Server update.  Set to 3 to cover typical
+/// multi-session scenarios while staying within the outer timeout budget.
+const MAX_CWD_QUERIES_PER_TICK: usize = 3;
 
 /// Per-request timeout for thread/list RPC calls.
 ///
@@ -905,8 +914,9 @@ impl CodexAppServerClient {
         }
 
         match tokio::time::timeout(
-            // 8 s: 1 per-CWD query (≤4 s) + 1 global query (≤1 s) + slack.
-            std::time::Duration::from_secs(8),
+            // 16 s: up to 3 CWD queries (first ≤4 s, subsequent ≤1 s each)
+            //       + 1 global query (≤1 s) + slack.
+            std::time::Duration::from_secs(16),
             self.poll_threads_inner(pane_cwds),
         )
         .await

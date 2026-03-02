@@ -118,3 +118,49 @@ CI の Rust バージョンで追加された新しい lint が警告扱いに�
 - `scripts/pre-commit.sh` に clippy を追加 (`cargo clippy --workspace -- -D warnings`)
 - `just install-hooks` でクローン後にワンコマンドで設定できるようにした
 - `docs/55_distribution.md` にローカル開発リリースフローを明記し、エージェントが遵守できるようにした
+
+---
+
+## 2026-03-02 — CWD-based JSONL detection が「共有 CWD」と「日付外ディレクトリ」で誤動作する
+
+**状況**: v0.1.9 で `is_file_write_open()` を追加して Codex JSONL の write-open 判定を追加したが、
+- **False positive**: 同じ CWD を持つ別 pane の background Codex プロセスが write-open を返してしまい、
+  無関係 pane が `Running` 誤表示された（`vm agtmux v4` panes）
+- **False negative**: test-session の Codex は JSONL が 7 日前のディレクトリにあり、
+  today/yesterday スキャン範囲に入らず `Idle` 誤表示された（`/2026/02/23/` JSONL）
+
+**根本原因**: CWD ベースのマッチングは「そのパネルのプロセスが JSONL を持っているか」を確認できない。
+任意のプロセスが同 CWD にいれば誤マッチする。またスキャン範囲（today/yesterday）は外部から
+制約されていて、長期実行セッションを取りこぼす。
+
+**教訓**:
+1. "Which process owns this JSONL" は CWD では解けない — PID lineage で解く必要がある。
+2. `is_file_write_open(path)` はファイルを開いているプロセスを特定しない → CWD 共有で誤答。
+3. 日付ディレクトリ制限を回避するには、プロセスから JSONL を逆引きする必要がある。
+
+**修正 (v0.1.10)**:
+- **Process-first detection** (Pass 1): `pane_pid` → `process_map` で Codex 子プロセス探索
+  → `lsof -p <codex_pid> -Fan` で open JSONL を特定 → CWD マッチ・日付制限なしで確実に紐付け
+- CWD ベーススキャン (Pass 2) は fallback に格下げし、`is_file_write_open` を削除
+- `PaneCwdInfo` に `pane_pid: Option<u32>` フィールド追加、`ProcessMap` を scanner に渡す
+
+---
+
+## 2026-03-02 — Codex burst-write で Pass 1 が空振り・Pass 3 が fresh ファイルをスキップ
+
+**状況**: v0.1.10 で test-session codex が依然 Idle 誤表示。
+- Codex は open→write→close のバースト書き込みを行うため、lsof では JSONL が見えないことが多い
+  → Pass 1 (process-first) が空振り
+- Pass 3 (historical enrichment) は `age_secs <= JSONL_IDLE_THRESHOLD_SECS` をスキップするため、
+  古い日付ディレクトリ（`2026/02/23`）内の fresh ファイル（age=4s）も除外してしまう
+- `MAX_CWD_QUERIES_PER_TICK = 1` により、複数 CWD がある場合に test-session CWD が飢餓する
+
+**根本原因**:
+1. Pass 3 の「fresh ファイルスキップ」は Pass 2 がカバーしていることを前提にしているが、
+   Pass 2 は today/yesterday しかスキャンしないため、古い日付ディレクトリを見逃す。
+2. App Server の CWD クエリが 1 件/tick に制限され、2 つ以上の CWD があると後続が飢餓する。
+
+**修正 (v0.1.11)**:
+- Pass 3 の `age_secs <= JSONL_IDLE_THRESHOLD_SECS` スキップを削除。
+  代わりに mtime ブランチを追加: `age <= 25s → thread.active`、それ以外 `→ thread.idle`。
+- `MAX_CWD_QUERIES_PER_TICK` を 1 → 3 に増加、外側タイムアウトを 8s → 16s に拡張。
