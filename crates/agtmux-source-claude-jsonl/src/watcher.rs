@@ -419,15 +419,14 @@ mod tests {
         let lines = watcher.poll_new_lines();
         assert_eq!(lines.len(), 1);
 
-        // Simulate rotation: delete and recreate the file
-        fs::remove_file(&path).expect("test");
-        fs::write(&path, "").expect("test");
-        let mut f2 = fs::OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .expect("test");
+        // Simulate rotation via rename: write new content to a temp path, then rename it
+        // into place.  This guarantees a different inode — unlike delete+recreate which
+        // can reuse the same inode on Linux tmpfs, causing rotation detection to fail.
+        let new_path = path.with_extension("new");
+        let mut f2 = fs::File::create(&new_path).expect("test");
         writeln!(f2, r#"{{"type":"assistant"}}"#).expect("test");
         drop(f2);
+        fs::rename(&new_path, &path).expect("rename");
 
         let lines2 = watcher.poll_new_lines();
         // After rotation, should read from the new file

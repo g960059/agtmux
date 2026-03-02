@@ -45,8 +45,27 @@ on:
       - '**[0-9]+.[0-9]+.[0-9]+*'
 
 jobs:
+  # Gate: fmt + clippy + test must pass before any release job runs.
+  # Prevents shipping broken binaries when CI is red at tag-push time.
+  ci-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: fmt
+        run: cargo fmt --all -- --check
+      - name: clippy
+        run: cargo clippy --workspace -- -D warnings
+      - name: test
+        run: cargo test --workspace --all-features --locked
+
   # Run 'dist plan' (or host) to determine what tasks we need to do
   plan:
+    needs: [ci-gate]
     runs-on: "ubuntu-22.04"
     outputs:
       val: ${{ steps.plan.outputs.manifest }}
