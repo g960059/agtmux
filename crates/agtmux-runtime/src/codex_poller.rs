@@ -1,12 +1,22 @@
 //! Codex App Server integration.
 //!
-//! Two evidence paths for Codex:
+//! Three evidence paths for Codex:
 //!
-//! 1. **App Server client** (primary): Spawns `codex app-server` in stdio mode,
-//!    performs JSON-RPC 2.0 handshake, and polls `thread/list` for active thread
-//!    status. See <https://developers.openai.com/codex/app-server/>.
+//! 1. **App Server client** (primary for historical sessions): Spawns `codex app-server`
+//!    in stdio mode, performs JSON-RPC 2.0 handshake, and polls `thread/list`.
+//!    Note: in Codex v0.106.0 the App Server only returns *historical* sessions
+//!    (those already committed to the SQLite DB).  Newly started `codex --full-auto`
+//!    sessions are NOT visible via `thread/list` while they are running.
+//!    See <https://developers.openai.com/codex/app-server/>.
 //!
-//! 2. **Capture-based extraction** (fallback): When `codex exec --json` outputs
+//! 2. **JSONL file scanner** (primary for *currently running* sessions): Scans
+//!    `~/.codex/sessions/YYYY/MM/DD/*.jsonl` for recently modified rollout files.
+//!    Codex writes the session JSONL at startup (T+5-6 s) and keeps updating it
+//!    while running, so the file mtime is a reliable proxy for activity.  The CWD
+//!    is read from the `session_meta.payload.cwd` field of the first line.
+//!    This path produces `EvidenceTier::Deterministic` events.
+//!
+//! 3. **Capture-based extraction** (fallback): When `codex exec --json` outputs
 //!    NDJSON events to stdout, they appear in tmux capture text and can be parsed
 //!    as deterministic evidence without an app-server connection.
 //!
@@ -63,6 +73,314 @@ struct LastThreadState {
 /// `agtmux_core_v5::resolver::FRESH_THRESHOLD_SECS` (3s).
 const HEARTBEAT_INTERVAL_SECS: i64 = 2;
 
+/// Maximum JSONL session file age (seconds) to classify a `notLoaded` thread as "active".
+/// Must exceed the longest expected tool operation (e.g., `sleep 15` → 30 s margin).
+const NOTLOADED_ACTIVE_THRESHOLD_SECS: u64 = 30;
+
+/// Maximum JSONL session file age (seconds) to classify a `notLoaded` thread as "idle".
+/// Beyond this, the thread is treated as a historical session and skipped.
+const NOTLOADED_IDLE_THRESHOLD_SECS: u64 = 120;
+
+/// Classify a `notLoaded` Codex thread by checking how recently its session JSONL
+/// file was modified.
+///
+/// `codex app-server` (v0.106.0) reports every `codex --full-auto` session as
+/// `status.type = "notLoaded"` regardless of whether it is currently executing.
+/// We use the JSONL file's mtime as a proxy for activity:
+///
+/// - mtime < [`NOTLOADED_ACTIVE_THRESHOLD_SECS`] → `"active"` (session recently writing)
+/// - mtime < [`NOTLOADED_IDLE_THRESHOLD_SECS`]   → `"idle"`   (session just finished)
+/// - mtime ≥ [`NOTLOADED_IDLE_THRESHOLD_SECS`]   → `None`     (historical, skip)
+///
+/// Returns `None` if the path is empty, the file cannot be stat'd, or the file
+/// is too old to be relevant.
+fn classify_notloaded_status(session_path: &str) -> Option<&'static str> {
+    if session_path.is_empty() {
+        return None;
+    }
+    let age_secs = std::fs::metadata(session_path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|mtime| mtime.elapsed().ok())
+        .map(|age| age.as_secs())?;
+
+    if age_secs <= NOTLOADED_ACTIVE_THRESHOLD_SECS {
+        Some("active")
+    } else if age_secs <= NOTLOADED_IDLE_THRESHOLD_SECS {
+        Some("idle")
+    } else {
+        None // Historical session — skip
+    }
+}
+
+// ─── Direct JSONL file scanner (T-CODEX-JSONL) ─────────────────────
+//
+// codex app-server v0.106.0 does NOT expose currently running sessions via
+// thread/list — it only shows historical (completed) sessions from the SQLite
+// database.  As a workaround, we scan today's JSONL rollout files directly.
+//
+// Layout: ~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl
+// First line: {"type":"session_meta","payload":{"cwd":"<pane-cwd>",...},...}
+//
+// Rules:
+//   mtime < JSONL_ACTIVE_THRESHOLD_SECS → thread.active  (codex currently writing)
+//   mtime < JSONL_IDLE_THRESHOLD_SECS   → thread.idle    (recently finished)
+//   mtime ≥ JSONL_IDLE_THRESHOLD_SECS   → skip           (historical, not relevant)
+
+/// Active threshold: must exceed the longest expected write gap (e.g., `sleep 15` = 15 s gap).
+const JSONL_ACTIVE_THRESHOLD_SECS: u64 = 25;
+/// Idle threshold: emit thread.idle for recently completed sessions.
+const JSONL_IDLE_THRESHOLD_SECS: u64 = 120;
+
+/// Metadata read from the `session_meta` first line of a Codex JSONL rollout file.
+struct JsonlSessionMeta {
+    cwd: String,
+    /// First user task text — extracted from the first `response_item` with role=user
+    /// whose content does not start with `#` (AGENTS.md injection) or `<` (XML-style
+    /// environment context).  Truncated to 120 chars.  `None` if not found within the
+    /// first 30 lines after `session_meta`.
+    instructions: Option<String>,
+}
+
+/// Read metadata from the `session_meta` first line of a Codex JSONL rollout file.
+/// Returns `None` if the file cannot be read or the first line is not `session_meta`.
+///
+/// After reading the CWD from `session_meta`, scans forward up to 30 lines to find
+/// the first genuine user task message (skipping AGENTS.md context injections and
+/// XML-style environment blocks).
+fn read_jsonl_session_meta(path: &std::path::Path) -> Option<JsonlSessionMeta> {
+    use std::io::BufRead as _;
+    let file = std::fs::File::open(path).ok()?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut line = String::new();
+    reader.read_line(&mut line).ok()?;
+    let obj: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    if obj.get("type").and_then(|t| t.as_str()) != Some("session_meta") {
+        return None;
+    }
+    let payload = obj.get("payload")?;
+    let cwd = payload
+        .get("cwd")
+        .and_then(|c| c.as_str())
+        .map(String::from)?;
+
+    // Scan forward through subsequent lines to find the first genuine user task.
+    // Codex JSONL layout (typical):
+    //   line 1: session_meta        (cwd, base_instructions — no task text)
+    //   line 2: response_item       role=developer  (permissions/sandbox)
+    //   line 3: response_item       role=user       (AGENTS.md context injection → skip)
+    //   line 4: event_msg           task_started
+    //   line 5: response_item       role=developer  (collaboration mode)
+    //   line 6: response_item       role=user       ← actual task text ✓
+    //
+    // Heuristic: the first `response_item` role=user content item that doesn't start
+    // with `#` (AGENTS.md header) or `<` (XML-style context block) is the task.
+    let mut instructions: Option<String> = None;
+    for _ in 0..30 {
+        line.clear();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+            break; // EOF
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(evt) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+        if evt.get("type").and_then(|t| t.as_str()) != Some("response_item") {
+            continue;
+        }
+        let evt_payload = match evt.get("payload").and_then(|p| p.as_object()) {
+            Some(p) => p,
+            None => continue,
+        };
+        if evt_payload.get("role").and_then(|r| r.as_str()) != Some("user") {
+            continue;
+        }
+        let content = match evt_payload.get("content").and_then(|c| c.as_array()) {
+            Some(c) => c,
+            None => continue,
+        };
+        for item in content {
+            let text = match item.get("text").and_then(|t| t.as_str()) {
+                Some(t) if !t.is_empty() => t,
+                _ => continue,
+            };
+            // Skip injected context blocks.
+            if text.starts_with('#') || text.starts_with('<') {
+                continue;
+            }
+            // Found the task. Truncate to 120 chars for a compact title.
+            instructions = Some(text.chars().take(120).collect());
+            break;
+        }
+        if instructions.is_some() {
+            break;
+        }
+    }
+
+    Some(JsonlSessionMeta { cwd, instructions })
+}
+
+/// Scan today's Codex JSONL session files and emit deterministic events for
+/// panes whose CWD matches a recently active/idle rollout.
+///
+/// This is the primary detection path for *currently running* `codex --full-auto`
+/// sessions, which the App Server's `thread/list` cannot see until after completion.
+pub(crate) fn scan_jsonl_sessions(
+    pane_cwds: &[PaneCwdInfo],
+    now: DateTime<Utc>,
+) -> Vec<CodexRawEvent> {
+    let home = match std::env::var("HOME") {
+        Ok(h) if !h.is_empty() => h,
+        _ => return Vec::new(),
+    };
+
+    // Scan today's sessions directory, and also yesterday's to handle cross-midnight sessions.
+    // A session that started before midnight and is still running after midnight would only
+    // appear in yesterday's directory and would be missed if we only check today.
+    let today = now.format("%Y/%m/%d").to_string();
+    let yesterday = (now - chrono::Duration::days(1))
+        .format("%Y/%m/%d")
+        .to_string();
+    let sessions_base = format!("{home}/.codex/sessions");
+
+    let collect_candidates = |date: &str| -> Vec<(std::path::PathBuf, u64)> {
+        let dir = std::path::PathBuf::from(format!("{sessions_base}/{date}"));
+        let Ok(iter) = std::fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        iter.flatten()
+            .filter_map(|entry| {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                    return None;
+                }
+                let age_secs = std::fs::metadata(&path)
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|mtime| mtime.elapsed().ok())
+                    .map(|d| d.as_secs())?;
+                if age_secs <= JSONL_IDLE_THRESHOLD_SECS {
+                    Some((path, age_secs))
+                } else {
+                    None // Historical — skip
+                }
+            })
+            .collect()
+    };
+
+    let mut candidates = collect_candidates(&today);
+    candidates.extend(collect_candidates(&yesterday));
+
+    // Sort by age ascending so we process the most-recently-written files first.
+    candidates.sort_by_key(|(_, age)| *age);
+
+    // Pre-sort panes by tier so that when multiple panes share a CWD, the highest-priority
+    // pane (tier 0 = explicit codex, tier 1 = neutral runtime) wins the assignment.
+    let mut sorted_panes: Vec<&PaneCwdInfo> = pane_cwds
+        .iter()
+        .filter(|p| pane_tier(p) < 3) // exclude shell / runtime_unknown upfront
+        .collect();
+    sorted_panes.sort_by(|a, b| {
+        pane_tier(a)
+            .cmp(&pane_tier(b))
+            .then_with(|| a.pane_id.cmp(&b.pane_id))
+    });
+
+    let mut events = Vec::new();
+    // Track which panes have already been matched to avoid double-assignment.
+    let mut matched_panes: HashSet<String> = HashSet::new();
+
+    tracing::debug!(
+        "jsonl-scan: {} candidates, {} eligible panes (today={}, yesterday={})",
+        candidates.len(),
+        sorted_panes.len(),
+        today,
+        yesterday
+    );
+
+    for (path, age_secs) in candidates {
+        let meta = match read_jsonl_session_meta(&path) {
+            Some(m) => m,
+            None => {
+                tracing::debug!("jsonl-scan: skip {:?} (no session_meta)", path.file_name());
+                continue;
+            }
+        };
+
+        let is_active = age_secs <= JSONL_ACTIVE_THRESHOLD_SECS;
+        let event_type = if is_active {
+            "thread.active"
+        } else {
+            "thread.idle"
+        };
+
+        tracing::debug!(
+            "jsonl-scan: {:?} age={}s cwd={} type={}",
+            path.file_name(),
+            age_secs,
+            meta.cwd,
+            event_type
+        );
+
+        // Match the CWD to the highest-priority eligible pane (tier-sorted above).
+        for pane in &sorted_panes {
+            if matched_panes.contains(&pane.pane_id) {
+                continue;
+            }
+
+            // Canonicalize for /tmp → /private/tmp comparison on macOS.
+            let pane_canonical = std::fs::canonicalize(&pane.cwd)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| pane.cwd.clone());
+
+            if pane_canonical != meta.cwd {
+                tracing::trace!(
+                    "jsonl-scan: no match pane={} cwd={} vs meta.cwd={}",
+                    pane.pane_id,
+                    pane_canonical,
+                    meta.cwd
+                );
+                continue;
+            }
+
+            // Derive a stable session key from the filename (uuid part).
+            let session_id = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| format!("jsonl-{s}"))
+                .unwrap_or_else(|| format!("jsonl-{}", pane.pane_id));
+
+            events.push(CodexRawEvent {
+                id: format!("jsonlscan-{}-{}", pane.pane_id, now.timestamp_millis()),
+                event_type: event_type.to_string(),
+                session_id,
+                timestamp: now,
+                pane_id: Some(pane.pane_id.clone()),
+                pane_generation: pane.generation,
+                pane_birth_ts: pane.birth_ts,
+                payload: serde_json::json!({
+                    "cwd": meta.cwd,
+                    "jsonl_age_secs": age_secs,
+                    "source": "jsonl_scan",
+                    // T-135a-bis: task instructions used as conversation title.
+                    "instructions": meta.instructions,
+                }),
+                // Idle events are heartbeats: they maintain state continuity without
+                // advancing last_real_activity or biasing cross-provider arbitration.
+                is_heartbeat: !is_active,
+            });
+
+            matched_panes.insert(pane.pane_id.clone());
+            break; // One match per file.
+        }
+    }
+
+    events
+}
+
 /// Assignment priority tier for a pane based on its process hint.
 /// Lower value = higher priority for Codex thread assignment.
 /// Tier 3 panes are **never** assigned a Codex thread.
@@ -91,7 +409,13 @@ fn build_cwd_pane_groups(pane_cwds: &[PaneCwdInfo]) -> HashMap<String, Vec<PaneC
     let mut map: HashMap<String, Vec<PaneCwdInfo>> = HashMap::new();
     for info in pane_cwds {
         if !info.cwd.is_empty() {
-            map.entry(info.cwd.clone()).or_default().push(info.clone());
+            // Canonicalize to resolve symlinks (e.g. macOS /tmp → /private/tmp).
+            // Codex records the canonical path in thread.cwd, so the query CWD
+            // must also be canonical for the App Server's filter to match.
+            let canonical = std::fs::canonicalize(&info.cwd)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| info.cwd.clone());
+            map.entry(canonical).or_default().push(info.clone());
         }
     }
     for panes in map.values_mut() {
@@ -447,16 +771,32 @@ impl CodexAppServerClient {
             // Status is an object { type: "idle" } per the API reference.
             // The real App Server (v0.104.0+) may omit `status` from `thread/list` —
             // default to "idle" (a listed thread is at least available/loaded).
-            let status = thread
+            let raw_status = thread
                 .get("status")
                 .and_then(|s| s.get("type"))
                 .and_then(|t| t.as_str())
                 .unwrap_or("idle");
 
-            // Skip notLoaded threads (historical, not active agents).
-            if status == "notLoaded" {
-                continue;
-            }
+            // `codex app-server` (v0.106.0) reports ALL `codex --full-auto` sessions as
+            // `notLoaded`, even while they are actively executing.  For CWD-specific
+            // queries we reclassify by checking the session JSONL file's mtime:
+            //   mtime < 30 s  → "active"  (session is writing, i.e. currently running)
+            //   mtime < 120 s → "idle"    (session just finished)
+            //   mtime ≥ 120 s → skip      (historical session, irrelevant)
+            // For the global query (pane_infos empty) we skip notLoaded as before —
+            // no pane assignment can be made there anyway.
+            let status: &str = if raw_status == "notLoaded" {
+                if pane_infos.is_empty() {
+                    continue;
+                }
+                let session_path = thread.get("path").and_then(|p| p.as_str()).unwrap_or("");
+                match classify_notloaded_status(session_path) {
+                    Some(s) => s,
+                    None => continue,
+                }
+            } else {
+                raw_status
+            };
             if thread_id.is_empty() {
                 continue;
             }
@@ -812,6 +1152,9 @@ pub fn parse_codex_capture_events(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     #[tokio::test]
     async fn app_server_spawn_fails_gracefully_when_codex_missing() {
@@ -1285,6 +1628,152 @@ mod tests {
             binding.pane_generation,
             Some(2),
             "binding must use new generation"
+        );
+    }
+
+    // ── classify_notloaded_status: mtime-based classification ────────
+
+    #[test]
+    fn classify_notloaded_empty_path_returns_none() {
+        assert!(
+            classify_notloaded_status("").is_none(),
+            "empty path must return None"
+        );
+    }
+
+    #[test]
+    fn classify_notloaded_nonexistent_path_returns_none() {
+        assert!(
+            classify_notloaded_status("/nonexistent/path/does-not-exist.jsonl").is_none(),
+            "missing file must return None (can't stat)"
+        );
+    }
+
+    #[test]
+    fn classify_notloaded_recent_file_returns_active() {
+        // Create a temp file with a very recent mtime (just written)
+        let dir = std::env::temp_dir();
+        let n = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = dir.join(format!(
+            "agtmux-test-notloaded-active-{}-{}.jsonl",
+            std::process::id(),
+            n
+        ));
+        std::fs::write(&path, b"test").expect("can create temp file");
+
+        let result = classify_notloaded_status(path.to_str().expect("temp path is valid UTF-8"));
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(
+            result,
+            Some("active"),
+            "file written just now must classify as active"
+        );
+    }
+
+    #[test]
+    fn classify_notloaded_old_file_returns_none() {
+        // A file that doesn't exist returns None (simulates an old session whose
+        // JSONL file we can't reach).  We rely on this behaviour for old sessions.
+        let result = classify_notloaded_status("/tmp/agtmux-test-very-old-session.jsonl");
+        assert!(
+            result.is_none(),
+            "old/missing file must return None (historical session)"
+        );
+    }
+
+    // ── process_thread_list_response: notLoaded CWD-query handling ───
+
+    /// Helper: build a thread-list response with a notLoaded thread pointing
+    /// to a *real, just-written* temp file (simulates an active session).
+    fn make_notloaded_thread_response_active() -> (serde_json::Value, std::path::PathBuf) {
+        let dir = std::env::temp_dir();
+        let n = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = dir.join(format!(
+            "agtmux-test-notloaded-thread-{}-{}.jsonl",
+            std::process::id(),
+            n
+        ));
+        std::fs::write(&path, b"session data").expect("can create temp file");
+        let resp = serde_json::json!({
+            "result": {
+                "data": [{
+                    "id": "t-notloaded",
+                    "status": {"type": "notLoaded"},
+                    "path": path.to_str().expect("temp path is valid UTF-8"),
+                    "cwd": "/proj"
+                }]
+            }
+        });
+        (resp, path)
+    }
+
+    #[tokio::test]
+    async fn process_thread_list_notloaded_recent_file_emits_active() {
+        // A notLoaded thread whose session file was just written → classify as "active"
+        let mut client = make_test_client().await;
+        let now = Utc::now();
+        let panes = vec![make_pane("%1", "/proj", Some("codex"))];
+        let (resp, path) = make_notloaded_thread_response_active();
+        let mut tick = HashSet::new();
+        let mut events = Vec::new();
+
+        client.process_thread_list_response(&resp, &panes, &mut tick, now, &mut events);
+
+        let _ = std::fs::remove_file(&path);
+
+        assert!(
+            !events.is_empty(),
+            "must emit at least one event for recently-active notLoaded thread"
+        );
+        assert_eq!(
+            events[0].event_type, "thread.active",
+            "recent notLoaded → thread.active"
+        );
+        assert_eq!(
+            events[0].pane_id,
+            Some("%1".to_string()),
+            "event must be bound to the codex pane"
+        );
+    }
+
+    #[tokio::test]
+    async fn process_thread_list_notloaded_global_query_always_skipped() {
+        // Even with a recent file, notLoaded threads must be skipped in global query
+        // (empty pane_infos).
+        let mut client = make_test_client().await;
+        let now = Utc::now();
+        let (resp, path) = make_notloaded_thread_response_active();
+        let mut tick = HashSet::new();
+        let mut events = Vec::new();
+
+        client.process_thread_list_response(&resp, &[], &mut tick, now, &mut events);
+
+        let _ = std::fs::remove_file(&path);
+
+        assert!(
+            events.is_empty(),
+            "notLoaded threads must be skipped in global query (no pane assignment possible)"
+        );
+    }
+
+    #[tokio::test]
+    async fn process_thread_list_notloaded_missing_path_skipped() {
+        // notLoaded thread with no "path" field → classify_notloaded_status returns None → skip
+        let mut client = make_test_client().await;
+        let now = Utc::now();
+        let panes = vec![make_pane("%1", "/proj", Some("codex"))];
+        let resp = serde_json::json!({
+            "result": {"data": [{"id": "t-np", "status": {"type": "notLoaded"}}]}
+        });
+        let mut tick = HashSet::new();
+        let mut events = Vec::new();
+
+        client.process_thread_list_response(&resp, &panes, &mut tick, now, &mut events);
+
+        assert!(
+            events.is_empty(),
+            "notLoaded thread with no path must be skipped"
         );
     }
 }

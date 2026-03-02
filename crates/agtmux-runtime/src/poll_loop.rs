@@ -34,6 +34,7 @@ use agtmux_tmux_v5::{
 use crate::cli::DaemonOpts;
 use crate::codex_poller::{
     CodexAppServerClient, CodexCaptureTracker, PaneCwdInfo, parse_codex_capture_events,
+    scan_jsonl_sessions,
 };
 use crate::server;
 
@@ -341,33 +342,36 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
     //
     // B5 fix: poll_threads() is called OUTSIDE the mutex to avoid blocking
     // all DaemonState access during the 5s App Server timeout.
+    //
+    // T-119: Build pane cwd info for thread ↔ pane correlation.
+    // Built once here so it can be used by both the App Server poll (step 6a) and
+    // the JSONL session scanner (step 6a-bis), which runs unconditionally.
+    let pane_cwds_for_codex: Vec<PaneCwdInfo> = st
+        .last_panes
+        .iter()
+        .map(|pane| {
+            let gen_info = st.generation_tracker.get(&pane.pane_id);
+            PaneCwdInfo {
+                pane_id: pane.pane_id.clone(),
+                cwd: pane.current_path.clone(),
+                generation: gen_info.map(|(g, _)| g),
+                birth_ts: gen_info.map(|(_, ts)| ts),
+                process_hint: snapshots
+                    .iter()
+                    .find(|s| s.pane_id == pane.pane_id)
+                    .and_then(|s| s.process_hint.clone()),
+            }
+        })
+        .collect();
+
     let appserver_poll_result = {
         let mut client_taken = st.codex_appserver_client.take();
         let alive = client_taken.as_mut().is_some_and(|c| c.is_alive());
         if alive {
-            // T-119: Build pane cwd info for thread ↔ pane correlation
-            let pane_cwds: Vec<PaneCwdInfo> = st
-                .last_panes
-                .iter()
-                .map(|pane| {
-                    let gen_info = st.generation_tracker.get(&pane.pane_id);
-                    PaneCwdInfo {
-                        pane_id: pane.pane_id.clone(),
-                        cwd: pane.current_path.clone(),
-                        generation: gen_info.map(|(g, _)| g),
-                        birth_ts: gen_info.map(|(_, ts)| ts),
-                        process_hint: snapshots
-                            .iter()
-                            .find(|s| s.pane_id == pane.pane_id)
-                            .and_then(|s| s.process_hint.clone()),
-                    }
-                })
-                .collect();
-
             // Release mutex before async I/O
             drop(st);
             let events = if let Some(ref mut client) = client_taken {
-                client.poll_threads(&pane_cwds).await
+                client.poll_threads(&pane_cwds_for_codex).await
             } else {
                 Vec::new()
             };
@@ -452,6 +456,33 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
             if let Some(t) = title {
                 st.conversation_titles
                     .insert(event.session_id.clone(), t.to_string());
+            }
+            st.codex_source.ingest(event);
+        }
+    }
+
+    // 6a-bis: Direct JSONL session scanner (unconditional — runs regardless of App Server state).
+    //
+    // The App Server poll has a 5s outer timeout which fires when many CWD queries time out
+    // (each 500ms), preventing scan_jsonl_sessions from running inside poll_threads_inner.
+    // Running it here ensures running codex sessions are always detected, even when
+    // the App Server is slow or unavailable.  See codex_poller module doc for details.
+    {
+        let jsonl_events = scan_jsonl_sessions(&pane_cwds_for_codex, now);
+        if !jsonl_events.is_empty() {
+            tracing::debug!("codex jsonl-scan: {} events", jsonl_events.len());
+        }
+        for event in jsonl_events {
+            // T-135a-bis: extract conversation title from Codex JSONL session_meta.instructions.
+            // The JSONL scanner session_id ("jsonl-<stem>") is the same key the daemon projection
+            // uses for the pane's session_key, so conversation_titles[session_id] is the correct
+            // lookup for server.rs to find the title.
+            if let Some(instructions) = event.payload["instructions"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+            {
+                st.conversation_titles
+                    .insert(event.session_id.clone(), instructions.to_string());
             }
             st.codex_source.ingest(event);
         }
@@ -584,7 +615,17 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
                 &discoveries,
                 Utc::now(),
             );
-            // T-135b: collect Claude conversation titles from custom-title JSONL events.
+            // T-135c: collect AI-generated summaries (lower priority — or_insert).
+            let summary_updates: Vec<(String, String)> = discoveries
+                .iter()
+                .filter_map(|disc| {
+                    st.claude_jsonl_watchers
+                        .get(&disc.pane_id)
+                        .and_then(|w| w.last_summary())
+                        .map(|s| (disc.session_id.clone(), s.to_string()))
+                })
+                .collect();
+            // T-135b: collect custom-titles (highest priority — insert/overwrite).
             let title_updates: Vec<(String, String)> = discoveries
                 .iter()
                 .filter_map(|disc| {
@@ -594,8 +635,41 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
                         .map(|title| (disc.session_id.clone(), title.to_string()))
                 })
                 .collect();
+            // Apply summaries first (or_insert = won't overwrite an existing custom-title).
+            for (session_id, summary) in summary_updates {
+                st.conversation_titles.entry(session_id).or_insert(summary);
+            }
+            // Apply custom-titles (insert = always overwrite to win over summary).
             for (session_id, title) in title_updates {
                 st.conversation_titles.insert(session_id, title);
+            }
+            // T-135c: sessions-index.json fallback for sessions that still have no title.
+            // Reads the pre-computed index written by Claude Code on session completion.
+            // Provides `summary` (AI-generated) or `firstPrompt` (first user message) for
+            // sessions that completed before the daemon started (watcher seeks to EOF on
+            // creation and would not see historical events).
+            for disc in &discoveries {
+                if st.conversation_titles.contains_key(&disc.session_id) {
+                    continue; // already have a title
+                }
+                if let Some(project_dir) = disc.jsonl_path.parent() {
+                    if let Some(entry) =
+                        agtmux_source_claude_jsonl::discovery::read_session_index_entry(
+                            project_dir,
+                            &disc.session_id,
+                        )
+                    {
+                        let fallback = entry
+                            .summary
+                            .filter(|s| !s.is_empty())
+                            .or_else(|| entry.first_prompt.filter(|s| !s.is_empty()));
+                        if let Some(t) = fallback {
+                            st.conversation_titles
+                                .entry(disc.session_id.clone())
+                                .or_insert(t);
+                        }
+                    }
+                }
             }
             for event in jsonl_events {
                 st.claude_jsonl_source.ingest(event);

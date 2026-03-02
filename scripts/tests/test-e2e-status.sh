@@ -18,10 +18,10 @@ cleanup() {
 trap cleanup EXIT
 
 echo "[e2e] building agtmux..."
-cargo build -p agtmux-runtime --quiet
+cargo build -p agtmux --quiet
 
 echo "[e2e] starting daemon (socket=$SOCKET)..."
-cargo run -p agtmux-runtime --quiet -- --socket-path "$SOCKET" daemon --poll-interval-ms 500 &
+cargo run -p agtmux --quiet -- --socket-path "$SOCKET" daemon --poll-interval-ms 500 &
 DAEMON_PID=$!
 
 # Wait for socket to appear
@@ -43,11 +43,11 @@ echo "[e2e] socket ready, running status..."
 # Give the daemon one poll tick to populate data
 sleep 1.5
 
-OUTPUT=$(cargo run -p agtmux-runtime --quiet -- --socket-path "$SOCKET" status 2>&1) || true
+OUTPUT=$(cargo run -p agtmux --quiet -- --socket-path "$SOCKET" status 2>&1) || true
 echo "$OUTPUT"
 
 # Also test tmux-status
-TMUX_STATUS=$(cargo run -p agtmux-runtime --quiet -- --socket-path "$SOCKET" tmux-status 2>&1) || true
+TMUX_STATUS=$(cargo run -p agtmux --quiet -- --socket-path "$SOCKET" tmux-status 2>&1) || true
 echo "[e2e] tmux-status: $TMUX_STATUS"
 
 # Verify output contains expected patterns

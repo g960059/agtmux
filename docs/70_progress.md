@@ -6,6 +6,47 @@
 
 ---
 
+## 2026-03-01 — T-135c Claude summary + sessions-index.json フォールバック DONE
+
+### 実装内容
+
+`/resume` 一覧で表示される Claude の会話タイトルを最大活用するため、2 つの追加ソースを実装。
+
+**調査結果**: Claude JSONL には 3 種類のタイトルソースが存在する。
+1. `custom-title` イベント (`/rename` コマンド) — T-135b で実装済み
+2. `summary` イベント (AI が自動生成、セッション終了時) — **T-135c で追加**
+3. `sessions-index.json` (`summary` + `firstPrompt` フィールド) — **T-135c で追加**
+
+**Priority chain**: `custom-title > summary(watcher) > summary(sessions-index) > firstPrompt(sessions-index)`
+
+`summary` イベントは JSONL ファイル末尾に書かれるため、watcher が EOF から開始するデーモン再起動後は
+検出できない。`sessions-index.json` フォールバックがこのギャップをカバーする。
+
+### 変更ファイル
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `translate.rs` | `summary: Option<String>` フィールド追加 |
+| `watcher.rs` | `last_summary` + getter/setter 追加 |
+| `source.rs` | `type=summary` ハンドラ追加（2 unit tests）|
+| `discovery.rs` | `SessionIndexEntry` に `summary`/`first_prompt` + `read_session_index_entry()` pub fn（2 unit tests）|
+| `poll_loop.rs` | 3段階優先チェーン（summary→custom-title→sessions-index fallback）|
+| `lib.rs` | `pub use discovery::read_session_index_entry` 追加 |
+| `scenarios/claude-summary.sh` | 新規 e2e シナリオ (Phase 3: summary→title, Phase 4: custom-title wins) |
+| `online/run-all.sh` | `claude-title` + `claude-summary` + `codex-title` シナリオ追加 |
+
+### Gate証跡
+
+- `just verify`: PASS（6 新規 unit tests、合計 759 tests）
+- `PROVIDER=claude e2e-online`: 5 passed, 0 failed
+  - `single-agent-lifecycle` PASS
+  - `multi-agent-same-session` PASS
+  - `provider-switch` PASS
+  - `claude-title` PASS（regression）
+  - `claude-summary` PASS（新規）
+
+---
+
 ## 2026-02-28 — Phase 7 Distribution 戦略決定
 
 ### 背景
@@ -2054,3 +2095,70 @@ Claude Code が JSONL ファイルに書き込む `custom-title` イベントか
   - `custom_title_field_deserialized_from_custom_title_line` (translate.rs)
   - `poll_files_extracts_custom_title_from_jsonl` (source.rs)
   - `poll_files_ignores_empty_custom_title` (source.rs)
+
+---
+
+## 2026-03-01 — T-135b Phase 2: Codex conversation_title (JSONL scanner) + e2e test scenarios
+
+### 概要
+- `codex_poller.rs`: `read_jsonl_session_meta` を修正して Codex JSONL から実際のユーザータスクテキストを
+  `conversation_title` として抽出する。
+- `daemon.sh`: e2e テスト用デーモン起動スクリプトを修正して、グローバルインストールの stale binary を
+  使わず常にローカルビルドのバイナリを使うよう修正。
+- 新規 e2e シナリオ: `codex-title.sh`、`claude-title.sh`
+
+### 問題と修正
+
+#### 1. Codex JSONL の session_meta にタスクテキストがない
+`session_meta.payload.instructions` は system prompt（base_instructions）であり、ユーザータスクではない。
+実際のタスクは JSONL 6行目の `response_item role=user` にある。
+
+**修正**: `read_jsonl_session_meta` で session_meta 後30行をスキャンし、`role=user` かつ
+`#`（AGENTS.md インジェクション）または `<`（XML コンテキストブロック）で始まらない
+最初の content text を `instructions` として採用。120 文字にトリミング。
+
+```
+JSONL レイアウト:
+  line 1: session_meta  (cwd, base_instructions)
+  line 2: response_item role=developer  (permissions/sandbox)
+  line 3: response_item role=user       (AGENTS.md → skip #で始まる)
+  line 4: event_msg     task_started
+  line 5: response_item role=developer  (collaboration mode)
+  line 6: response_item role=user       ← 実際のタスクテキスト ✓
+```
+
+#### 2. e2e テストが stale なグローバルバイナリを使用
+`common.sh` が `AGTMUX_BIN="agtmux"` とデフォルト設定する。`daemon.sh` の古い判定
+`[ "${AGTMUX_BIN:-}" != "" ]` は "agtmux" (コマンド名) を真とみなし、
+`command -v agtmux` がグローバルの `/Users/virtualmachine/go/bin/agtmux` (2月28日ビルド、
+JSONL スキャナーなし) を発見 → デーモンが stale binary で起動 → JSONL スキャナーなし → e2e 失敗。
+
+**修正 1**: `daemon.sh`: `AGTMUX_BIN` が絶対パス (`/* `) のときのみ pre-built として採用。
+それ以外は `cargo build` してローカルの `target/debug/agtmux` を使用。
+
+**修正 2**: デーモン起動後に `AGTMUX_BIN` を解決済みバイナリパスで上書きし、
+`jq_get`/`wait_for_agtmux_state` がデーモンと同一バイナリを使うことを保証。
+
+### 変更ファイル
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `codex_poller.rs` | `read_jsonl_session_meta`: 30行スキャン for ユーザータスク抽出; `JsonlSessionMeta.instructions` doc 更新 |
+| `daemon.sh` | 絶対パス判定 + `AGTMUX_BIN` 上書き (Codex review P1.1 対応) |
+| `scenarios/codex-title.sh` | 新規: Codex conversation_title e2e テスト |
+| `scenarios/claude-title.sh` | 新規: Claude custom-title back-to-back injection + 持続確認 e2e テスト |
+
+### Gate evidence
+- `just verify`: PASS (fmt + clippy + tests)
+- e2e `codex-title.sh`: PASS
+- e2e `claude-title.sh`: PASS
+- e2e `single-agent-lifecycle.sh` (claude, codex): PASS
+- e2e `provider-switch.sh`: PASS
+- e2e `multi-agent-same-session.sh` (claude, codex): PASS
+
+### Codex review 判定
+- P1.1 (AGTMUX_BIN 未同期): **修正済み** → daemon.sh で `AGTMUX_BIN="$_built_bin"` 上書き
+- P1.2 (JSONL_ACTIVE_THRESHOLD_SECS=25 で sleep 60 中に idle 誤分類): **Pre-existing** — 今回変更外。
+  将来 Codex ロングタスク対応が必要な場合は JSONL_ACTIVE_THRESHOLD_SECS の引き上げを検討。
+- P2 (notLoaded stale bindings): **Pre-existing** — App Server client path で今回変更外。
+- Orchestrator 判定: **GO**

@@ -42,19 +42,19 @@ sleep 1
 
 source "$SCRIPT_DIR/../providers/${PROVIDER_A}/adapter.sh"
 log "Phase 1: launching $PROVIDER_A"
-launch_provider "$PANE_ID" "$WORKDIR" "count lines in /etc/hosts and write to phase1.txt"
+launch_provider "$PANE_ID" "$WORKDIR" "Step 1: use bash to run 'sleep 15'. Step 2: use bash to count lines in /etc/hosts. Step 3: use bash to count lines in /etc/shells. Write all results to phase1.txt"
 
-wait_until_provider_running "$PANE_ID" 60 || log "WARN: provider_a running check timed out"
+wait_until_provider_running "$PANE_ID" 10 || log "WARN: provider_a running check timed out"
 wait_for_agtmux_state "$SOCKET" "$PANE_ID" "presence"       "managed"       60
-wait_for_agtmux_state "$SOCKET" "$PANE_ID" "activity_state" "Running"       45
+wait_for_agtmux_state "$SOCKET" "$PANE_ID" "activity_state" "running"       45
 wait_for_agtmux_state "$SOCKET" "$PANE_ID" "evidence_mode"  "deterministic" 30
 
-pass "Phase 1: $PROVIDER_A Running (deterministic)"
+pass "Phase 1: $PROVIDER_A running (deterministic)"
 
-wait_until_provider_idle "$PANE_ID" 180 || log "WARN: provider_a idle check timed out"
-wait_for_agtmux_state "$SOCKET" "$PANE_ID" "activity_state" "Idle" 60
+wait_until_provider_idle "$PANE_ID" 30 || log "WARN: provider_a idle check timed out"
+wait_for_agtmux_state "$SOCKET" "$PANE_ID" "activity_state" "idle" 60
 
-pass "Phase 2: $PROVIDER_A Idle (completed)"
+pass "Phase 2: $PROVIDER_A idle (completed)"
 
 # Unset provider A functions before loading provider B
 unset -f launch_provider wait_until_provider_running wait_until_provider_idle 2>/dev/null || true
@@ -63,17 +63,17 @@ unset -f launch_provider wait_until_provider_running wait_until_provider_idle 2>
 
 source "$SCRIPT_DIR/../providers/${PROVIDER_B}/adapter.sh"
 log "Phase 2: launching $PROVIDER_B in same pane"
-launch_provider "$PANE_ID" "$WORKDIR" "count lines in /etc/hosts and write to phase2.txt"
+launch_provider "$PANE_ID" "$WORKDIR" "Step 1: use bash to run 'sleep 15'. Step 2: use bash to count lines in /etc/hosts. Step 3: use bash to count lines in /etc/shells. Write all results to phase2.txt"
 
-wait_until_provider_running "$PANE_ID" 60 || log "WARN: provider_b running check timed out"
-wait_for_agtmux_state "$SOCKET" "$PANE_ID" "activity_state" "Running"       60
+wait_until_provider_running "$PANE_ID" 10 || log "WARN: provider_b running check timed out"
+wait_for_agtmux_state "$SOCKET" "$PANE_ID" "activity_state" "running"       60
 wait_for_agtmux_state "$SOCKET" "$PANE_ID" "evidence_mode"  "deterministic" 30
 
-pass "Phase 3: $PROVIDER_B Running (provider switched in same pane, deterministic)"
+pass "Phase 3: $PROVIDER_B running (provider switched in same pane, deterministic)"
 
-wait_until_provider_idle "$PANE_ID" 180 || log "WARN: provider_b idle check timed out"
-wait_for_agtmux_state "$SOCKET" "$PANE_ID" "activity_state" "Idle" 60
+wait_until_provider_idle "$PANE_ID" 30 || log "WARN: provider_b idle check timed out"
+wait_for_agtmux_state "$SOCKET" "$PANE_ID" "activity_state" "idle" 60
 
-pass "Phase 4: $PROVIDER_B Idle"
+pass "Phase 4: $PROVIDER_B idle"
 
 echo "=== provider-switch.sh PASS (${PROVIDER_A} → ${PROVIDER_B}) ==="

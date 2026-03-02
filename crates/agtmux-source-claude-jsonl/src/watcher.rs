@@ -22,6 +22,8 @@ pub struct SessionFileWatcher {
     bootstrapped: bool,
     /// Latest custom-title seen in this JSONL file (T-135b).
     last_title: Option<String>,
+    /// Latest AI-generated summary seen in this JSONL file (T-135c).
+    last_summary: Option<String>,
 }
 
 impl SessionFileWatcher {
@@ -41,6 +43,7 @@ impl SessionFileWatcher {
             incomplete_buffer: String::new(),
             bootstrapped: false,
             last_title: None,
+            last_summary: None,
         }
     }
 
@@ -64,6 +67,16 @@ impl SessionFileWatcher {
         self.last_title = Some(title);
     }
 
+    /// Return the latest AI-generated session summary (T-135c).
+    pub fn last_summary(&self) -> Option<&str> {
+        self.last_summary.as_deref()
+    }
+
+    /// Update the latest session summary (T-135c).
+    pub fn set_summary(&mut self, summary: String) {
+        self.last_summary = Some(summary);
+    }
+
     /// Create a watcher starting from position 0 (for testing).
     #[cfg(test)]
     pub fn new_from_start(path: PathBuf) -> Self {
@@ -75,6 +88,7 @@ impl SessionFileWatcher {
             incomplete_buffer: String::new(),
             bootstrapped: false,
             last_title: None,
+            last_summary: None,
         }
     }
 

@@ -53,6 +53,21 @@
   - 新規テスト 2 件 → 753 tests expected
   - blocked_by: T-135a (DONE)
 
+- [x] T-135c (P4) Claude summary + sessions-index.json フォールバック — DONE (2026-03-01)
+  - Priority chain: `custom-title > summary(watcher) > summary(sessions-index) > firstPrompt(sessions-index)`
+  - 変更ファイル 7 件:
+    - `translate.rs`: `ClaudeJsonlLine` に `summary: Option<String>` フィールド追加
+    - `watcher.rs`: `last_summary: Option<String>` + `last_summary()`/`set_summary()` メソッド追加
+    - `source.rs`: `type=summary` 行を検出し `watcher.set_summary()` を呼ぶ（2 新規テスト）
+    - `discovery.rs`: `SessionIndexEntry` に `summary`/`first_prompt` フィールド追加 + `read_session_index_entry()` pub fn（2 新規テスト）
+    - `poll_loop.rs`: 3段階優先チェーン実装（summary→custom-title→sessions-index fallback）
+    - `lib.rs`: `pub use discovery::read_session_index_entry` エクスポート追加
+    - `scenarios/claude-summary.sh`: 新規 e2e テスト（Phase 3: summary→title, Phase 4: custom-title wins）
+    - `online/run-all.sh`: `claude-title` + `claude-summary` + `codex-title` シナリオ追加
+  - 新規テスト 6 件（unit）+ 1 件（e2e）
+  - Gate: `just verify` PASS; e2e PROVIDER=claude 5 passed, 0 failed
+  - blocked_by: T-135b (DONE)
+
 ### Phase 6 Wave 3 — CLI 全体再設計（T-139 拡張）
 
 T-139〜T-142 を統合し CLI を全面再設計（後方互換不要）。
@@ -143,6 +158,17 @@ Phase 7 (Distribution) と独立して実施可能。
   - blocked_by: T-E01, T-E02
 
 ## DOING
+
+### Phase 6 Wave 2 — Conversation Title Enhancement
+
+- [ ] T-135c (P2) Claude conversation_title: summary + sessions-index.json — DOING
+  - **目的**: custom-title 未設定のセッションでも conversation_title を埋める
+  - **T-135c-a** (JSONL summary イベント): watcher で `type=summary` を検出 → `last_summary` に保存
+  - **T-135c-b** (sessions-index.json fallback): `SessionIndexEntry` に `summary`/`first_prompt` 追加; `read_session_index_entry()` 新規 pub fn; poll_loop.rs で sessions-index.json フォールバック
+  - **優先順位チェーン**: `custom-title > summary(watcher) > summary(index) > firstPrompt(index)`
+  - **変更ファイル**: `translate.rs`, `watcher.rs`, `source.rs`, `discovery.rs`, `poll_loop.rs`
+  - **新規 e2e**: `scenarios/claude-summary.sh` (summary inject + priority check)
+  - blocked_by: T-135b (DONE)
 
 ### Phase 7 — Distribution Infrastructure
 

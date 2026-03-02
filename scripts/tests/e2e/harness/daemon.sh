@@ -7,6 +7,7 @@
 # Globals written:
 #   DAEMON_PID — PID of the started daemon
 #   E2E_SOCKET_DIR — temp directory holding the socket (cleaned up by daemon_stop)
+#   AGTMUX_BIN — updated to the resolved binary path so client helpers match the daemon
 
 DAEMON_PID=""
 E2E_SOCKET_DIR=""
@@ -23,19 +24,34 @@ daemon_start() {
 
     log "daemon_start: socket=$socket poll_ms=$poll_ms"
 
-    # Build first if AGTMUX_BIN points at a cargo target (allow override for pre-built)
-    if [ "${AGTMUX_SKIP_BUILD:-0}" = "0" ] && [ "${AGTMUX_BIN:-agtmux}" = "agtmux" ]; then
-        # Use pre-built release binary if available; otherwise fall back to cargo run
-        :
-    fi
-
-    if command -v "${AGTMUX_BIN:-agtmux}" >/dev/null 2>&1 && [ "${AGTMUX_BIN:-}" != "" ]; then
-        "$AGTMUX_BIN" --socket-path "$socket" daemon --poll-interval-ms "$poll_ms" \
+    # Resolve daemon binary: AGTMUX_BIN must be an absolute path to use a pre-built binary.
+    # If AGTMUX_BIN is unset, "agtmux", or a relative name, build from source via cargo.
+    # This prevents accidentally using a globally-installed (potentially stale) agtmux.
+    # After resolution, AGTMUX_BIN is updated so client helpers (jq_get, wait_for_agtmux_state)
+    # use the same binary version as the daemon.
+    local _daemon_bin="${AGTMUX_BIN:-}"
+    if [ -n "$_daemon_bin" ] && [[ "$_daemon_bin" == /* ]] && command -v "$_daemon_bin" >/dev/null 2>&1; then
+        "$_daemon_bin" --socket-path "$socket" daemon --poll-interval-ms "$poll_ms" \
             >/tmp/agtmux-e2e-daemon-$$.log 2>&1 &
+        AGTMUX_BIN="$_daemon_bin"
     else
-        cargo run -p agtmux-runtime --quiet -- \
-            --socket-path "$socket" daemon --poll-interval-ms "$poll_ms" \
-            >/tmp/agtmux-e2e-daemon-$$.log 2>&1 &
+        # Build the latest binary, then run it directly (avoids cargo startup overhead).
+        if [ "${AGTMUX_SKIP_BUILD:-0}" = "0" ]; then
+            cargo build -p agtmux --quiet 2>/dev/null
+        fi
+        # Find the cargo-built binary relative to the repo root.
+        local _repo_root
+        _repo_root="$(git rev-parse --show-toplevel 2>/dev/null || echo ".")"
+        local _built_bin="${_repo_root}/target/debug/agtmux"
+        if [ -x "$_built_bin" ]; then
+            "$_built_bin" --socket-path "$socket" daemon --poll-interval-ms "$poll_ms" \
+                >/tmp/agtmux-e2e-daemon-$$.log 2>&1 &
+            AGTMUX_BIN="$_built_bin"
+        else
+            cargo run -p agtmux --quiet -- \
+                --socket-path "$socket" daemon --poll-interval-ms "$poll_ms" \
+                >/tmp/agtmux-e2e-daemon-$$.log 2>&1 &
+        fi
     fi
     DAEMON_PID=$!
     log "daemon_start: PID=$DAEMON_PID"

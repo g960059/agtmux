@@ -72,6 +72,14 @@ else
     echo "[SKIP] provider-switch (requires both claude and codex CLIs)"
 fi
 
+# conversation_title scenarios: provider-specific
+if [ "$PROVIDER" = "claude" ]; then
+    run_scenario "claude-title"   "$SCENARIOS_DIR/claude-title.sh"
+    run_scenario "claude-summary" "$SCENARIOS_DIR/claude-summary.sh"
+elif [ "$PROVIDER" = "codex" ]; then
+    run_scenario "codex-title" "$SCENARIOS_DIR/codex-title.sh"
+fi
+
 echo ""
 echo "════════════════════════════════════════"
 printf "Detection E2E Results (PROVIDER=%s): %d passed, %d failed\n" "$PROVIDER" "$PASS_COUNT" "$FAIL_COUNT"

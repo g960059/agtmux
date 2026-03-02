@@ -22,6 +22,10 @@ pub struct ClaudeJsonlLine {
     /// Custom conversation title (present on "custom-title" type lines, T-135b).
     #[serde(rename = "customTitle", default)]
     pub custom_title: Option<String>,
+    /// AI-generated session summary (T-135c). Present on `type=summary` events only.
+    /// Format: `{"type":"summary","summary":"...","leafUuid":"..."}`
+    #[serde(default)]
+    pub summary: Option<String>,
 }
 
 /// Contextual info needed to translate a JSONL line into a SourceEventV2.
@@ -96,6 +100,7 @@ mod tests {
             cwd: Some("/Users/vm/project".to_owned()),
             uuid: Some("uuid-001".to_owned()),
             custom_title: None,
+            summary: None,
         }
     }
 
@@ -183,5 +188,18 @@ mod tests {
             serde_json::from_str(line).expect("custom-title line should parse");
         assert_eq!(parsed.line_type, "custom-title");
         assert_eq!(parsed.custom_title.as_deref(), Some("My Title"));
+    }
+
+    #[test]
+    fn summary_field_deserialized_from_summary_line() {
+        let line = r#"{"type":"summary","summary":"Cloud Run本番環境エラー調査","leafUuid":"abc"}"#;
+        let parsed: ClaudeJsonlLine = serde_json::from_str(line).expect("parse");
+        assert_eq!(parsed.line_type, "summary");
+        assert_eq!(
+            parsed.summary.as_deref(),
+            Some("Cloud Run本番環境エラー調査")
+        );
+        // custom_title should be None for summary events
+        assert!(parsed.custom_title.is_none());
     }
 }

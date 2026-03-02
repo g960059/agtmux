@@ -21,7 +21,7 @@ if [ -z "${AGTMUX_BIN:-}" ]; then
     elif command -v agtmux >/dev/null 2>&1; then
         export AGTMUX_BIN="agtmux"
     else
-        echo "[error] agtmux binary not found. Build with 'cargo build -p agtmux-runtime' or set AGTMUX_BIN." >&2
+        echo "[error] agtmux binary not found. Build with 'cargo build -p agtmux' or set AGTMUX_BIN." >&2
         exit 1
     fi
 fi

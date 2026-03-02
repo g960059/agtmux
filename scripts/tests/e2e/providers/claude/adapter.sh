@@ -16,7 +16,7 @@ PROVIDER_NAME="claude"
 # Default task: read /etc/hosts and count lines → write result to WORKDIR/result.txt
 launch_provider() {
     local pane_id="$1" workdir="$2"
-    local task="${3:-count lines in /etc/hosts and write the count to result.txt}"
+    local task="${3:-Step 1: use bash to run 'sleep 15'. Step 2: use bash to count lines in /etc/hosts. Step 3: use bash to count lines in /etc/shells. Write both counts to result.txt}"
     tmux send-keys -t "$pane_id" \
         "cd $(printf '%q' "$workdir") && claude --dangerously-skip-permissions -p $(printf '%q' "$task")" \
         Enter
@@ -35,8 +35,8 @@ wait_until_provider_running() {
         if printf '%s\n' "$capture" | grep -qE '(Claude|●|Thinking|Tool|bash|Read|Write|counting)'; then
             return 0
         fi
-        sleep 2
-        elapsed=$((elapsed + 2))
+        sleep 1
+        elapsed=$((elapsed + 1))
     done
     echo "[WARN] claude adapter: wait_until_provider_running timeout ${timeout}s for pane $pane_id" >&2
     return 1  # non-fatal; let wait_for_agtmux_state be authoritative

@@ -110,20 +110,28 @@ e2e-contract: preflight-contract
 # ── Layer 3: Detection E2E (real CLI required) ────────────────────────────
 # Default timeout: 600s per run. Override: E2E_ONLINE_TIMEOUT=<seconds>
 
+_timeout_cmd := if `command -v gtimeout 2>/dev/null || command -v timeout 2>/dev/null || echo ""` != "" { `command -v gtimeout 2>/dev/null || command -v timeout 2>/dev/null` } else { "" }
+
+_run_online PROV:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    TOUT="${E2E_ONLINE_TIMEOUT:-600}"
+    TCMD="{{_timeout_cmd}}"
+    if [ -n "$TCMD" ]; then
+        PROVIDER="{{PROV}}" "$TCMD" "$TOUT" bash scripts/tests/e2e/online/run-all.sh \
+            || { ec=$?; [ $ec -eq 124 ] && echo "[ERROR] e2e-online timed out after ${TOUT}s" >&2; exit $ec; }
+    else
+        PROVIDER="{{PROV}}" bash scripts/tests/e2e/online/run-all.sh
+    fi
+
 e2e-online: preflight-online
     @cargo build -p agtmux --quiet
-    @PROVIDER="${PROVIDER:-claude}" \
-     bash -c 'timeout "${E2E_ONLINE_TIMEOUT:-600}" bash scripts/tests/e2e/online/run-all.sh \
-              || { ec=$?; [ $ec -eq 124 ] && echo "[ERROR] e2e-online timed out after ${E2E_ONLINE_TIMEOUT:-600}s" >&2; exit $ec; }'
+    just _run_online "${PROVIDER:-claude}"
 
 e2e-online-claude: preflight-online
     @cargo build -p agtmux --quiet
-    @PROVIDER=claude \
-     bash -c 'timeout "${E2E_ONLINE_TIMEOUT:-600}" bash scripts/tests/e2e/online/run-all.sh \
-              || { ec=$?; [ $ec -eq 124 ] && echo "[ERROR] e2e-online-claude timed out after ${E2E_ONLINE_TIMEOUT:-600}s" >&2; exit $ec; }'
+    just _run_online claude
 
 e2e-online-codex: preflight-online
     @cargo build -p agtmux --quiet
-    @PROVIDER=codex \
-     bash -c 'timeout "${E2E_ONLINE_TIMEOUT:-600}" bash scripts/tests/e2e/online/run-all.sh \
-              || { ec=$?; [ $ec -eq 124 ] && echo "[ERROR] e2e-online-codex timed out after ${E2E_ONLINE_TIMEOUT:-600}s" >&2; exit $ec; }'
+    just _run_online codex

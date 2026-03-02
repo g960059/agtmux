@@ -10,3 +10,4 @@ pub mod translate;
 pub mod watcher;
 
 pub use agtmux_core_v5::types;
+pub use discovery::read_session_index_entry;

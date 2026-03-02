@@ -44,21 +44,21 @@ log "launching $PROVIDER in pane $PANE_ID (workdir=$WORKDIR)"
 launch_provider "$PANE_ID" "$WORKDIR"
 
 # Provider-side: wait until provider has started outputting (adapter-specific)
-wait_until_provider_running "$PANE_ID" 60 || log "WARN: provider-side running check timed out (non-fatal)"
+wait_until_provider_running "$PANE_ID" 10 || log "WARN: provider-side running check timed out (non-fatal)"
 
-# agtmux-side: presence → Running → evidence_mode
+# agtmux-side: presence → running → evidence_mode
 wait_for_agtmux_state "$SOCKET" "$PANE_ID" "presence"       "managed"       60
-wait_for_agtmux_state "$SOCKET" "$PANE_ID" "activity_state" "Running"       45
+wait_for_agtmux_state "$SOCKET" "$PANE_ID" "activity_state" "running"       45
 wait_for_agtmux_state "$SOCKET" "$PANE_ID" "evidence_mode"  "deterministic" 30
 
-pass "Scenario 1: $PROVIDER detected as Running (Deterministic)"
+pass "Scenario 1: $PROVIDER detected as running (deterministic)"
 
 # Provider-side: wait until provider has finished (adapter-specific)
-wait_until_provider_idle "$PANE_ID" 180 || log "WARN: provider-side idle check timed out (non-fatal)"
+wait_until_provider_idle "$PANE_ID" 30 || log "WARN: provider-side idle check timed out (non-fatal)"
 
-# agtmux-side: Idle after completion
-wait_for_agtmux_state "$SOCKET" "$PANE_ID" "activity_state" "Idle" 60
+# agtmux-side: idle after completion
+wait_for_agtmux_state "$SOCKET" "$PANE_ID" "activity_state" "idle" 60
 
-pass "Scenario 2: $PROVIDER detected as Idle after completion"
+pass "Scenario 2: $PROVIDER detected as idle after completion"
 
 echo "=== single-agent-lifecycle.sh PASS (PROVIDER=${PROVIDER}) ==="

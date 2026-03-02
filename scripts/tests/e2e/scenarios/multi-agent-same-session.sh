@@ -52,26 +52,26 @@ log "launching $PROVIDER in pane2=$PANE2 (workdir2=$WORKDIR2)"
 launch_provider "$PANE2" "$WORKDIR2"
 
 # Provider-side signals (best-effort)
-wait_until_provider_running "$PANE1" 60 || log "WARN: pane1 provider-side running check timed out"
-wait_until_provider_running "$PANE2" 60 || log "WARN: pane2 provider-side running check timed out"
+wait_until_provider_running "$PANE1" 10 || log "WARN: pane1 provider-side running check timed out"
+wait_until_provider_running "$PANE2" 10 || log "WARN: pane2 provider-side running check timed out"
 
-# agtmux-side: both panes managed, Running, and deterministic
+# agtmux-side: both panes managed, running, and deterministic
 wait_for_agtmux_state "$SOCKET" "$PANE1" "presence"       "managed"       60
 wait_for_agtmux_state "$SOCKET" "$PANE2" "presence"       "managed"       60
-wait_for_agtmux_state "$SOCKET" "$PANE1" "activity_state" "Running"       45
-wait_for_agtmux_state "$SOCKET" "$PANE2" "activity_state" "Running"       45
+wait_for_agtmux_state "$SOCKET" "$PANE1" "activity_state" "running"       45
+wait_for_agtmux_state "$SOCKET" "$PANE2" "activity_state" "running"       45
 wait_for_agtmux_state "$SOCKET" "$PANE1" "evidence_mode"  "deterministic" 30
 wait_for_agtmux_state "$SOCKET" "$PANE2" "evidence_mode"  "deterministic" 30
 
 pass "Scenario 1: Both $PROVIDER agents managed independently in same session (deterministic)"
 
 # Wait for both to finish
-wait_until_provider_idle "$PANE1" 180 || log "WARN: pane1 idle check timed out"
-wait_until_provider_idle "$PANE2" 180 || log "WARN: pane2 idle check timed out"
+wait_until_provider_idle "$PANE1" 30 || log "WARN: pane1 idle check timed out"
+wait_until_provider_idle "$PANE2" 30 || log "WARN: pane2 idle check timed out"
 
-wait_for_agtmux_state "$SOCKET" "$PANE1" "activity_state" "Idle" 60
-wait_for_agtmux_state "$SOCKET" "$PANE2" "activity_state" "Idle" 60
+wait_for_agtmux_state "$SOCKET" "$PANE1" "activity_state" "idle" 60
+wait_for_agtmux_state "$SOCKET" "$PANE2" "activity_state" "idle" 60
 
-pass "Scenario 2: Both $PROVIDER agents Idle after completion"
+pass "Scenario 2: Both $PROVIDER agents idle after completion"
 
 echo "=== multi-agent-same-session.sh PASS (PROVIDER=${PROVIDER}) ==="

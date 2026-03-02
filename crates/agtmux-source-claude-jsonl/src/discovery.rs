@@ -35,6 +35,11 @@ pub struct SessionIndexEntry {
     pub modified: DateTime<Utc>,
     #[serde(default)]
     pub is_sidechain: bool,
+    // T-135c: title fallback fields
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub first_prompt: Option<String>,
 }
 
 /// The `sessions-index.json` file structure.
@@ -365,6 +370,21 @@ fn read_sessions_index(path: &Path) -> Result<SessionsIndex, String> {
     serde_json::from_str(&content).map_err(|e| format!("parse error: {e}"))
 }
 
+/// Look up a session entry by `session_id` from the `sessions-index.json`
+/// in the given project directory.
+///
+/// Returns `None` if the file doesn't exist, can't be parsed, or the
+/// `session_id` isn't found.  This is a best-effort fallback — callers
+/// must handle `None` gracefully.
+pub fn read_session_index_entry(project_dir: &Path, session_id: &str) -> Option<SessionIndexEntry> {
+    let path = project_dir.join("sessions-index.json");
+    let index = read_sessions_index(&path).ok()?;
+    index
+        .entries
+        .into_iter()
+        .find(|e| e.session_id == session_id)
+}
+
 /// Find the best (latest, non-sidechain) session entry matching the CWD.
 fn find_best_session<'a>(
     index: &'a SessionsIndex,
@@ -439,6 +459,8 @@ mod tests {
                     git_branch: None,
                     modified: "2026-02-25T10:00:00Z".parse().expect("test"),
                     is_sidechain: false,
+                    summary: None,
+                    first_prompt: None,
                 },
                 SessionIndexEntry {
                     session_id: "new-session".to_owned(),
@@ -447,6 +469,8 @@ mod tests {
                     git_branch: None,
                     modified: "2026-02-25T14:00:00Z".parse().expect("test"),
                     is_sidechain: false,
+                    summary: None,
+                    first_prompt: None,
                 },
                 SessionIndexEntry {
                     session_id: "sidechain-session".to_owned(),
@@ -455,6 +479,8 @@ mod tests {
                     git_branch: None,
                     modified: "2026-02-25T15:00:00Z".parse().expect("test"),
                     is_sidechain: true,
+                    summary: None,
+                    first_prompt: None,
                 },
             ],
         };
@@ -476,6 +502,8 @@ mod tests {
                 git_branch: None,
                 modified: "2026-02-25T10:00:00Z".parse().expect("test"),
                 is_sidechain: false,
+                summary: None,
+                first_prompt: None,
             }],
         };
 
@@ -507,6 +535,78 @@ mod tests {
         assert_eq!(index.original_path, "/Users/vm/project");
         assert_eq!(index.entries.len(), 1);
         assert_eq!(index.entries[0].session_id, "sess-abc");
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn session_index_entry_parses_summary_and_first_prompt() {
+        let entry_json = serde_json::json!({
+            "sessionId": "test-sess",
+            "fullPath": "/tmp/test-sess.jsonl",
+            "projectPath": "/Users/vm/project",
+            "modified": "2026-02-25T12:00:00Z",
+            "isSidechain": false,
+            "summary": "Test Summary",
+            "firstPrompt": "How do I fix this bug?"
+        });
+        let entry: SessionIndexEntry = serde_json::from_value(entry_json).expect("should parse");
+        assert_eq!(entry.session_id, "test-sess");
+        assert_eq!(entry.summary, Some("Test Summary".to_owned()));
+        assert_eq!(
+            entry.first_prompt,
+            Some("How do I fix this bug?".to_owned())
+        );
+    }
+
+    #[test]
+    fn read_session_index_entry_finds_by_session_id() {
+        let tmp = std::env::temp_dir().join("agtmux-test-read-index-entry");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).expect("test");
+
+        let index_json = serde_json::json!({
+            "version": 1,
+            "originalPath": "/Users/vm/project",
+            "entries": [
+                {
+                    "sessionId": "sess-a",
+                    "fullPath": "/tmp/sess-a.jsonl",
+                    "projectPath": "/Users/vm/project",
+                    "modified": "2026-02-25T10:00:00Z",
+                    "isSidechain": false,
+                    "summary": "Summary A",
+                    "firstPrompt": "Prompt A"
+                },
+                {
+                    "sessionId": "sess-b",
+                    "fullPath": "/tmp/sess-b.jsonl",
+                    "projectPath": "/Users/vm/project",
+                    "modified": "2026-02-25T11:00:00Z",
+                    "isSidechain": false
+                }
+            ]
+        });
+        let index_path = tmp.join("sessions-index.json");
+        fs::write(
+            &index_path,
+            serde_json::to_string(&index_json).expect("test"),
+        )
+        .expect("test");
+
+        let entry_a = read_session_index_entry(&tmp, "sess-a");
+        assert!(entry_a.is_some(), "sess-a should be found");
+        let entry_a = entry_a.expect("test");
+        assert_eq!(entry_a.session_id, "sess-a");
+        assert_eq!(entry_a.summary, Some("Summary A".to_owned()));
+        assert_eq!(entry_a.first_prompt, Some("Prompt A".to_owned()));
+
+        let entry_b = read_session_index_entry(&tmp, "sess-b");
+        assert!(entry_b.is_some(), "sess-b should be found");
+        assert_eq!(entry_b.expect("test").session_id, "sess-b");
+
+        let entry_none = read_session_index_entry(&tmp, "nonexistent");
+        assert!(entry_none.is_none(), "nonexistent should return None");
 
         let _ = fs::remove_dir_all(&tmp);
     }

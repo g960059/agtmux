@@ -155,6 +155,15 @@ impl ClaudeJsonlSourceState {
                             }
                             continue; // no activity event from title changes
                         }
+                        // T-135c: capture AI-generated session summary.
+                        if parsed.line_type == "summary" {
+                            if let Some(ref s) = parsed.summary
+                                && !s.is_empty()
+                            {
+                                watcher.set_summary(s.clone());
+                            }
+                            continue; // no activity event from summary events
+                        }
                         if let Some(event) = translate::translate(&parsed, &ctx) {
                             emitted_real_event = true;
                             events.push(event);
@@ -735,6 +744,99 @@ mod tests {
             watchers.get("%1").expect("watcher must exist").last_title(),
             Some("Original Title"),
             "empty customTitle should not overwrite existing title"
+        );
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// T-135c: poll_files() captures the AI-generated summary from summary JSONL events
+    /// and stores it in the watcher.
+    #[test]
+    fn poll_files_extracts_summary_from_jsonl() {
+        use std::fs;
+        use std::io::Write;
+
+        let tmp = std::env::temp_dir().join("agtmux-test-summary-extract");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).expect("test");
+
+        let jsonl_path = tmp.join("summary-session.jsonl");
+        let mut f = fs::File::create(&jsonl_path).expect("test");
+        writeln!(
+            f,
+            r#"{{"type":"summary","summary":"Test Summary","leafUuid":"abc"}}"#
+        )
+        .expect("test");
+        drop(f);
+
+        let discoveries = vec![SessionDiscovery {
+            pane_id: "%10".to_owned(),
+            session_id: "sum-sess".to_owned(),
+            jsonl_path: jsonl_path.clone(),
+            pane_generation: Some(1),
+            pane_birth_ts: None,
+            cwd_candidate_count: 1,
+        }];
+
+        let mut watchers = HashMap::new();
+        watchers.insert(
+            "%10".to_owned(),
+            SessionFileWatcher::new_from_start(jsonl_path),
+        );
+
+        let _ = ClaudeJsonlSourceState::poll_files(&mut watchers, &discoveries, now());
+
+        assert_eq!(
+            watchers
+                .get("%10")
+                .expect("watcher must exist")
+                .last_summary(),
+            Some("Test Summary"),
+            "poll_files should capture summary from summary events"
+        );
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// T-135c: an empty summary must not be stored in the watcher.
+    #[test]
+    fn poll_files_ignores_empty_summary() {
+        use std::fs;
+        use std::io::Write;
+
+        let tmp = std::env::temp_dir().join("agtmux-test-empty-summary");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).expect("test");
+
+        let jsonl_path = tmp.join("empty-summary-session.jsonl");
+        let mut f = fs::File::create(&jsonl_path).expect("test");
+        writeln!(f, r#"{{"type":"summary","summary":"","leafUuid":"abc"}}"#).expect("test");
+        drop(f);
+
+        let discoveries = vec![SessionDiscovery {
+            pane_id: "%11".to_owned(),
+            session_id: "empty-sum-sess".to_owned(),
+            jsonl_path: jsonl_path.clone(),
+            pane_generation: Some(1),
+            pane_birth_ts: None,
+            cwd_candidate_count: 1,
+        }];
+
+        let mut watchers = HashMap::new();
+        watchers.insert(
+            "%11".to_owned(),
+            SessionFileWatcher::new_from_start(jsonl_path),
+        );
+
+        let _ = ClaudeJsonlSourceState::poll_files(&mut watchers, &discoveries, now());
+
+        assert_eq!(
+            watchers
+                .get("%11")
+                .expect("watcher must exist")
+                .last_summary(),
+            None,
+            "empty summary should not be stored"
         );
 
         let _ = fs::remove_dir_all(&tmp);
