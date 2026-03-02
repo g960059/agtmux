@@ -124,20 +124,19 @@ fn discover_sessions_in_projects_dir(
         let cwd_candidate_count = *cwd_count.get(canonical_cwd.as_str()).unwrap_or(&1);
 
         // P2: fd-based discovery (lsof) — higher confidence than CWD-based
-        if let Some(pane_pid) = hint.pane_pid {
-            if let Some((session_id, jsonl_path)) =
+        if let Some(pane_pid) = hint.pane_pid
+            && let Some((session_id, jsonl_path)) =
                 discover_jsonl_via_lsof(pane_pid, claude_projects_dir)
-            {
-                results.push(SessionDiscovery {
-                    pane_id: hint.pane_id.clone(),
-                    session_id,
-                    jsonl_path,
-                    pane_generation: hint.pane_generation,
-                    pane_birth_ts: hint.pane_birth_ts,
-                    cwd_candidate_count: 1, // fd-based is unambiguous
-                });
-                continue; // skip P3 for this pane
-            }
+        {
+            results.push(SessionDiscovery {
+                pane_id: hint.pane_id.clone(),
+                session_id,
+                jsonl_path,
+                pane_generation: hint.pane_generation,
+                pane_birth_ts: hint.pane_birth_ts,
+                cwd_candidate_count: 1, // fd-based is unambiguous
+            });
+            continue; // skip P3 for this pane
         }
 
         // P3: CWD-based discovery (existing fallback)

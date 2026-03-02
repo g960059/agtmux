@@ -160,17 +160,18 @@ impl DaemonProjection {
 
             // B2: Update last_real_activity for non-heartbeat deterministic events.
             for event in &output.accepted_events {
-                if !event.is_heartbeat && event.tier == EvidenceTier::Deterministic {
-                    if let Some(pane_id) = &event.pane_id {
-                        let entry = self
-                            .last_real_activity
-                            .entry(pane_id.clone())
-                            .or_default()
-                            .entry(event.provider)
-                            .or_insert(event.observed_at);
-                        if event.observed_at > *entry {
-                            *entry = event.observed_at;
-                        }
+                if !event.is_heartbeat
+                    && event.tier == EvidenceTier::Deterministic
+                    && let Some(pane_id) = &event.pane_id
+                {
+                    let entry = self
+                        .last_real_activity
+                        .entry(pane_id.clone())
+                        .or_default()
+                        .entry(event.provider)
+                        .or_insert(event.observed_at);
+                    if event.observed_at > *entry {
+                        *entry = event.observed_at;
                     }
                 }
             }
@@ -189,10 +190,10 @@ impl DaemonProjection {
                     .or_else(|| self.session_to_pane.get(&event.session_key).cloned());
                 if let Some(pane_id) = pane_id {
                     // Provider arbitration: skip events from losing providers.
-                    if let Some(wp) = winning_provider {
-                        if event.provider != wp {
-                            continue;
-                        }
+                    if let Some(wp) = winning_provider
+                        && event.provider != wp
+                    {
+                        continue;
                     }
                     if self.project_pane(&pane_id, event, &output, now)
                         && panes_counted.insert(pane_id)

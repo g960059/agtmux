@@ -145,13 +145,13 @@ pub async fn cmd_wait(
         }
 
         // Timeout check
-        if let Some(timeout) = timeout_secs {
-            if start.elapsed().as_secs() >= timeout {
-                if is_tty && !quiet {
-                    eprintln!("\rTimeout after {timeout}s");
-                }
-                return 1;
+        if let Some(timeout) = timeout_secs
+            && start.elapsed().as_secs() >= timeout
+        {
+            if is_tty && !quiet {
+                eprintln!("\rTimeout after {timeout}s");
             }
+            return 1;
         }
 
         // Sleep or interrupt

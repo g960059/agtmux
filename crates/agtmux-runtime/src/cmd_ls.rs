@@ -242,7 +242,7 @@ pub fn format_ls_tree(
                 _ => String::new(),
             };
 
-            let summary = state_summary(&panes_in_win.iter().copied().collect::<Vec<_>>());
+            let summary = state_summary(panes_in_win);
             let summary_suffix = if summary.is_empty() {
                 String::new()
             } else {

@@ -592,17 +592,17 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
 
             // P1: transcript_path hints (SessionStart hook payload) override P3.
             for hint in &candidate_pane_cwds {
-                if let Some(hint_path) = st.transcript_path_hints.get(&hint.pane_id) {
-                    if let Some(hint_disc) = discovery_from_transcript_path(
+                if let Some(hint_path) = st.transcript_path_hints.get(&hint.pane_id)
+                    && let Some(hint_disc) = discovery_from_transcript_path(
                         &hint.pane_id,
                         hint_path,
                         hint.pane_generation,
                         hint.pane_birth_ts,
-                    ) {
-                        // Replace or append: remove any CWD-based discovery for this pane.
-                        discoveries.retain(|d| d.pane_id != hint.pane_id);
-                        discoveries.push(hint_disc);
-                    }
+                    )
+                {
+                    // Replace or append: remove any CWD-based discovery for this pane.
+                    discoveries.retain(|d| d.pane_id != hint.pane_id);
+                    discoveries.push(hint_disc);
                 }
             }
             // Use Utc::now() (not poll_tick's `now`) so the bootstrap event's observed_at
@@ -652,22 +652,21 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
                 if st.conversation_titles.contains_key(&disc.session_id) {
                     continue; // already have a title
                 }
-                if let Some(project_dir) = disc.jsonl_path.parent() {
-                    if let Some(entry) =
+                if let Some(project_dir) = disc.jsonl_path.parent()
+                    && let Some(entry) =
                         agtmux_source_claude_jsonl::discovery::read_session_index_entry(
                             project_dir,
                             &disc.session_id,
                         )
-                    {
-                        let fallback = entry
-                            .summary
-                            .filter(|s| !s.is_empty())
-                            .or_else(|| entry.first_prompt.filter(|s| !s.is_empty()));
-                        if let Some(t) = fallback {
-                            st.conversation_titles
-                                .entry(disc.session_id.clone())
-                                .or_insert(t);
-                        }
+                {
+                    let fallback = entry
+                        .summary
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| entry.first_prompt.filter(|s| !s.is_empty()));
+                    if let Some(t) = fallback {
+                        st.conversation_titles
+                            .entry(disc.session_id.clone())
+                            .or_insert(t);
                     }
                 }
             }
@@ -730,11 +729,10 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
                         .payload
                         .get("transcript_path")
                         .and_then(|v| v.as_str())
+                        && !path_str.is_empty()
                     {
-                        if !path_str.is_empty() {
-                            st.transcript_path_hints
-                                .insert(pane_id.clone(), std::path::PathBuf::from(path_str));
-                        }
+                        st.transcript_path_hints
+                            .insert(pane_id.clone(), std::path::PathBuf::from(path_str));
                     }
                 }
                 "lifecycle.end" => {
