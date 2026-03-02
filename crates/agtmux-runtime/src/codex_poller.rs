@@ -397,8 +397,8 @@ pub(crate) fn scan_jsonl_sessions(
         if matched_panes.contains(&pane.pane_id) {
             continue; // Already matched in the fresh scan
         }
-        if pane.process_hint.as_deref() != Some("codex") {
-            continue; // Only enrich panes explicitly running codex
+        if pane_tier(pane) > 1 {
+            continue; // Only enrich tier-0 (codex) and tier-1 (neutral runtime like node)
         }
 
         let pane_canonical = std::fs::canonicalize(&pane.cwd)
@@ -441,7 +441,7 @@ pub(crate) fn scan_jsonl_sessions(
                     continue;
                 }
                 // Keep the most-recently-modified match.
-                if best.as_ref().map_or(true, |(_, a, _)| age_secs < *a) {
+                if best.as_ref().is_none_or(|(_, a, _)| age_secs < *a) {
                     best = Some((path, age_secs, meta));
                     // Oldest files are at the start of earlier days; once we found a match
                     // on a given day we can still look earlier — but stop once the best

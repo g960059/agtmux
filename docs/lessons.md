@@ -97,3 +97,24 @@ JSONL スキャナーなどの新機能が動かず、テストが謎の失敗�
 
 **防止策**: `daemon.sh` を `[[ "$_daemon_bin" == /* ]]` で絶対パス判定に修正。
 ローカルビルド後 `AGTMUX_BIN="$_built_bin"` を上書き。
+
+---
+
+## 2026-03-02 — ローカル lint と CI clippy のフラグ不一致が「ローカル PASS、CI FAIL」を生む
+
+**状況**: v0.1.5 の CI が `clippy::unnecessary_map_or` で失敗。ローカル `just lint` は PASS していた。
+
+**根本原因**: `justfile` の `lint` ターゲットが特定の lint フラグ (`-D clippy::dbg_macro` 等) を指定していたが
+`-D warnings` を含んでいなかった。CI は `cargo clippy --workspace -- -D warnings` で実行するため、
+CI の Rust バージョンで追加された新しい lint が警告扱いになると CI だけで失敗する。
+
+**教訓**:
+1. ローカル `lint` は CI と完全に同じフラグを使うこと。差異があると「ローカル PASS → CI FAIL → 小さな fix commit」サイクルが発生する。
+2. `-D warnings` はすべての future lint もエラーにするため、CI で使う場合はローカルにも必ず適用する。
+3. pre-commit hook に `cargo clippy -- -D warnings` を入れることで commit 時点でキャッチできる。
+
+**防止策**:
+- `justfile` の `lint` に `-D warnings` を追加 (CI と一致)
+- `scripts/pre-commit.sh` に clippy を追加 (`cargo clippy --workspace -- -D warnings`)
+- `just install-hooks` でクローン後にワンコマンドで設定できるようにした
+- `docs/55_distribution.md` にローカル開発リリースフローを明記し、エージェントが遵守できるようにした

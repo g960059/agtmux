@@ -6,6 +6,60 @@
 
 ---
 
+## 2026-03-02 — CI/CD 安定化 + Codex historical enrichment 改善
+
+### v0.1.4 — 既存デーモン自動置換
+
+**背景**: 既存デーモンが動いている状態で `agtmux daemon` を起動すると即座にエラーで終了していた。
+ユーザーは kill を忘れる → 新デーモンが立ち上がらない。
+
+**修正**: `crates/agtmux-runtime/src/server.rs`
+- ソケットに接続できる場合: `daemon.info` JSON-RPC で PID を取得 → SIGTERM → ソケット消滅待ち (3秒) → force remove
+- ソケットが stale な場合: そのまま削除して起動
+
+**Gate**: `just verify` PASS → v0.1.4 タグ push → CI/CD PASS、Homebrew tap 更新
+
+---
+
+### v0.1.5 — Codex historical JSONL enrichment
+
+**背景**: Codex JSONL scanner がファイル mtime ≤ 120秒のもの (`JSONL_IDLE_THRESHOLD_SECS`) しか処理しないため、
+デーモン再起動後に既存 Codex セッション (数時間前のファイル) が evidence なしのまま heuristic に落ちていた。
+結果: `evidence_mode=heuristic`, `updated_at=just now`, `conversation_title=null`, `activity_state=Unknown`
+
+**修正**: `crates/agtmux-runtime/src/codex_poller.rs`
+1. `scan_jsonl_sessions()` 末尾に historical enrichment pass を追加 (7日分スキャン)
+2. 新規フィールド `actual_activity_at: Option<DateTime<Utc>>` を `CodexRawEvent` に追加
+3. projection が `actual_activity_at` を `updated_at` として使用 → ファイル mtime が正しく反映される
+4. `is_heartbeat = false` を明示 → projection が `updated_at` を上書きするトリガーになる
+
+**Gate**: `just verify` PASS → v0.1.5 タグ push → CI **FAIL** (下記参照)
+
+---
+
+### 2026-03-02 — CI/CD 根本修正 (v0.1.5 失敗の原因と対策)
+
+**失敗原因**: ローカル `lint` と CI `clippy` のフラグが不一致
+- CI: `cargo clippy --workspace -- -D warnings` → すべての warning がエラー
+- ローカル: `cargo clippy --workspace --all-targets --all-features --locked -- -D clippy::dbg_macro ...` → `-D warnings` なし
+
+このため `clippy::unnecessary_map_or` lint (`map_or(true, ...)` → `is_none_or(...)`) がローカルでは通り CI で失敗した。
+
+**修正内容**:
+1. `crates/agtmux-runtime/src/codex_poller.rs:444` — `map_or(true, ...)` → `is_none_or(...)`
+2. `crates/agtmux-runtime/src/codex_poller.rs:400` — historical enrichment pass の条件を tier ベースに改善
+   - `if pane.process_hint.as_deref() != Some("codex")` → `if pane_tier(pane) > 1`
+   - tier 0 (`Some("codex")`) と tier 1 (`None` = neutral runtime like node) を許可、競合エージェントとシェルを除外
+3. `justfile` — `lint` を `cargo clippy --workspace -- -D warnings -D clippy::...` に更新 (CI と一致)
+4. `scripts/pre-commit.sh` + `.git/hooks/pre-commit` — `cargo fmt` に加え `cargo clippy -- -D warnings` を追加
+5. `justfile` — `install-hooks` ターゲット追加 (クローン後 `just install-hooks` で一発設定)
+
+**教訓**: ローカル lint と CI lint は常に同一フラグであること。差異があると「ローカル PASS、CI FAIL」のサイクルに陥る。
+
+**Gate**: `just verify` PASS (771 tests, 0 failed)
+
+---
+
 ## 2026-03-01 — T-135c Claude summary + sessions-index.json フォールバック DONE
 
 ### 実装内容

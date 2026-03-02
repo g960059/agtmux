@@ -159,17 +159,6 @@ Phase 7 (Distribution) と独立して実施可能。
 
 ## DOING
 
-### Phase 6 Wave 2 — Conversation Title Enhancement
-
-- [ ] T-135c (P2) Claude conversation_title: summary + sessions-index.json — DOING
-  - **目的**: custom-title 未設定のセッションでも conversation_title を埋める
-  - **T-135c-a** (JSONL summary イベント): watcher で `type=summary` を検出 → `last_summary` に保存
-  - **T-135c-b** (sessions-index.json fallback): `SessionIndexEntry` に `summary`/`first_prompt` 追加; `read_session_index_entry()` 新規 pub fn; poll_loop.rs で sessions-index.json フォールバック
-  - **優先順位チェーン**: `custom-title > summary(watcher) > summary(index) > firstPrompt(index)`
-  - **変更ファイル**: `translate.rs`, `watcher.rs`, `source.rs`, `discovery.rs`, `poll_loop.rs`
-  - **新規 e2e**: `scenarios/claude-summary.sh` (summary inject + priority check)
-  - blocked_by: T-135b (DONE)
-
 ### Phase 7 — Distribution Infrastructure
 
 - [ ] T-D01 (P1) LICENSE + Cargo.toml メタデータ整備

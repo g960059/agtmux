@@ -68,18 +68,44 @@ musl ターゲットは `cross` クレートで Docker ベースビルドに統�
 ツール: **`cargo-dist`** (axodotdev)
 - Homebrew tap 自動更新、install.sh 生成、GitHub Actions ワークフロー生成をカバー
 
-### リリースフロー
+### ローカル開発リリースフロー (エージェント遵守必須)
 
 ```
-git tag v0.x.x && git push --tags
-    │
-    ├─ [verify] just verify (fmt + lint + test)
-    ├─ [build] cross-compile × 4 targets (cargo-dist)
+# 1. コード修正 + just verify (ローカルでも CI と同一チェックを実行)
+just verify
+
+# 2. バージョン番号を決めてリリース (just release が verify を内包している)
+just release 0.1.x
+
+# just release は以下を順番に実行する:
+#   a) uncommitted changes チェック (あればエラーで停止)
+#   b) Cargo.toml + Cargo.lock のバージョン bump
+#   c) just verify (fmt + lint + test) — ここで CI と同じ clippy が走る
+#   d) git commit + tag + push → GitHub Actions がリリースビルドを開始
+```
+
+**重要制約**:
+- `just verify` を通過しないコードは決してタグを push しない
+- ローカル `just lint` は CI と同一フラグ (`-D warnings`) を使用する
+- pre-commit hook が自動で `cargo fmt` + `cargo clippy -- -D warnings` を実行する
+- 初回クローン後: `just install-hooks` で hook をインストールすること
+
+### CI/CD ゲート (GitHub Actions)
+
+```
+push → main (CI workflow):
+    ├─ fmt: cargo fmt --all -- --check
+    ├─ clippy: cargo clippy --workspace -- -D warnings
+    └─ test: cargo test --workspace --all-features --locked
+
+tag push → v* (Release workflow, cargo-dist):
+    ├─ ci-gate: CI と同一チェック
+    ├─ [build] cross-compile × 4 targets
     ├─ [package] tar.gz + SHA256SUMS + SBOM
-    ├─ [attest] GitHub Artifact Attestation (provenance)
-    ├─ [release] GitHub Release (draft → publish)
-    ├─ [tap] homebrew-tap Formula/agtmux.rb を自動更新 push
-    └─ [smoke] クリーン環境で brew install + agtmux --version 検証
+    ├─ [attest] GitHub Artifact Attestation
+    ├─ [release] GitHub Release publish
+    ├─ [tap] homebrew-tap Formula/agtmux.rb 自動更新
+    └─ [smoke] brew install + agtmux --version
 ```
 
 ### Cargo.toml メタデータ (workspace)

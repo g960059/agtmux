@@ -35,13 +35,22 @@ release VERSION:
     git push origin "v{{VERSION}}"
     echo "=== Released v{{VERSION}} ==="
 
+# Lint: matches CI exactly (cargo clippy --workspace -- -D warnings).
+# Extra project-specific lints are layered on top.
 lint:
-    cargo clippy --workspace --all-targets --all-features --locked -- -D clippy::dbg_macro -D clippy::todo -D clippy::unwrap_used -D clippy::undocumented_unsafe_blocks
+    cargo clippy --workspace -- -D warnings -D clippy::dbg_macro -D clippy::todo -D clippy::unwrap_used -D clippy::undocumented_unsafe_blocks
 
 test:
     cargo test --workspace --all-features --locked
 
 verify: fmt lint test
+
+# Install the project's pre-commit hook into the local .git/hooks/ directory.
+# Run once after cloning: just install-hooks
+install-hooks:
+    cp scripts/pre-commit.sh .git/hooks/pre-commit
+    chmod +x .git/hooks/pre-commit
+    @echo "pre-commit hook installed"
 
 preflight-online:
     @echo "[preflight] tmux availability"
