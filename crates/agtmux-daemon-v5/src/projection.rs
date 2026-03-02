@@ -229,7 +229,23 @@ impl DaemonProjection {
                     .then_with(|| a.event_id.cmp(&b.event_id))
             });
 
-        let (activity_state, activity_source) = match latest_event {
+        // Prefer the latest *non-heartbeat* event for activity_state.
+        // Periodic idle_heartbeats (is_heartbeat=true) have Utc::now() as observed_at
+        // and can be newer than real hooks events; using them for activity_state would
+        // flip Running→Idle between back-to-back tool calls.
+        // Fall back to latest_event only if all events are heartbeats (e.g. initial bootstrap).
+        let state_event = output
+            .accepted_events
+            .iter()
+            .filter(|e| e.session_key == session_key && !e.is_heartbeat)
+            .max_by(|a, b| {
+                a.observed_at
+                    .cmp(&b.observed_at)
+                    .then_with(|| a.event_id.cmp(&b.event_id))
+            })
+            .or(latest_event);
+
+        let (activity_state, activity_source) = match state_event {
             Some(event) => (parse_activity_state(&event.event_type), event.source_kind),
             None => return false,
         };
@@ -385,7 +401,18 @@ impl DaemonProjection {
             Err(_) => (PaneSignatureClass::None, "unknown_error".to_owned(), 0.0),
         };
 
-        let pane_activity_state = parse_activity_state(&event.event_type);
+        // Heartbeats (is_heartbeat=true) preserve existing activity_state to prevent
+        // periodic idle_heartbeats from flipping Running→Idle between real tool events.
+        // If the pane has no prior state (first event is a heartbeat), fall back to
+        // the heartbeat's own event_type so initial bootstraps still work.
+        let pane_activity_state = if event.is_heartbeat {
+            self.panes
+                .get(pane_id)
+                .map(|p| p.activity_state)
+                .unwrap_or_else(|| parse_activity_state(&event.event_type))
+        } else {
+            parse_activity_state(&event.event_type)
+        };
         let pane_provider = Some(event.provider);
 
         let new_state = PaneRuntimeState {
@@ -2401,6 +2428,132 @@ mod tests {
         assert_eq!(
             ts_after_real, ts_after_heartbeat,
             "heartbeat should not advance last_real_activity timestamp"
+        );
+    }
+
+    // ── Heartbeat idle-flap tests ────────────────────────────────────
+
+    /// Running→Idle flap at pane level: idle_heartbeat must NOT overwrite Running
+    /// from a real (is_heartbeat=false) event received in the same tick.
+    #[test]
+    fn heartbeat_does_not_flip_pane_running_to_idle() {
+        let mut proj = DaemonProjection::new();
+        let t = t0();
+        let t_hb = t + TimeDelta::milliseconds(200); // heartbeat is newer
+
+        // Real hooks Running event (older but is_heartbeat=false)
+        let real = claude_det_event("real-1", "claude-sess", "%1", t);
+
+        // JSONL idle_heartbeat (newer observed_at, is_heartbeat=true, event_type=Idle)
+        let mut hb = make_event(
+            "hb-1",
+            agtmux_core_v5::types::Provider::Claude,
+            SourceKind::ClaudeJsonl,
+            "claude-sess",
+            Some("%1"),
+            "activity.idle",
+            t_hb,
+        );
+        hb.is_heartbeat = true;
+
+        // Both events arrive in the same tick (as happens in poll_loop)
+        proj.apply_events(vec![real, hb], t_hb);
+
+        let pane = proj.get_pane("%1").expect("pane must exist");
+        assert_eq!(
+            pane.activity_state,
+            ActivityState::Running,
+            "idle_heartbeat must not flip Running→Idle at pane level"
+        );
+    }
+
+    /// Running→Idle flap at session level: idle_heartbeat must NOT overwrite Running.
+    #[test]
+    fn heartbeat_does_not_flip_session_running_to_idle() {
+        let mut proj = DaemonProjection::new();
+        let t = t0();
+        let t_hb = t + TimeDelta::milliseconds(200);
+
+        let real = claude_det_event("real-1", "claude-sess", "%1", t);
+        let mut hb = make_event(
+            "hb-1",
+            agtmux_core_v5::types::Provider::Claude,
+            SourceKind::ClaudeJsonl,
+            "claude-sess",
+            Some("%1"),
+            "activity.idle",
+            t_hb,
+        );
+        hb.is_heartbeat = true;
+
+        proj.apply_events(vec![real, hb], t_hb);
+
+        let session = proj.get_session("claude-sess").expect("session must exist");
+        assert_eq!(
+            session.activity_state,
+            ActivityState::Running,
+            "idle_heartbeat must not flip Running→Idle at session level"
+        );
+    }
+
+    /// A heartbeat on a NEW pane (no prior state) should still set the initial activity.
+    #[test]
+    fn heartbeat_on_new_pane_sets_initial_activity() {
+        let mut proj = DaemonProjection::new();
+        let t = t0();
+
+        let mut hb = make_event(
+            "hb-1",
+            agtmux_core_v5::types::Provider::Codex,
+            SourceKind::CodexAppserver,
+            "codex-sess",
+            Some("%1"),
+            "thread.idle",
+            t,
+        );
+        hb.is_heartbeat = true;
+
+        proj.apply_events(vec![hb], t);
+
+        let pane = proj.get_pane("%1").expect("pane must exist");
+        assert_eq!(
+            pane.activity_state,
+            ActivityState::Idle,
+            "heartbeat on a new pane should initialize activity_state from event_type"
+        );
+    }
+
+    /// Real Stop/end events (is_heartbeat=false) must still transition to Idle.
+    #[test]
+    fn real_stop_event_correctly_sets_idle() {
+        let mut proj = DaemonProjection::new();
+        let t = t0();
+        let t1 = t + TimeDelta::seconds(1);
+
+        // Establish Running
+        let running = claude_det_event("r1", "claude-sess", "%1", t);
+        proj.apply_events(vec![running], t);
+        assert_eq!(
+            proj.get_pane("%1").unwrap().activity_state,
+            ActivityState::Running
+        );
+
+        // Real Stop event (hooks SessionEnd, is_heartbeat=false)
+        let stop = make_event(
+            "stop-1",
+            agtmux_core_v5::types::Provider::Claude,
+            SourceKind::ClaudeHooks,
+            "claude-sess",
+            Some("%1"),
+            "lifecycle.stop",
+            t1,
+        );
+        proj.apply_events(vec![stop], t1);
+
+        assert_eq!(
+            proj.get_pane("%1").unwrap().activity_state,
+            ActivityState::Idle,
+            "real stop event (is_heartbeat=false) must transition Running→Idle"
         );
     }
 
