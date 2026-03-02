@@ -257,7 +257,7 @@ fn scan_historical(
                 }
             }
             Some("user") if last_first_prompt.is_none() => {
-                if let Some(text) = extract_user_text(&v) {
+                if let Some(text) = extract_user_text(&v["message"]) {
                     *last_first_prompt = Some(truncate_title(&text));
                 }
             }
@@ -266,12 +266,16 @@ fn scan_historical(
     }
 }
 
-/// Extract plain text from a Claude JSONL `user` line's message content.
+/// Extract plain text from a Claude JSONL **message object**.
+///
+/// Expects the message object (`{"role":"user","content":...}`),
+/// NOT the full JSONL line.  Callers scanning a full line must pass
+/// `&line["message"]` rather than `&line`.
 ///
 /// Handles both array form (`content: [{type:"text", text:"..."}]`)
 /// and string form (`content: "..."`).
 pub(crate) fn extract_user_text(v: &serde_json::Value) -> Option<String> {
-    let content = &v["message"]["content"];
+    let content = &v["content"];
     if let Some(arr) = content.as_array() {
         for item in arr {
             if item["type"].as_str() == Some("text")
@@ -467,6 +471,73 @@ mod tests {
         let lines2 = watcher.poll_new_lines();
         assert_eq!(lines2.len(), 1);
         assert!(lines2[0].contains("tool_use"));
+
+        let _ = fs::remove_file(&path);
+    }
+
+    /// extract_user_text: string-form content
+    #[test]
+    fn extract_user_text_string_content() {
+        let msg = serde_json::json!({"role": "user", "content": "hello world"});
+        assert_eq!(
+            extract_user_text(&msg),
+            Some("hello world".to_string())
+        );
+    }
+
+    /// extract_user_text: array-form content
+    #[test]
+    fn extract_user_text_array_content() {
+        let msg = serde_json::json!({
+            "role": "user",
+            "content": [{"type": "text", "text": "  fix the bug  "}]
+        });
+        assert_eq!(
+            extract_user_text(&msg),
+            Some("fix the bug".to_string())
+        );
+    }
+
+    /// extract_user_text: empty/absent content returns None
+    #[test]
+    fn extract_user_text_empty_returns_none() {
+        assert!(extract_user_text(&serde_json::json!({"role": "user", "content": ""})).is_none());
+        assert!(extract_user_text(&serde_json::json!({"role": "user"})).is_none());
+    }
+
+    /// scan_historical correctly backfills first_prompt from a pre-existing JSONL file.
+    #[test]
+    fn scan_historical_backfills_first_prompt() {
+        let path = temp_jsonl("test-scan-historical-prompt.jsonl");
+        fs::write(
+            &path,
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"debug the crash\"}}\n\
+             {\"type\":\"assistant\",\"timestamp\":\"2026-02-25T10:00:01Z\"}\n",
+        )
+        .expect("test");
+
+        let watcher = SessionFileWatcher::new(path.clone());
+        assert_eq!(
+            watcher.last_first_prompt(),
+            Some("debug the crash"),
+            "scan_historical should backfill first_prompt from JSONL history"
+        );
+
+        let _ = fs::remove_file(&path);
+    }
+
+    /// scan_historical with array-form user message content.
+    #[test]
+    fn scan_historical_backfills_first_prompt_array_content() {
+        let path = temp_jsonl("test-scan-historical-array.jsonl");
+        fs::write(
+            &path,
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"array prompt\"}]}}\n",
+        )
+        .expect("test");
+
+        let watcher = SessionFileWatcher::new(path.clone());
+        assert_eq!(watcher.last_first_prompt(), Some("array prompt"));
 
         let _ = fs::remove_file(&path);
     }
