@@ -479,10 +479,7 @@ mod tests {
     #[test]
     fn extract_user_text_string_content() {
         let msg = serde_json::json!({"role": "user", "content": "hello world"});
-        assert_eq!(
-            extract_user_text(&msg),
-            Some("hello world".to_string())
-        );
+        assert_eq!(extract_user_text(&msg), Some("hello world".to_string()));
     }
 
     /// extract_user_text: array-form content
@@ -492,10 +489,7 @@ mod tests {
             "role": "user",
             "content": [{"type": "text", "text": "  fix the bug  "}]
         });
-        assert_eq!(
-            extract_user_text(&msg),
-            Some("fix the bug".to_string())
-        );
+        assert_eq!(extract_user_text(&msg), Some("fix the bug".to_string()));
     }
 
     /// extract_user_text: empty/absent content returns None
