@@ -27,6 +27,13 @@ pub struct CodexRawEvent {
     /// Set by the Codex poller when the only emit reason is elapsed time.
     #[serde(default)]
     pub is_heartbeat: bool,
+    /// Actual time of the last real underlying activity, when different from `timestamp`.
+    ///
+    /// Set by the JSONL historical enrichment pass: the event is emitted now
+    /// (`timestamp = now`) but the actual last activity was at this time.
+    /// `None` means "use `timestamp`" (normal case for live events).
+    #[serde(default)]
+    pub actual_activity_at: Option<DateTime<Utc>>,
 }
 
 /// Translate a single Codex raw event to a [`SourceEventV2`].
@@ -57,7 +64,7 @@ pub fn translate(raw: &CodexRawEvent) -> SourceEventV2 {
         payload: raw.payload.clone(),
         confidence: 1.0,
         is_heartbeat: raw.is_heartbeat,
-        actual_activity_at: None,
+        actual_activity_at: raw.actual_activity_at,
     }
 }
 
@@ -88,6 +95,7 @@ mod tests {
             pane_birth_ts: None,
             payload: json!({"key": "value"}),
             is_heartbeat: false,
+            actual_activity_at: None,
         }
     }
 
@@ -154,6 +162,7 @@ mod tests {
             pane_birth_ts: Some(now),
             payload: json!({}),
             is_heartbeat: false,
+            actual_activity_at: None,
         };
         let translated = translate(&raw);
         assert_eq!(translated.pane_generation, Some(3));

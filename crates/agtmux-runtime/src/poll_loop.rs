@@ -1312,6 +1312,7 @@ mod tests {
                 pane_birth_ts: None,
                 payload: serde_json::json!({}),
                 is_heartbeat: false,
+                actual_activity_at: None,
             });
         }
 

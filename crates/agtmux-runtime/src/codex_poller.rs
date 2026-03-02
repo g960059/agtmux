@@ -371,11 +371,130 @@ pub(crate) fn scan_jsonl_sessions(
                 // Idle events are heartbeats: they maintain state continuity without
                 // advancing last_real_activity or biasing cross-provider arbitration.
                 is_heartbeat: !is_active,
+                actual_activity_at: None,
             });
 
             matched_panes.insert(pane.pane_id.clone());
             break; // One match per file.
         }
+    }
+
+    // ── Historical enrichment pass ──────────────────────────────────────────────
+    //
+    // For heuristic codex panes not matched by the fresh scan (all their JSONL files are
+    // older than JSONL_IDLE_THRESHOLD_SECS), search the past 7 days for the most-recently
+    // modified JSONL file whose session_meta.cwd matches the pane.  Emit a `thread.idle`
+    // event with `actual_activity_at = file_mtime` so the projection records the correct
+    // last-activity time (instead of "just now" from the daemon start).
+    //
+    // `is_heartbeat = false` is intentional: the first emission updates `updated_at` in
+    // the projection; subsequent identical emissions are idempotent (same `actual_activity_at`).
+
+    /// Max age (seconds) to consider for historical enrichment (7 days).
+    const HISTORICAL_ENRICHMENT_SECS: u64 = 7 * 24 * 3600;
+
+    for pane in &sorted_panes {
+        if matched_panes.contains(&pane.pane_id) {
+            continue; // Already matched in the fresh scan
+        }
+        if pane.process_hint.as_deref() != Some("codex") {
+            continue; // Only enrich panes explicitly running codex
+        }
+
+        let pane_canonical = std::fs::canonicalize(&pane.cwd)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| pane.cwd.clone());
+
+        // Scan recent date directories for a matching JSONL file.
+        let mut best: Option<(std::path::PathBuf, u64, JsonlSessionMeta)> = None;
+
+        'outer: for days_ago in 0..=7_i64 {
+            let date = (now - chrono::Duration::days(days_ago))
+                .format("%Y/%m/%d")
+                .to_string();
+            let dir = std::path::PathBuf::from(format!("{sessions_base}/{date}"));
+            let Ok(iter) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in iter.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                let age_secs = std::fs::metadata(&path)
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|mtime| mtime.elapsed().ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(u64::MAX);
+                // Skip files already handled by the fresh scan.
+                if age_secs <= JSONL_IDLE_THRESHOLD_SECS {
+                    continue;
+                }
+                if age_secs > HISTORICAL_ENRICHMENT_SECS {
+                    continue;
+                }
+                let Some(meta) = read_jsonl_session_meta(&path) else {
+                    continue;
+                };
+                if meta.cwd != pane_canonical {
+                    continue;
+                }
+                // Keep the most-recently-modified match.
+                if best.as_ref().map_or(true, |(_, a, _)| age_secs < *a) {
+                    best = Some((path, age_secs, meta));
+                    // Oldest files are at the start of earlier days; once we found a match
+                    // on a given day we can still look earlier — but stop once the best
+                    // match is from today or yesterday (most recent possible anyway).
+                    if days_ago == 0 {
+                        break 'outer;
+                    }
+                }
+            }
+        }
+
+        let Some((path, age_secs, meta)) = best else {
+            continue;
+        };
+
+        let session_id = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| format!("jsonl-{s}"))
+            .unwrap_or_else(|| format!("jsonl-{}", pane.pane_id));
+
+        let actual_activity_at = now - chrono::Duration::seconds(age_secs as i64);
+
+        tracing::debug!(
+            "jsonl-history: pane={} session={} age={}s cwd={}",
+            pane.pane_id,
+            session_id,
+            age_secs,
+            meta.cwd
+        );
+
+        events.push(CodexRawEvent {
+            id: format!(
+                "jsonlhist-{}-{}",
+                pane.pane_id,
+                path.file_stem().and_then(|s| s.to_str()).unwrap_or("?")
+            ),
+            event_type: "thread.idle".to_string(),
+            session_id,
+            timestamp: now,
+            pane_id: Some(pane.pane_id.clone()),
+            pane_generation: pane.generation,
+            pane_birth_ts: pane.birth_ts,
+            payload: serde_json::json!({
+                "cwd": meta.cwd,
+                "jsonl_age_secs": age_secs,
+                "source": "jsonl_history",
+                "instructions": meta.instructions,
+            }),
+            is_heartbeat: false,
+            actual_activity_at: Some(actual_activity_at),
+        });
+        matched_panes.insert(pane.pane_id.clone());
     }
 
     events
@@ -939,6 +1058,7 @@ impl CodexAppServerClient {
                     pane_birth_ts: event_binding.as_ref().and_then(|b| b.pane_birth_ts),
                     payload: thread.clone(),
                     is_heartbeat,
+                    actual_activity_at: None,
                 });
             }
         }
@@ -1031,6 +1151,7 @@ fn notification_to_event_with_pane(
                 pane_birth_ts: pane_binding.and_then(|b| b.pane_birth_ts),
                 payload: params.clone(),
                 is_heartbeat: false, // notifications = real activity
+                actual_activity_at: None,
             })
         }
         "turn/completed" => {
@@ -1046,6 +1167,7 @@ fn notification_to_event_with_pane(
                 pane_birth_ts: pane_binding.and_then(|b| b.pane_birth_ts),
                 payload: params.clone(),
                 is_heartbeat: false, // notifications = real activity
+                actual_activity_at: None,
             })
         }
         "thread/status/changed" => {
@@ -1069,6 +1191,7 @@ fn notification_to_event_with_pane(
                 pane_birth_ts: pane_binding.and_then(|b| b.pane_birth_ts),
                 payload: params.clone(),
                 is_heartbeat: false, // notifications = real activity
+                actual_activity_at: None,
             })
         }
         _ => None,
@@ -1179,6 +1302,7 @@ pub fn parse_codex_capture_events(
             pane_birth_ts: None,
             payload: parsed,
             is_heartbeat: false, // captured NDJSON events = real activity
+            actual_activity_at: None,
         });
     }
 
