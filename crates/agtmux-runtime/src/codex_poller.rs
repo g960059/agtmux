@@ -25,7 +25,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use agtmux_source_codex_appserver::translate::CodexRawEvent;
 use chrono::{DateTime, Utc};
@@ -428,8 +428,18 @@ fn build_cwd_pane_groups(pane_cwds: &[PaneCwdInfo]) -> HashMap<String, Vec<PaneC
     map
 }
 
-const MAX_CWD_QUERIES_PER_TICK: usize = 40;
-const THREAD_LIST_REQUEST_TIMEOUT: Duration = Duration::from_millis(500);
+/// Maximum per-CWD thread/list queries per poll tick.
+/// Set to 1 so the single CWD query (≤4 s) + the global query (≤1 s)
+/// fits inside the 8-second outer `poll_threads` timeout.
+const MAX_CWD_QUERIES_PER_TICK: usize = 1;
+
+/// Per-request timeout for thread/list RPC calls.
+///
+/// Codex app-server v0.106.0 takes ~3.4 s to respond to CWD-filtered
+/// queries (SQLite DB load on first query after initialize).  We set this
+/// to 4 s so a single per-CWD query succeeds, while leaving budget for the
+/// global query that follows it.
+const THREAD_LIST_REQUEST_TIMEOUT: Duration = Duration::from_millis(4000);
 
 // ─── App Server client (JSON-RPC 2.0 over stdio) ────────────────────
 
@@ -451,6 +461,13 @@ pub struct CodexAppServerClient {
     last_thread_states: HashMap<String, LastThreadState>,
     /// Best-known thread -> pane binding, reused for pane-less events.
     thread_pane_bindings: HashMap<String, ThreadPaneBinding>,
+    /// Time after which thread/list queries may be sent.
+    ///
+    /// codex app-server v0.106.0 takes ~3 s after `initialize` to open its SQLite DB
+    /// and become ready to serve `thread/list` requests.  Sending queries before this
+    /// causes timeouts that corrupt the socket read buffer and make all future queries
+    /// fail too (cascade problem).  We skip polling until this instant has passed.
+    ready_at: Instant,
 }
 
 /// Result of attempting to spawn and connect to the Codex App Server.
@@ -492,11 +509,19 @@ impl CodexAppServerClient {
             next_id: 1,
             last_thread_states: HashMap::new(),
             thread_pane_bindings: HashMap::new(),
+            // Populated after handshake succeeds; starts as "already ready" placeholder.
+            ready_at: Instant::now(),
         };
 
         // Perform JSON-RPC initialize handshake with 10s timeout
         match tokio::time::timeout(std::time::Duration::from_secs(10), client.initialize()).await {
             Ok(Ok(())) => {
+                // Skip the first 2 polls after initialization.  Even though our
+                // THREAD_LIST_REQUEST_TIMEOUT (4 s) now accommodates the ~3.4 s
+                // per-CWD query latency, skipping the very first tick avoids sending
+                // a query before the initialize handshake has fully settled and any
+                // internal notifications have been flushed.
+                client.ready_at = Instant::now() + Duration::from_secs(2);
                 tracing::info!("codex app-server connected (stdio transport)");
                 Some(client)
             }
@@ -554,21 +579,34 @@ impl CodexAppServerClient {
     /// `pane_cwds` maps `(pane_id, cwd, generation, birth_ts)` for cwd correlation (T-119).
     /// When provided, each unique cwd gets its own `thread/list` request, and matched
     /// threads have `pane_id`, `pane_generation`, and `pane_birth_ts` set on their events.
-    pub async fn poll_threads(&mut self, pane_cwds: &[PaneCwdInfo]) -> Vec<CodexRawEvent> {
+    /// Returns `(events, timed_out)`.
+    ///
+    /// `timed_out = true` means the outer 5-second timeout fired.  The caller should
+    /// drop and reconnect the client because the socket read buffer may be corrupt
+    /// (stale responses from unfinished CWD queries accumulate and cause every future
+    /// query to also time out — the cascade problem).
+    pub async fn poll_threads(&mut self, pane_cwds: &[PaneCwdInfo]) -> (Vec<CodexRawEvent>, bool) {
+        // Warm-up guard: skip polling until the server has had time to open its DB.
+        if Instant::now() < self.ready_at {
+            tracing::debug!("codex app-server: warming up, skipping poll");
+            return (Vec::new(), false);
+        }
+
         match tokio::time::timeout(
-            std::time::Duration::from_secs(5),
+            // 8 s: 1 per-CWD query (≤4 s) + 1 global query (≤1 s) + slack.
+            std::time::Duration::from_secs(8),
             self.poll_threads_inner(pane_cwds),
         )
         .await
         {
-            Ok(Ok(events)) => events,
+            Ok(Ok(events)) => (events, false),
             Ok(Err(e)) => {
                 tracing::debug!("codex app-server poll failed: {e}");
-                Vec::new()
+                (Vec::new(), false)
             }
             Err(_) => {
                 tracing::debug!("codex app-server poll timed out");
-                Vec::new()
+                (Vec::new(), true) // timed_out=true → caller should reconnect
             }
         }
     }
@@ -1503,6 +1541,7 @@ mod tests {
             next_id: 1,
             last_thread_states: HashMap::new(),
             thread_pane_bindings: HashMap::new(),
+            ready_at: Instant::now(), // tests start ready immediately
         }
     }
 

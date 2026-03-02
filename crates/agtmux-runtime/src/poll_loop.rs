@@ -370,13 +370,24 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
         if alive {
             // Release mutex before async I/O
             drop(st);
-            let events = if let Some(ref mut client) = client_taken {
+            let (events, timed_out) = if let Some(ref mut client) = client_taken {
                 client.poll_threads(&pane_cwds_for_codex).await
             } else {
-                Vec::new()
+                (Vec::new(), false)
             };
             st = state.lock().await;
-            st.codex_appserver_client = client_taken;
+            if timed_out {
+                // Socket read buffer is likely corrupt (stale CWD-query responses that
+                // arrived after the 500ms per-query timeout accumulate and cause every
+                // subsequent recv() to read the wrong-id response first, burning the
+                // 500ms window before the real one arrives → cascade).  Drop and let
+                // SupervisorTracker reconnect on the next tick.
+                tracing::info!("codex app-server: poll timed out, dropping for reconnect");
+                drop(client_taken);
+                st.codex_appserver_had_connection = true; // ensure reconnect path fires
+            } else {
+                st.codex_appserver_client = client_taken;
+            }
             Some(events)
         } else if client_taken.is_some() || st.codex_appserver_had_connection {
             // Process exited — attempt reconnection via SupervisorTracker (T-129).
@@ -463,9 +474,7 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
 
     // 6a-bis: Direct JSONL session scanner (unconditional — runs regardless of App Server state).
     //
-    // The App Server poll has a 5s outer timeout which fires when many CWD queries time out
-    // (each 500ms), preventing scan_jsonl_sessions from running inside poll_threads_inner.
-    // Running it here ensures running codex sessions are always detected, even when
+    // Runs outside poll_threads to ensure running codex sessions are always detected, even when
     // the App Server is slow or unavailable.  See codex_poller module doc for details.
     {
         let jsonl_events = scan_jsonl_sessions(&pane_cwds_for_codex, now);
