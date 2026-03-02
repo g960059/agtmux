@@ -287,14 +287,11 @@ fn scan_historical(
         if v["type"]
             .as_str()
             .is_some_and(|t| REAL_EVENT_TYPES.contains(&t))
+            && let Some(ts_str) = v["timestamp"].as_str()
+            && let Ok(ts) = ts_str.parse::<DateTime<Utc>>()
+            && last_event_ts.is_none_or(|prev| ts > prev)
         {
-            if let Some(ts_str) = v["timestamp"].as_str() {
-                if let Ok(ts) = ts_str.parse::<DateTime<Utc>>() {
-                    if last_event_ts.is_none_or(|prev| ts > prev) {
-                        *last_event_ts = Some(ts);
-                    }
-                }
-            }
+            *last_event_ts = Some(ts);
         }
     }
 }
