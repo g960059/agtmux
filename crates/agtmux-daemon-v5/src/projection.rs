@@ -412,7 +412,10 @@ impl DaemonProjection {
                     .or(event.actual_activity_at)
                     .unwrap_or_else(|| event.observed_at.min(now))
             } else {
-                event.actual_activity_at.unwrap_or(event.observed_at).min(now)
+                event
+                    .actual_activity_at
+                    .unwrap_or(event.observed_at)
+                    .min(now)
             },
         };
 

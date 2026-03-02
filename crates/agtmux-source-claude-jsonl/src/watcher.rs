@@ -3,10 +3,10 @@
 //! Tracks seek position per session file, handles partial lines,
 //! and detects file rotation via inode changes.
 
+use chrono::{DateTime, Utc};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use chrono::{DateTime, Utc};
 use tracing::warn;
 
 /// Maximum byte length of a conversation title extracted from JSONL content.
@@ -284,7 +284,10 @@ fn scan_historical(
         }
 
         // Track the latest timestamp across all real-activity lines.
-        if v["type"].as_str().is_some_and(|t| REAL_EVENT_TYPES.contains(&t)) {
+        if v["type"]
+            .as_str()
+            .is_some_and(|t| REAL_EVENT_TYPES.contains(&t))
+        {
             if let Some(ts_str) = v["timestamp"].as_str() {
                 if let Ok(ts) = ts_str.parse::<DateTime<Utc>>() {
                     if last_event_ts.is_none_or(|prev| ts > prev) {

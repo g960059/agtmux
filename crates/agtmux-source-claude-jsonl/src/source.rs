@@ -224,11 +224,7 @@ impl ClaudeJsonlSourceState {
                             watcher.last_event_ts(),
                         ));
                     } else {
-                        events.push(bootstrap_event(
-                            discovery,
-                            now,
-                            watcher.last_event_ts(),
-                        ));
+                        events.push(bootstrap_event(discovery, now, watcher.last_event_ts()));
                     }
                 }
                 watcher.mark_bootstrapped();
