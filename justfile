@@ -3,6 +3,38 @@ set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 fmt:
     cargo fmt --all -- --check
 
+# Auto-fix formatting (use before committing)
+fmt-fix:
+    cargo fmt --all
+
+# Release: bump version, verify all checks pass, tag, and push.
+# Usage: just release 0.1.3
+release VERSION:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "=== Releasing v{{VERSION}} ==="
+
+    # 1. Clean working tree required
+    if [ -n "$(git status --porcelain)" ]; then
+        echo "ERROR: uncommitted changes present. Commit or stash first."
+        exit 1
+    fi
+
+    # 2. Bump workspace version in Cargo.toml
+    sed -i.bak 's/^version = ".*"/version = "{{VERSION}}"/' Cargo.toml && rm -f Cargo.toml.bak
+    cargo update --workspace
+
+    # 3. Verify BEFORE tagging — catches fmt/clippy/test failures locally
+    just verify
+
+    # 4. Commit, tag, push
+    git add Cargo.toml Cargo.lock
+    git commit -m "chore: bump version to {{VERSION}}"
+    git tag "v{{VERSION}}"
+    git push origin main
+    git push origin "v{{VERSION}}"
+    echo "=== Released v{{VERSION}} ==="
+
 lint:
     cargo clippy --workspace --all-targets --all-features --locked -- -D clippy::dbg_macro -D clippy::todo -D clippy::unwrap_used -D clippy::undocumented_unsafe_blocks
 
