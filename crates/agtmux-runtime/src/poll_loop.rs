@@ -615,8 +615,28 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
                 &discoveries,
                 Utc::now(),
             );
-            // T-135c: collect AI-generated summaries (lower priority — or_insert).
-            let summary_updates: Vec<(String, String)> = discoveries
+            // Collect title signals from watchers for all discovered sessions.
+            // Applied in reverse-priority order (lowest first) so later `insert` calls win.
+            //
+            // Priority chain (highest → lowest):
+            //   1. custom-title (explicit user action)             → insert (always wins)
+            //   2. summary from watcher (real-time AI summary)     → insert
+            //   3. summary from sessions-index.json (historical)   → insert
+            //   4. firstPrompt from sessions-index.json            → or_insert
+            //   5. first_prompt from watcher history               → or_insert (baseline)
+
+            // Collect all title signals from watchers before mutating conversation_titles
+            // (borrow checker: cannot hold &st.claude_jsonl_watchers while mutating st).
+            let first_prompts: Vec<(String, String)> = discoveries
+                .iter()
+                .filter_map(|disc| {
+                    st.claude_jsonl_watchers
+                        .get(&disc.pane_id)
+                        .and_then(|w| w.last_first_prompt())
+                        .map(|p| (disc.session_id.clone(), p.to_string()))
+                })
+                .collect();
+            let summaries: Vec<(String, String)> = discoveries
                 .iter()
                 .filter_map(|disc| {
                     st.claude_jsonl_watchers
@@ -625,33 +645,26 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
                         .map(|s| (disc.session_id.clone(), s.to_string()))
                 })
                 .collect();
-            // T-135b: collect custom-titles (highest priority — insert/overwrite).
-            let title_updates: Vec<(String, String)> = discoveries
+            let titles: Vec<(String, String)> = discoveries
                 .iter()
                 .filter_map(|disc| {
                     st.claude_jsonl_watchers
                         .get(&disc.pane_id)
                         .and_then(|w| w.last_title())
-                        .map(|title| (disc.session_id.clone(), title.to_string()))
+                        .map(|t| (disc.session_id.clone(), t.to_string()))
                 })
                 .collect();
-            // Apply summaries first (or_insert = won't overwrite an existing custom-title).
-            for (session_id, summary) in summary_updates {
-                st.conversation_titles.entry(session_id).or_insert(summary);
+
+            // Apply in reverse-priority order (lowest first, `insert` overwrites lower tiers).
+            // Priority: custom-title > summary(watcher) > summary(idx) > firstPrompt > first_prompt
+
+            // 5 (lowest baseline): first user prompt from JSONL watcher history.
+            for (session_id, prompt) in first_prompts {
+                st.conversation_titles.entry(session_id).or_insert(prompt);
             }
-            // Apply custom-titles (insert = always overwrite to win over summary).
-            for (session_id, title) in title_updates {
-                st.conversation_titles.insert(session_id, title);
-            }
-            // T-135c: sessions-index.json fallback for sessions that still have no title.
-            // Reads the pre-computed index written by Claude Code on session completion.
-            // Provides `summary` (AI-generated) or `firstPrompt` (first user message) for
-            // sessions that completed before the daemon started (watcher seeks to EOF on
-            // creation and would not see historical events).
+
+            // 4+3: sessions-index.json (firstPrompt or_insert, then summary insert).
             for disc in &discoveries {
-                if st.conversation_titles.contains_key(&disc.session_id) {
-                    continue; // already have a title
-                }
                 if let Some(project_dir) = disc.jsonl_path.parent()
                     && let Some(entry) =
                         agtmux_source_claude_jsonl::discovery::read_session_index_entry(
@@ -659,16 +672,25 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
                             &disc.session_id,
                         )
                 {
-                    let fallback = entry
-                        .summary
-                        .filter(|s| !s.is_empty())
-                        .or_else(|| entry.first_prompt.filter(|s| !s.is_empty()));
-                    if let Some(t) = fallback {
+                    if let Some(p) = entry.first_prompt.filter(|s| !s.is_empty()) {
                         st.conversation_titles
                             .entry(disc.session_id.clone())
-                            .or_insert(t);
+                            .or_insert(p);
+                    }
+                    if let Some(s) = entry.summary.filter(|s| !s.is_empty()) {
+                        st.conversation_titles.insert(disc.session_id.clone(), s);
                     }
                 }
+            }
+
+            // 2: summary from JSONL watcher (real-time AI summary).
+            for (session_id, summary) in summaries {
+                st.conversation_titles.insert(session_id, summary);
+            }
+
+            // 1 (highest): custom-title from watcher (explicit user action).
+            for (session_id, title) in titles {
+                st.conversation_titles.insert(session_id, title);
             }
             for event in jsonl_events {
                 st.claude_jsonl_source.ingest(event);

@@ -8,6 +8,9 @@ use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use tracing::warn;
 
+/// Maximum byte length of a conversation title extracted from JSONL content.
+const MAX_TITLE_LEN: usize = 200;
+
 /// Watcher for a single JSONL session file.
 #[derive(Debug)]
 pub struct SessionFileWatcher {
@@ -24,17 +27,36 @@ pub struct SessionFileWatcher {
     last_title: Option<String>,
     /// Latest AI-generated summary seen in this JSONL file (T-135c).
     last_summary: Option<String>,
+    /// First user prompt text extracted from this JSONL file (lowest-priority title fallback).
+    last_first_prompt: Option<String>,
 }
 
 impl SessionFileWatcher {
     /// Create a new watcher for the given JSONL file path.
     ///
-    /// On first creation, seeks to EOF (skips historical data).
+    /// Seeks to EOF so that future activity events are tracked from now on.
+    /// Performs a one-time historical scan of existing content to backfill
+    /// `last_title`, `last_summary`, and `last_first_prompt` — ensuring that
+    /// sessions already running at daemon start still get a conversation title.
     pub fn new(path: PathBuf) -> Self {
         let (seek_pos, inode) = match file_metadata(&path) {
             Some((size, ino)) => (size, ino),
             None => (0, 0),
         };
+
+        let mut last_title = None;
+        let mut last_summary = None;
+        let mut last_first_prompt = None;
+
+        if seek_pos > 0 {
+            scan_historical(
+                &path,
+                seek_pos,
+                &mut last_title,
+                &mut last_summary,
+                &mut last_first_prompt,
+            );
+        }
 
         Self {
             path,
@@ -42,8 +64,9 @@ impl SessionFileWatcher {
             inode,
             incomplete_buffer: String::new(),
             bootstrapped: false,
-            last_title: None,
-            last_summary: None,
+            last_title,
+            last_summary,
+            last_first_prompt,
         }
     }
 
@@ -77,6 +100,18 @@ impl SessionFileWatcher {
         self.last_summary = Some(summary);
     }
 
+    /// Return the first user prompt text seen in this JSONL file (lowest-priority fallback).
+    pub fn last_first_prompt(&self) -> Option<&str> {
+        self.last_first_prompt.as_deref()
+    }
+
+    /// Set the first user prompt (only stored if not already set — first message wins).
+    pub fn set_first_prompt(&mut self, prompt: String) {
+        if self.last_first_prompt.is_none() {
+            self.last_first_prompt = Some(prompt);
+        }
+    }
+
     /// Create a watcher starting from position 0 (for testing).
     #[cfg(test)]
     pub fn new_from_start(path: PathBuf) -> Self {
@@ -89,6 +124,7 @@ impl SessionFileWatcher {
             bootstrapped: false,
             last_title: None,
             last_summary: None,
+            last_first_prompt: None,
         }
     }
 
@@ -170,6 +206,106 @@ impl SessionFileWatcher {
     /// Get the current file path being watched.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+}
+
+/// Scan JSONL file from byte 0 to `end_pos`, backfilling title state.
+///
+/// - Finds the LAST `custom-title` → `last_title` (newest explicit title wins)
+/// - Finds the LAST `summary` → `last_summary` (newest AI summary wins)
+/// - Finds the FIRST `user` message text → `last_first_prompt` (first message as fallback)
+///
+/// Does not change the watcher's `seek_pos`; only populates the title fields.
+fn scan_historical(
+    path: &Path,
+    end_pos: u64,
+    last_title: &mut Option<String>,
+    last_summary: &mut Option<String>,
+    last_first_prompt: &mut Option<String>,
+) {
+    let Ok(file) = File::open(path) else { return };
+    let mut reader = BufReader::new(file);
+    let mut buf = String::new();
+    let mut pos = 0u64;
+
+    while pos < end_pos {
+        buf.clear();
+        let n = match reader.read_line(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        pos += n as u64;
+
+        let line = buf.trim_end_matches('\n').trim_end_matches('\r');
+        if line.is_empty() {
+            continue;
+        }
+        let v: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        match v["type"].as_str() {
+            Some("custom-title") => {
+                if let Some(t) = v["customTitle"].as_str().filter(|s| !s.is_empty()) {
+                    *last_title = Some(truncate_title(t));
+                }
+            }
+            Some("summary") => {
+                if let Some(s) = v["summary"].as_str().filter(|s| !s.is_empty()) {
+                    *last_summary = Some(truncate_title(s));
+                }
+            }
+            Some("user") if last_first_prompt.is_none() => {
+                if let Some(text) = extract_user_text(&v) {
+                    *last_first_prompt = Some(truncate_title(&text));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Extract plain text from a Claude JSONL `user` line's message content.
+///
+/// Handles both array form (`content: [{type:"text", text:"..."}]`)
+/// and string form (`content: "..."`).
+pub(crate) fn extract_user_text(v: &serde_json::Value) -> Option<String> {
+    let content = &v["message"]["content"];
+    if let Some(arr) = content.as_array() {
+        for item in arr {
+            if item["type"].as_str() == Some("text")
+                && let Some(text) = item["text"].as_str()
+            {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
+            }
+        }
+    }
+    if let Some(s) = content.as_str() {
+        let trimmed = s.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    None
+}
+
+/// Truncate a title string to `MAX_TITLE_LEN` characters, appending "…" if cut.
+fn truncate_title(s: &str) -> String {
+    if s.len() <= MAX_TITLE_LEN {
+        s.to_string()
+    } else {
+        // Truncate at a char boundary
+        let boundary = s
+            .char_indices()
+            .map(|(i, _)| i)
+            .take_while(|&i| i <= MAX_TITLE_LEN - 3)
+            .last()
+            .unwrap_or(0);
+        format!("{}…", &s[..boundary])
     }
 }
 

@@ -26,6 +26,10 @@ pub struct ClaudeJsonlLine {
     /// Format: `{"type":"summary","summary":"...","leafUuid":"..."}`
     #[serde(default)]
     pub summary: Option<String>,
+    /// Full message object (present on "user"/"assistant" type lines).
+    /// Used to extract the first user prompt text for conversation title fallback.
+    #[serde(default)]
+    pub message: Option<serde_json::Value>,
 }
 
 /// Contextual info needed to translate a JSONL line into a SourceEventV2.
@@ -101,6 +105,7 @@ mod tests {
             uuid: Some("uuid-001".to_owned()),
             custom_title: None,
             summary: None,
+            message: None,
         }
     }
 

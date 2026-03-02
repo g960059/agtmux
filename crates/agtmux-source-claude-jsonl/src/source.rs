@@ -12,7 +12,7 @@ use tracing::warn;
 
 use crate::discovery::{self, PaneDiscoveryHint, SessionDiscovery};
 use crate::translate::{self, ClaudeJsonlLine, TranslateContext};
-use crate::watcher::SessionFileWatcher;
+use crate::watcher::{SessionFileWatcher, extract_user_text};
 
 /// Cursor prefix used for Claude JSONL source.
 const CURSOR_PREFIX: &str = "claude-jsonl:";
@@ -163,6 +163,14 @@ impl ClaudeJsonlSourceState {
                                 watcher.set_summary(s.clone());
                             }
                             continue; // no activity event from summary events
+                        }
+                        // Capture first user prompt text as lowest-priority title fallback.
+                        if parsed.line_type == "user"
+                            && watcher.last_first_prompt().is_none()
+                            && let Some(ref msg) = parsed.message
+                            && let Some(text) = extract_user_text(msg)
+                        {
+                            watcher.set_first_prompt(text);
                         }
                         if let Some(event) = translate::translate(&parsed, &ctx) {
                             emitted_real_event = true;
