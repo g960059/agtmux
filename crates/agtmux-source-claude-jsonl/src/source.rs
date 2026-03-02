@@ -218,9 +218,17 @@ impl ClaudeJsonlSourceState {
                         // Instead, emit an ambiguous bootstrap (is_heartbeat=true) that only
                         // refreshes deterministic_last_seen — leaving last_real_activity
                         // untouched so select_winning_provider can resolve via actual events.
-                        events.push(ambiguous_cwd_bootstrap(discovery, now));
+                        events.push(ambiguous_cwd_bootstrap(
+                            discovery,
+                            now,
+                            watcher.last_event_ts(),
+                        ));
                     } else {
-                        events.push(bootstrap_event(discovery, now));
+                        events.push(bootstrap_event(
+                            discovery,
+                            now,
+                            watcher.last_event_ts(),
+                        ));
                     }
                 }
                 watcher.mark_bootstrapped();
@@ -247,7 +255,15 @@ impl ClaudeJsonlSourceState {
 ///
 /// `observed_at = now` (not the JSONL file's last-line timestamp) ensures the event
 /// is fresh and doesn't trigger the resolver's stale-detection threshold.
-fn bootstrap_event(discovery: &SessionDiscovery, now: DateTime<Utc>) -> SourceEventV2 {
+///
+/// `actual_activity_at` carries the timestamp of the last real JSONL line from the
+/// historical scan so that `updated_at` in the projection reflects true last-activity
+/// time rather than daemon restart time.
+fn bootstrap_event(
+    discovery: &SessionDiscovery,
+    now: DateTime<Utc>,
+    actual_activity_at: Option<DateTime<Utc>>,
+) -> SourceEventV2 {
     SourceEventV2 {
         event_id: format!("claude-jsonl-boot-{}", discovery.pane_id),
         provider: Provider::Claude,
@@ -263,6 +279,7 @@ fn bootstrap_event(discovery: &SessionDiscovery, now: DateTime<Utc>) -> SourceEv
         payload: serde_json::json!({}),
         confidence: 1.0,
         is_heartbeat: false, // KEY: updates last_real_activity in the projection
+        actual_activity_at,
     }
 }
 
@@ -277,7 +294,11 @@ fn bootstrap_event(discovery: &SessionDiscovery, now: DateTime<Utc>) -> SourceEv
 /// actually running Codex (or another agent) in the same project directory.
 /// `select_winning_provider` will correctly award that pane to the provider
 /// that has actual `last_real_activity` evidence (e.g. Codex App Server events).
-fn ambiguous_cwd_bootstrap(discovery: &SessionDiscovery, now: DateTime<Utc>) -> SourceEventV2 {
+fn ambiguous_cwd_bootstrap(
+    discovery: &SessionDiscovery,
+    now: DateTime<Utc>,
+    actual_activity_at: Option<DateTime<Utc>>,
+) -> SourceEventV2 {
     SourceEventV2 {
         event_id: format!("claude-jsonl-ambi-boot-{}", discovery.pane_id),
         provider: Provider::Claude,
@@ -293,6 +314,7 @@ fn ambiguous_cwd_bootstrap(discovery: &SessionDiscovery, now: DateTime<Utc>) -> 
         payload: serde_json::json!({}),
         confidence: 1.0,
         is_heartbeat: true, // KEY: does NOT write last_real_activity
+        actual_activity_at, // carries last JSONL ts for updated_at display
     }
 }
 
@@ -320,6 +342,7 @@ fn idle_heartbeat(discovery: &SessionDiscovery, now: DateTime<Utc>) -> SourceEve
         payload: serde_json::json!({}),
         confidence: 1.0,
         is_heartbeat: true,
+        actual_activity_at: None,
     }
 }
 
@@ -351,6 +374,7 @@ mod tests {
             payload: serde_json::json!({"line_type": "tool_use"}),
             confidence: 1.0,
             is_heartbeat: false,
+            actual_activity_at: None,
         }
     }
 

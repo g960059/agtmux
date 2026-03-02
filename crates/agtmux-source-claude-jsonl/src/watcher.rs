@@ -6,6 +6,7 @@
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use chrono::{DateTime, Utc};
 use tracing::warn;
 
 /// Maximum byte length of a conversation title extracted from JSONL content.
@@ -29,6 +30,10 @@ pub struct SessionFileWatcher {
     last_summary: Option<String>,
     /// First user prompt text extracted from this JSONL file (lowest-priority title fallback).
     last_first_prompt: Option<String>,
+    /// Timestamp of the last real-activity JSONL line seen during the historical scan.
+    /// Used to populate `actual_activity_at` on bootstrap events so that `updated_at`
+    /// in the projection reflects actual last-activity time, not daemon restart time.
+    last_event_ts: Option<DateTime<Utc>>,
 }
 
 impl SessionFileWatcher {
@@ -47,6 +52,7 @@ impl SessionFileWatcher {
         let mut last_title = None;
         let mut last_summary = None;
         let mut last_first_prompt = None;
+        let mut last_event_ts = None;
 
         if seek_pos > 0 {
             scan_historical(
@@ -55,6 +61,7 @@ impl SessionFileWatcher {
                 &mut last_title,
                 &mut last_summary,
                 &mut last_first_prompt,
+                &mut last_event_ts,
             );
         }
 
@@ -67,6 +74,7 @@ impl SessionFileWatcher {
             last_title,
             last_summary,
             last_first_prompt,
+            last_event_ts,
         }
     }
 
@@ -112,6 +120,11 @@ impl SessionFileWatcher {
         }
     }
 
+    /// The timestamp of the last real-activity event seen during the historical scan.
+    pub fn last_event_ts(&self) -> Option<DateTime<Utc>> {
+        self.last_event_ts
+    }
+
     /// Create a watcher starting from position 0 (for testing).
     #[cfg(test)]
     pub fn new_from_start(path: PathBuf) -> Self {
@@ -125,6 +138,7 @@ impl SessionFileWatcher {
             last_title: None,
             last_summary: None,
             last_first_prompt: None,
+            last_event_ts: None,
         }
     }
 
@@ -209,11 +223,15 @@ impl SessionFileWatcher {
     }
 }
 
+/// Line types that represent real activity (used for last_event_ts tracking).
+const REAL_EVENT_TYPES: &[&str] = &["user", "assistant", "tool_use", "tool_result", "progress"];
+
 /// Scan JSONL file from byte 0 to `end_pos`, backfilling title state.
 ///
 /// - Finds the LAST `custom-title` → `last_title` (newest explicit title wins)
 /// - Finds the LAST `summary` → `last_summary` (newest AI summary wins)
 /// - Finds the FIRST `user` message text → `last_first_prompt` (first message as fallback)
+/// - Finds the LAST `timestamp` on a real-activity line → `last_event_ts`
 ///
 /// Does not change the watcher's `seek_pos`; only populates the title fields.
 fn scan_historical(
@@ -222,6 +240,7 @@ fn scan_historical(
     last_title: &mut Option<String>,
     last_summary: &mut Option<String>,
     last_first_prompt: &mut Option<String>,
+    last_event_ts: &mut Option<DateTime<Utc>>,
 ) {
     let Ok(file) = File::open(path) else { return };
     let mut reader = BufReader::new(file);
@@ -262,6 +281,17 @@ fn scan_historical(
                 }
             }
             _ => {}
+        }
+
+        // Track the latest timestamp across all real-activity lines.
+        if v["type"].as_str().is_some_and(|t| REAL_EVENT_TYPES.contains(&t)) {
+            if let Some(ts_str) = v["timestamp"].as_str() {
+                if let Ok(ts) = ts_str.parse::<DateTime<Utc>>() {
+                    if last_event_ts.is_none_or(|prev| ts > prev) {
+                        *last_event_ts = Some(ts);
+                    }
+                }
+            }
         }
     }
 }

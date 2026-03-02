@@ -124,6 +124,7 @@ pub fn poll_pane(snapshot: &PaneSnapshot) -> Option<PollResult> {
         payload,
         confidence: detect_result.confidence,
         is_heartbeat: false, // Poller events are never heartbeats
+        actual_activity_at: None,
     };
 
     // 6. Return PollResult

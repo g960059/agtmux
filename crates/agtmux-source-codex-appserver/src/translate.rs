@@ -57,6 +57,7 @@ pub fn translate(raw: &CodexRawEvent) -> SourceEventV2 {
         payload: raw.payload.clone(),
         confidence: 1.0,
         is_heartbeat: raw.is_heartbeat,
+        actual_activity_at: None,
     }
 }
 

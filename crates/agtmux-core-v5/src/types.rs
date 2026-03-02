@@ -203,6 +203,14 @@ pub struct SourceEventV2 {
     /// resolution when two providers both have fresh deterministic evidence for the same pane.
     #[serde(default)]
     pub is_heartbeat: bool,
+    /// Actual time of the last real underlying activity, when different from `observed_at`.
+    ///
+    /// Synthetic events (bootstrap, heartbeat) set `observed_at = now` for freshness
+    /// but carry the last known real-activity time here so `updated_at` in the projection
+    /// reflects the true last-activity age rather than the daemon restart / poll time.
+    /// `None` means "use `observed_at`" (normal case for real events).
+    #[serde(default)]
+    pub actual_activity_at: Option<DateTime<Utc>>,
 }
 
 // ─── Identity ─────────────────────────────────────────────────────
@@ -417,6 +425,7 @@ mod tests {
             payload: serde_json::json!({"status": "running"}),
             confidence: 1.0,
             is_heartbeat: false,
+            actual_activity_at: None,
         };
         let json = serde_json::to_string(&event).expect("serialize");
         let back: SourceEventV2 = serde_json::from_str(&json).expect("deserialize");

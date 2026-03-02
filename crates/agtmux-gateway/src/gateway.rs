@@ -321,6 +321,7 @@ mod tests {
             payload: serde_json::json!({}),
             confidence: 1.0,
             is_heartbeat: false,
+            actual_activity_at: None,
         }
     }
 

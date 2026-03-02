@@ -215,13 +215,19 @@ impl DaemonProjection {
         output: &resolver::ResolverOutput,
         now: DateTime<Utc>,
     ) -> bool {
-        // Determine activity state from the latest accepted event.
+        // Determine activity state from the latest accepted event for this session.
+        // Filter by session_key so events from other sessions in the same group
+        // (different sources for the same pane) don't cross-contaminate.
         // Tie-break on event_id for determinism when timestamps are equal.
-        let latest_event = output.accepted_events.iter().max_by(|a, b| {
-            a.observed_at
-                .cmp(&b.observed_at)
-                .then_with(|| a.event_id.cmp(&b.event_id))
-        });
+        let latest_event = output
+            .accepted_events
+            .iter()
+            .filter(|e| e.session_key == session_key)
+            .max_by(|a, b| {
+                a.observed_at
+                    .cmp(&b.observed_at)
+                    .then_with(|| a.event_id.cmp(&b.event_id))
+            });
 
         let (activity_state, activity_source) = match latest_event {
             Some(event) => (parse_activity_state(&event.event_type), event.source_kind),
@@ -229,6 +235,21 @@ impl DaemonProjection {
         };
 
         let evidence_mode = tier_to_evidence_mode(output.result.winner_tier);
+
+        // updated_at semantics (mirrors project_pane):
+        // - Real events: use actual_activity_at (bootstrap) or observed_at, capped at now.
+        // - Heartbeats: preserve existing session updated_at; fall back to actual_activity_at
+        //   (ambiguous bootstrap) then observed_at when session is new.
+        let event_ts = match latest_event {
+            None => now,
+            Some(e) if e.is_heartbeat => self
+                .sessions
+                .get(session_key)
+                .map(|s| s.updated_at)
+                .or(e.actual_activity_at)
+                .unwrap_or_else(|| e.observed_at.min(now)),
+            Some(e) => e.actual_activity_at.unwrap_or(e.observed_at).min(now),
+        };
 
         let new_state = SessionRuntimeState {
             session_key: session_key.to_owned(),
@@ -239,7 +260,7 @@ impl DaemonProjection {
             activity_state,
             activity_source,
             representative_pane_instance_id: None, // T-042
-            updated_at: now,
+            updated_at: event_ts,
         };
 
         let changed = self.sessions.get(session_key).is_none_or(|existing| {
@@ -379,7 +400,20 @@ impl DaemonProjection {
             activity_state: pane_activity_state,
             provider: pane_provider,
             session_key: event.session_key.clone(),
-            updated_at: now,
+            // updated_at semantics:
+            // - Real events (is_heartbeat=false): use actual_activity_at (bootstrap carries
+            //   last JSONL line ts) or observed_at, capped at now.
+            // - Heartbeats (is_heartbeat=true): preserve existing updated_at; fall back to
+            //   actual_activity_at (ambiguous bootstrap) then observed_at when pane is new.
+            updated_at: if event.is_heartbeat {
+                self.panes
+                    .get(pane_id)
+                    .map(|p| p.updated_at)
+                    .or(event.actual_activity_at)
+                    .unwrap_or_else(|| event.observed_at.min(now))
+            } else {
+                event.actual_activity_at.unwrap_or(event.observed_at).min(now)
+            },
         };
 
         let changed = self.panes.get(pane_id).is_none_or(|existing| {
@@ -695,6 +729,7 @@ mod tests {
             payload: serde_json::json!({}),
             confidence: 0.86,
             is_heartbeat: false,
+            actual_activity_at: None,
         }
     }
 
@@ -1196,12 +1231,12 @@ mod tests {
         assert_eq!(session.activity_state, ActivityState::Running);
     }
 
-    // ── 19. Pane updated_at reflects application time ──────────────
+    // ── 19. Pane updated_at reflects event observed_at, not processing time ──────
 
     #[test]
-    fn updated_at_set_to_now() {
+    fn updated_at_reflects_event_observed_at() {
         let mut proj = DaemonProjection::new();
-        // Event observed 1s ago, now is application time
+        // Event observed 1s before processing — updated_at should use event_time, not now.
         let event_time = t0();
         let now = t0() + TimeDelta::seconds(1);
 
@@ -1211,10 +1246,10 @@ mod tests {
         );
 
         let session = proj.get_session("s1").expect("session");
-        assert_eq!(session.updated_at, now);
+        assert_eq!(session.updated_at, event_time);
 
         let pane = proj.get_pane("%1").expect("pane");
-        assert_eq!(pane.updated_at, now);
+        assert_eq!(pane.updated_at, event_time);
     }
 
     // ── 20. Source rank suppression ─────────────────────────────────
