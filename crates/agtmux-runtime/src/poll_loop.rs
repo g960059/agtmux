@@ -8,11 +8,8 @@ use chrono::Utc;
 use tokio::sync::Mutex;
 use tokio::time::{Duration, interval};
 
-use agtmux_core_v5::types::{GatewayPullRequest, Provider, PullEventsRequest, SourceKind};
+use agtmux_core_v5::types::{GatewayPullRequest, PullEventsRequest, SourceKind};
 use agtmux_daemon_v5::projection::DaemonProjection;
-use agtmux_daemon_v5::supervisor::{
-    RestartDecision, RestartPolicy, SupervisorState, SupervisorTracker,
-};
 use agtmux_gateway::cursor_hardening::{
     CursorRecoveryAction, CursorWatermarks, InvalidCursorTracker,
 };
@@ -24,7 +21,9 @@ use agtmux_source_claude_hooks::source::SourceState as ClaudeSourceState;
 use agtmux_source_claude_jsonl::discovery::{PaneDiscoveryHint, discovery_from_transcript_path};
 use agtmux_source_claude_jsonl::source::ClaudeJsonlSourceState;
 use agtmux_source_claude_jsonl::watcher::SessionFileWatcher;
-use agtmux_source_codex_appserver::source::SourceState as CodexSourceState;
+use agtmux_source_codex_jsonl::discovery::CodexPaneHint;
+use agtmux_source_codex_jsonl::source::CodexJsonlSourceState;
+use agtmux_source_codex_jsonl::watcher::CodexSessionFileWatcher;
 use agtmux_source_poller::source::{PollerSourceState, poll_pane};
 use agtmux_tmux_v5::{
     PaneGenerationTracker, TmuxCommandRunner, TmuxExecutor, TmuxPaneInfo, capture_pane, list_panes,
@@ -32,19 +31,16 @@ use agtmux_tmux_v5::{
 };
 
 use crate::cli::DaemonOpts;
-use crate::codex_poller::{
-    CodexAppServerClient, CodexCaptureTracker, PaneCwdInfo, parse_codex_capture_events,
-    scan_jsonl_sessions,
-};
 use crate::server;
 
 /// Shared daemon state protected by a mutex.
 pub struct DaemonState {
     pub poller: PollerSourceState,
-    pub codex_source: CodexSourceState,
     pub claude_source: ClaudeSourceState,
     pub claude_jsonl_source: ClaudeJsonlSourceState,
     pub claude_jsonl_watchers: std::collections::HashMap<String, SessionFileWatcher>,
+    pub codex_jsonl_source: CodexJsonlSourceState,
+    pub codex_jsonl_watchers: std::collections::HashMap<String, CodexSessionFileWatcher>,
     pub gateway: Gateway,
     pub daemon: DaemonProjection,
     pub generation_tracker: PaneGenerationTracker,
@@ -63,17 +59,7 @@ pub struct DaemonState {
     pub latency_window: LatencyWindow,
     /// Cached latency evaluation from the last poll_tick (for read-only API access).
     pub last_latency_eval: Option<LatencyEvaluation>,
-    /// Tracks Codex JSON events already ingested from tmux capture (dedup).
-    pub codex_capture_tracker: CodexCaptureTracker,
-    /// Codex App Server client (JSON-RPC over stdio). `None` if not available.
-    pub codex_appserver_client: Option<CodexAppServerClient>,
-    /// True if App Server was ever connected (triggers reconnection on death).
-    pub codex_appserver_had_connection: bool,
-    /// Supervisor state machine for Codex App Server reconnection (T-129).
-    /// Tracks backoff delay + failure budget + hold-down; replaces hand-rolled counter.
-    pub codex_supervisor: SupervisorTracker,
     /// Conversation titles keyed by session_key (T-135a/b).
-    /// Codex: thread_id → name/preview from thread/list payload.
     /// Claude: session_key → title from custom-title JSONL events (T-135b).
     pub conversation_titles: std::collections::HashMap<String, String>,
     /// pane_id → transcript JSONL path, populated by SessionStart hooks.
@@ -107,20 +93,20 @@ impl DaemonState {
 
         let mut trust_guard = TrustGuard::new(uid, nonce);
         trust_guard.register_source("poller");
-        trust_guard.register_source("codex_appserver");
         trust_guard.register_source("claude_hooks");
         trust_guard.register_source("claude_jsonl");
 
         Self {
             poller: PollerSourceState::new(),
-            codex_source: CodexSourceState::new(),
             claude_source: ClaudeSourceState::new(),
             claude_jsonl_source: ClaudeJsonlSourceState::new(),
             claude_jsonl_watchers: std::collections::HashMap::new(),
+            codex_jsonl_source: CodexJsonlSourceState::new(),
+            codex_jsonl_watchers: std::collections::HashMap::new(),
             gateway: Gateway::with_sources(
                 &[
                     SourceKind::Poller,
-                    SourceKind::CodexAppserver,
+                    SourceKind::CodexJsonl,
                     SourceKind::ClaudeHooks,
                     SourceKind::ClaudeJsonl,
                 ],
@@ -136,10 +122,6 @@ impl DaemonState {
             invalid_cursor_tracker: InvalidCursorTracker::new(),
             latency_window: LatencyWindow::new(3000),
             last_latency_eval: None,
-            codex_capture_tracker: CodexCaptureTracker::new(),
-            codex_appserver_client: None, // Spawned asynchronously in run_daemon
-            codex_appserver_had_connection: false,
-            codex_supervisor: SupervisorTracker::new(RestartPolicy::default()),
             conversation_titles: std::collections::HashMap::new(),
             transcript_path_hints: std::collections::HashMap::new(),
         }
@@ -150,18 +132,6 @@ impl DaemonState {
 pub async fn run_daemon(opts: DaemonOpts, socket_path: &str) -> anyhow::Result<()> {
     let executor = Arc::new(build_executor(&opts));
     let state = Arc::new(Mutex::new(DaemonState::new()));
-
-    // Attempt initial Codex App Server connection.
-    // If codex binary is not found or handshake fails, this is None — fallback path is used.
-    // If connected, set had_connection so poll_tick will reconnect on death.
-    {
-        let client = CodexAppServerClient::spawn().await;
-        let mut st = state.lock().await;
-        if client.is_some() {
-            st.codex_appserver_had_connection = true;
-        }
-        st.codex_appserver_client = client;
-    }
 
     // Start UDS server
     let server_state = Arc::clone(&state);
@@ -338,194 +308,54 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
         );
     }
 
-    // 6a. Codex deterministic evidence: App Server (primary) or capture extraction (fallback).
+    // 6a. Codex JSONL semantic detection.
     //
-    // B5 fix: poll_threads() is called OUTSIDE the mutex to avoid blocking
-    // all DaemonState access during the 5s App Server timeout.
+    // Uses agtmux-source-codex-jsonl to detect Codex sessions by reading
+    // their JSONL files and running a semantic FSM (not mtime heuristics).
     //
-    // T-119: Build pane cwd info for thread ↔ pane correlation.
-    // Built once here so it can be used by both the App Server poll (step 6a) and
-    // the JSONL session scanner (step 6a-bis), which runs unconditionally.
-    let pane_cwds_for_codex: Vec<PaneCwdInfo> = st
-        .last_panes
-        .iter()
-        .map(|pane| {
-            let gen_info = st.generation_tracker.get(&pane.pane_id);
-            PaneCwdInfo {
-                pane_id: pane.pane_id.clone(),
-                cwd: pane.current_path.clone(),
-                generation: gen_info.map(|(g, _)| g),
-                birth_ts: gen_info.map(|(_, ts)| ts),
-                process_hint: snapshots
-                    .iter()
-                    .find(|s| s.pane_id == pane.pane_id)
-                    .and_then(|s| s.process_hint.clone()),
-                pane_pid: pane.pane_pid,
-            }
-        })
-        .collect();
-
-    let appserver_poll_result = {
-        let mut client_taken = st.codex_appserver_client.take();
-        let alive = client_taken.as_mut().is_some_and(|c| c.is_alive());
-        if alive {
-            // Release mutex before async I/O
-            drop(st);
-            let (events, timed_out) = if let Some(ref mut client) = client_taken {
-                client.poll_threads(&pane_cwds_for_codex).await
-            } else {
-                (Vec::new(), false)
-            };
-            st = state.lock().await;
-            if timed_out {
-                // Socket read buffer is likely corrupt (stale CWD-query responses that
-                // arrived after the 500ms per-query timeout accumulate and cause every
-                // subsequent recv() to read the wrong-id response first, burning the
-                // 500ms window before the real one arrives → cascade).  Drop and let
-                // SupervisorTracker reconnect on the next tick.
-                tracing::info!("codex app-server: poll timed out, dropping for reconnect");
-                drop(client_taken);
-                st.codex_appserver_had_connection = true; // ensure reconnect path fires
-            } else {
-                st.codex_appserver_client = client_taken;
-            }
-            Some(events)
-        } else if client_taken.is_some() || st.codex_appserver_had_connection {
-            // Process exited — attempt reconnection via SupervisorTracker (T-129).
-            // Backoff: 1s → 2s → 4s → … → 30s (capped). Budget: 5 failures / 10min → 5min hold-down.
-            drop(client_taken); // drop dead process
-            let now_ms = chrono::Utc::now().timestamp_millis() as u64;
-            let should_attempt = match st.codex_supervisor.state() {
-                SupervisorState::Ready => true,
-                SupervisorState::Restarting {
-                    next_restart_ms, ..
-                } => now_ms >= *next_restart_ms,
-                SupervisorState::HoldDown { until_ms } => {
-                    if now_ms < *until_ms {
-                        tracing::debug!(
-                            "codex app-server: hold-down active, {}s remaining",
-                            until_ms.saturating_sub(now_ms) / 1000
-                        );
-                        false
-                    } else {
-                        true // hold-down expired
-                    }
-                }
-            };
-            if should_attempt {
-                tracing::info!("codex app-server process exited, attempting reconnect");
-                drop(st);
-                let new_client = CodexAppServerClient::spawn().await;
-                st = state.lock().await;
-                if new_client.is_some() {
-                    tracing::info!("codex app-server reconnected");
-                    st.codex_supervisor.record_success();
-                    st.codex_appserver_had_connection = true;
-                } else {
-                    let decision = st.codex_supervisor.record_failure(now_ms);
-                    match decision {
-                        RestartDecision::HoldDown { duration_ms } => {
-                            tracing::warn!(
-                                "codex app-server: failure budget exhausted, hold-down {}s",
-                                duration_ms / 1000
-                            );
-                        }
-                        RestartDecision::Restart { after_ms } => {
-                            tracing::info!(
-                                "codex app-server: reconnect failed, retry in {}ms",
-                                after_ms
-                            );
-                        }
-                        RestartDecision::Ready => {}
-                    }
-                }
-                st.codex_appserver_client = new_client;
-            } else {
-                st.codex_appserver_client = None;
-            }
-            None // no events this tick
-        } else {
-            // No client ever connected and none was established by run_daemon.
-            // poll_tick does NOT attempt initial spawn — that's run_daemon's job.
-            // This avoids spawning codex in tests or when the binary is unavailable.
-            None
-        }
-    };
-
-    // B3 fix: used_appserver is true when client is alive (regardless of event count)
-    let used_appserver = appserver_poll_result.is_some();
-    if let Some(events) = appserver_poll_result
-        && !events.is_empty()
+    // Only panes with process_hint="codex" are included.
     {
-        tracing::debug!("codex app-server: {} events from thread/list", events.len());
-        for event in events {
-            // T-135a: extract conversation title (name / preview) from thread payload.
-            // Stored by session_key (= thread_id) so build_pane_list can look it up.
-            let title = event.payload["name"]
-                .as_str()
-                .filter(|s| !s.is_empty())
-                .or_else(|| event.payload["preview"].as_str().filter(|s| !s.is_empty()));
-            if let Some(t) = title {
-                st.conversation_titles
-                    .insert(event.session_id.clone(), t.to_string());
-            }
-            st.codex_source.ingest(event);
-        }
-    }
+        let snapshot_hint: std::collections::HashMap<&str, Option<&str>> = snapshots
+            .iter()
+            .map(|s| (s.pane_id.as_str(), s.process_hint.as_deref()))
+            .collect();
 
-    // 6a-bis: Direct JSONL session scanner (unconditional — runs regardless of App Server state).
-    //
-    // Runs outside poll_threads to ensure running codex sessions are always detected, even when
-    // the App Server is slow or unavailable.  See codex_poller module doc for details.
-    {
-        let jsonl_events = scan_jsonl_sessions(&pane_cwds_for_codex, now, &process_map);
-        if !jsonl_events.is_empty() {
-            tracing::debug!("codex jsonl-scan: {} events", jsonl_events.len());
-        }
-        for event in jsonl_events {
-            // T-135a-bis: extract conversation title from Codex JSONL session_meta.instructions.
-            // The JSONL scanner session_id ("jsonl-<stem>") is the same key the daemon projection
-            // uses for the pane's session_key, so conversation_titles[session_id] is the correct
-            // lookup for server.rs to find the title.
-            if let Some(instructions) = event.payload["instructions"]
-                .as_str()
-                .filter(|s| !s.is_empty())
-            {
-                st.conversation_titles
-                    .insert(event.session_id.clone(), instructions.to_string());
-            }
-            st.codex_source.ingest(event);
-        }
-    }
-
-    // Fallback: parse Codex NDJSON from tmux capture text (only when App Server unavailable)
-    if !used_appserver {
-        let active_pane_ids: Vec<&str> = panes.iter().map(|p| p.pane_id.as_str()).collect();
-        st.codex_capture_tracker.retain_panes(&active_pane_ids);
-
-        for snapshot in &snapshots {
-            if let Some(result) = poll_pane(snapshot)
-                && result.provider == Provider::Codex
-            {
-                let new_events = parse_codex_capture_events(
-                    &snapshot.capture_lines,
-                    &snapshot.pane_id,
-                    &mut st.codex_capture_tracker,
-                );
-                for event in new_events {
-                    tracing::debug!(
-                        "codex capture event: {} (pane={})",
-                        event.event_type,
-                        snapshot.pane_id
-                    );
-                    st.codex_source.ingest(event);
+        let codex_hints: Vec<CodexPaneHint> = panes
+            .iter()
+            .filter(|p| snapshot_hint.get(p.pane_id.as_str()).copied().flatten() == Some("codex"))
+            .map(|p| {
+                let (pane_gen, pane_birth) = st
+                    .generation_tracker
+                    .get(&p.pane_id)
+                    .map(|(g, b)| (Some(g), Some(b)))
+                    .unwrap_or((None, None));
+                CodexPaneHint {
+                    pane_id: p.pane_id.clone(),
+                    pane_pid: p.pane_pid,
+                    cwd: p.current_path.clone(),
+                    pane_generation: pane_gen,
+                    pane_birth_ts: pane_birth,
                 }
+            })
+            .collect();
+
+        if !codex_hints.is_empty() {
+            let discoveries = CodexJsonlSourceState::discover_sessions(&codex_hints);
+            // Split borrow: take the watchers map out temporarily so Rust allows
+            // &mut source alongside the watchers reference.
+            let mut watchers = std::mem::take(&mut st.codex_jsonl_watchers);
+            let events = st
+                .codex_jsonl_source
+                .poll_files(&mut watchers, &discoveries, now);
+            st.codex_jsonl_watchers = watchers;
+            if !events.is_empty() {
+                tracing::debug!("codex jsonl: {} events", events.len());
+            }
+            for event in events {
+                st.codex_jsonl_source.ingest(event);
             }
         }
     }
-
-    // B6: propagate App Server connectivity to codex source health
-    st.codex_source.set_appserver_connected(used_appserver);
 
     // 6b. Claude JSONL discovery + poll
     // Scan all panes that might be running Claude for JSONL transcripts (T-126 fix).
@@ -542,7 +372,7 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
     //
     // We EXCLUDE:
     //   - process_hint="shell" (zsh/bash/…): never an agent runtime
-    //   - process_hint="codex":  handled by Step 6a
+    //   - process_hint="codex":  handled by Step 6a (Codex JSONL source)
     //   - process_hint=None + current_cmd NOT in allowlist (yazi, htop, vim, …)
     //   - any other unknown hint: fail-closed
     {
@@ -616,8 +446,7 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
                 }
             }
             // Use Utc::now() (not poll_tick's `now`) so the bootstrap event's observed_at
-            // is guaranteed to be AFTER the Codex App Server events (which also use Utc::now()
-            // during their async network call in Step 6a).  This ensures
+            // is fresh relative to the Codex JSONL events emitted in Step 6a.  This ensures
             // last_real_activity[Claude] > last_real_activity[Codex] → Claude wins the
             // select_winning_provider tiebreaker when both have fresh deterministic evidence.
             let jsonl_events = ClaudeJsonlSourceState::poll_files(
@@ -723,20 +552,20 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
     st.gateway
         .ingest_source_response(SourceKind::Poller, poller_response);
 
-    // 8a. Pull events from codex source (populated via source.ingest UDS)
-    let codex_cursor = st
+    // 8a. Pull events from Codex JSONL source
+    let codex_jsonl_cursor = st
         .gateway
-        .source_cursor(SourceKind::CodexAppserver)
+        .source_cursor(SourceKind::CodexJsonl)
         .map(String::from);
-    let codex_response = st.codex_source.pull_events(
+    let codex_jsonl_response = st.codex_jsonl_source.pull_events(
         &PullEventsRequest {
-            cursor: codex_cursor,
+            cursor: codex_jsonl_cursor,
             limit: 500,
         },
         now,
     );
     st.gateway
-        .ingest_source_response(SourceKind::CodexAppserver, codex_response);
+        .ingest_source_response(SourceKind::CodexJsonl, codex_jsonl_response);
 
     // 8b. Pull events from claude source (populated via source.ingest UDS)
     let claude_cursor = st
@@ -856,12 +685,12 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
     {
         st.poller.compact(seq);
     }
-    // Codex: trim events up to the gateway's source cursor.
-    if let Some(codex_cursor) = st.gateway.source_cursor(SourceKind::CodexAppserver)
-        && let Some(seq_str) = codex_cursor.strip_prefix("codex-app:")
+    // Codex JSONL: trim events up to the gateway's source cursor.
+    if let Some(codex_jsonl_cursor) = st.gateway.source_cursor(SourceKind::CodexJsonl)
+        && let Some(seq_str) = codex_jsonl_cursor.strip_prefix("codex-jsonl:")
         && let Ok(seq) = seq_str.parse::<u64>()
     {
-        st.codex_source.compact(seq);
+        st.codex_jsonl_source.compact(seq);
     }
     // Claude hooks: trim events up to the gateway's source cursor.
     if let Some(claude_cursor) = st.gateway.source_cursor(SourceKind::ClaudeHooks)
@@ -1294,24 +1123,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn poll_tick_pulls_from_codex_source() {
-        use agtmux_source_codex_appserver::translate::CodexRawEvent;
+    async fn poll_tick_pulls_from_codex_jsonl_source() {
+        use agtmux_core_v5::types::{EvidenceTier, Provider, SourceEventV2, SourceKind};
 
         let backend = Arc::new(FakeTmuxBackend::new().with_pane("%0", "main", "zsh", "$ ls"));
         let state = new_state();
 
-        // Pre-ingest a Codex appserver event
+        // Pre-ingest a Codex JSONL event directly into the codex_jsonl_source
         {
             let mut st = state.lock().await;
-            st.codex_source.ingest(CodexRawEvent {
-                id: "cx-001".to_string(),
-                event_type: "task.running".to_string(),
-                session_id: "codex-sess-1".to_string(),
-                timestamp: Utc::now(),
+            st.codex_jsonl_source.ingest(SourceEventV2 {
+                event_id: "codex-jsonl-cx-001".to_string(),
+                provider: Provider::Codex,
+                source_kind: SourceKind::CodexJsonl,
+                tier: EvidenceTier::Deterministic,
+                observed_at: Utc::now(),
+                session_key: "codex-sess-1".to_string(),
                 pane_id: Some("%0".to_string()),
                 pane_generation: None,
                 pane_birth_ts: None,
+                source_event_id: None,
+                event_type: "activity.running".to_string(),
                 payload: serde_json::json!({}),
+                confidence: 1.0,
                 is_heartbeat: false,
                 actual_activity_at: None,
             });
@@ -1323,7 +1157,7 @@ mod tests {
         let managed = st.daemon.list_panes();
         assert!(
             !managed.is_empty(),
-            "codex appserver event should create managed pane"
+            "codex jsonl event should create managed pane"
         );
     }
 
@@ -1676,69 +1510,5 @@ mod tests {
             2,
             "both panes must be tracked in last_panes"
         );
-    }
-
-    // ─── T-129: Supervisor strict wiring ─────────────────────────────
-
-    #[test]
-    fn supervisor_initial_state_is_ready() {
-        // DaemonState::new() must initialise codex_supervisor in Ready state.
-        let state = DaemonState::new();
-        assert_eq!(
-            *state.codex_supervisor.state(),
-            SupervisorState::Ready,
-            "supervisor must start in Ready state"
-        );
-        assert!(!state.codex_supervisor.is_hold_down());
-    }
-
-    #[test]
-    fn supervisor_failure_advances_to_restarting() {
-        // After one reconnect failure, supervisor enters Restarting with a backoff delay.
-        let mut state = DaemonState::new();
-        let now_ms = 1_000_000u64;
-        let decision = state.codex_supervisor.record_failure(now_ms);
-        // Default policy: initial_backoff_ms=1000, attempt 0 → after_ms=1000
-        assert_eq!(decision, RestartDecision::Restart { after_ms: 1_000 });
-        assert!(matches!(
-            state.codex_supervisor.state(),
-            SupervisorState::Restarting { .. }
-        ));
-    }
-
-    #[test]
-    fn supervisor_success_after_failure_resets_to_ready() {
-        // After a successful reconnect, supervisor returns to Ready and clears history.
-        let mut state = DaemonState::new();
-        let now_ms = 1_000_000u64;
-        state.codex_supervisor.record_failure(now_ms);
-        assert!(matches!(
-            state.codex_supervisor.state(),
-            SupervisorState::Restarting { .. }
-        ));
-        state.codex_supervisor.record_success();
-        assert_eq!(
-            *state.codex_supervisor.state(),
-            SupervisorState::Ready,
-            "supervisor must return to Ready after success"
-        );
-    }
-
-    #[test]
-    fn supervisor_budget_exhaustion_triggers_holddown() {
-        // 5 consecutive failures within 10-minute window → HoldDown 5 minutes.
-        let mut state = DaemonState::new();
-        let mut last_decision = RestartDecision::Ready;
-        for i in 0..5 {
-            last_decision = state.codex_supervisor.record_failure(i * 1_000);
-        }
-        assert_eq!(
-            last_decision,
-            RestartDecision::HoldDown {
-                duration_ms: 300_000
-            },
-            "5th failure must trigger 5-minute hold-down"
-        );
-        assert!(state.codex_supervisor.is_hold_down());
     }
 }

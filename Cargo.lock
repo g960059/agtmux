@@ -11,7 +11,7 @@ dependencies = [
  "agtmux-gateway",
  "agtmux-source-claude-hooks",
  "agtmux-source-claude-jsonl",
- "agtmux-source-codex-appserver",
+ "agtmux-source-codex-jsonl",
  "agtmux-source-poller",
  "agtmux-tmux-v5",
  "anyhow",
@@ -82,6 +82,17 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "agtmux-source-codex-jsonl"
+version = "0.1.0"
+dependencies = [
+ "agtmux-core-v5",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tracing",
 ]
 
 [[package]]

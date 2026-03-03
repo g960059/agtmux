@@ -157,7 +157,70 @@ Phase 7 (Distribution) と独立して実施可能。
   - **Gate**: `just verify` PASS + OSC 9;4 シーケンスのユニットテスト PASS
   - blocked_by: T-E01, T-E02
 
+### Phase 9 — Codex JSONL セマンティックソース（根本解決）
+
+2026-03-02 の 4 エージェント研究チーム調査に基づき、mtime ベース検出を JSONL セマンティック解析に完全置換する。
+設計詳細: `docs/research/20260302/05_synthesis.md`
+
+**重要な発見（調査チーム確認済み）:**
+- JSONL JSON キーは `.payload.type`（`.data.type` ではない）
+- 正しいイベント名: `task_started`, `task_complete`, `entered_review_mode`, `exited_review_mode`
+- keepalive 行は存在しない（Idle 時はファイル書き込みが停止するのみ）
+- `entered_review_mode` が WaitingApproval の確定シグナル
+
+- [x] T-codex01a (P1) Codex 検出 回帰テスト + e2e テスト作成 — DONE (2026-03-03)
+  - **目的**: 現在のバグを再現するユニット/e2e テストを先に書く（TDD）
+  - **回帰ケース（unit）**:
+    - `scan_jsonl_sessions()` で古い日付ディレクトリのセッションが未検出になる
+    - mtime ベースで task_started/task_complete を誤分類する
+    - WaitingApproval が検出されない（entered_review_mode 未処理）
+  - **e2e ケース**:
+    - `scripts/tests/e2e/online/scenarios/codex-semantic-states.sh`
+    - Phase 1: Codex 起動 → task_started 注入 → Running を確認
+    - Phase 2: task_complete 注入 → WaitingInput を確認
+    - Phase 3: entered_review_mode 注入 → WaitingApproval を確認
+    - Phase 4: exited_review_mode + task_complete → WaitingInput を確認
+  - **変更対象**: `crates/agtmux-source-codex-jsonl/src/` の各モジュールのテスト
+  - blocked_by: なし
+
+- [x] T-codex01b (P1) `agtmux-source-codex-jsonl` 新クレート実装 — DONE (2026-03-03)
+  - **目的**: JSONL セマンティック解析で Codex 状態を正確に検出
+  - **新規クレート**: `crates/agtmux-source-codex-jsonl/`
+    - `discovery.rs`: `lsof -p <pid> -d cwd -Fn` → CWD 取得 → 全日付ディレクトリ走査（日付フィルタなし）
+    - `watcher.rs`: inode + byte_offset tracking + partial_line_buf（claude-jsonl と同パターン）
+    - `fsm.rs`: `Init → Running → ToolExecuting / WaitingApproval / WaitingInput → Ended` FSM
+    - `translate.rs`: FSM state → `SourceEventV2`
+    - `source.rs`: poll_loop ブリッジ
+  - **FSM 遷移**:
+    - `task_started` → Running
+    - `function_call` → ToolExecuting、`function_call_output` → Running
+    - `entered_review_mode` → WaitingApproval、`exited_review_mode` → Running
+    - `task_complete` / `turn_aborted` → WaitingInput
+    - WaitingInput + process exit or 600s → Ended
+  - **Provider**: `Provider::Codex`, `SourceKind::CodexJsonl`, `EvidenceTier::Deterministic`
+  - 50 unit tests, `SourceKind::CodexJsonl` added to core types
+  - Gate: `just verify` 800+ tests PASS
+
+- [x] T-codex01c (P1) poll_loop 接続 + 旧コード削除 — DONE (2026-03-03)
+  - **poll_loop.rs**: Step 6a（App Server ブロック）+ Step 6a-bis（scan_jsonl_sessions）を新ソース呼び出しに差し替え
+  - **削除対象** (`codex_poller.rs`): 700行→4行スタブに置換（`CodexAppServerClient`、`scan_jsonl_sessions`、Pass1/2/3、`CodexCaptureTracker`、全定数）
+  - **DaemonState** から削除: `codex_appserver_client`, `codex_supervisor`, `codex_capture_tracker`, `codex_appserver_had_connection`
+  - **DaemonState** に追加: `codex_jsonl_source: CodexJsonlSourceState`, `codex_jsonl_watchers`
+  - `server.rs`: `codex_appserver` source kind 削除
+  - Gateway sources: `CodexAppserver` → `CodexJsonl` に置換
+  - Gate: `just verify` 800+ tests PASS, zero warnings
+
 ## DOING
+
+### Phase 9 — Codex JSONL Follow-ups (GO_WITH_CONDITIONS conditions)
+
+- [x] T-codex02a (P2) FSM test: WaitingApproval + task_complete → no-op — DONE (2026-03-03)
+  - Added `waiting_approval_task_complete_is_noop` test to `fsm.rs`
+  - Asserts `transition(WaitingApproval, task_complete) == WaitingApproval`
+
+- [x] T-codex02b (P2) discovery.rs: canonicalize_path /tmp fallback unit test — DONE (2026-03-03)
+  - Added `canonicalize_path_tmp_fallback_substitutes_private_tmp` test to `discovery.rs`
+  - `#[cfg(target_os = "macos")]` asserts `/private/tmp/...` substitution for non-existent paths
 
 ### Phase 7 — Distribution Infrastructure
 

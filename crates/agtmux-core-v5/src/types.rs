@@ -57,6 +57,7 @@ pub enum SourceKind {
     CodexAppserver,
     ClaudeHooks,
     ClaudeJsonl,
+    CodexJsonl,
     Poller,
 }
 
@@ -64,7 +65,7 @@ impl SourceKind {
     /// Map source kind to its evidence tier.
     pub fn tier(self) -> EvidenceTier {
         match self {
-            Self::CodexAppserver | Self::ClaudeHooks | Self::ClaudeJsonl => {
+            Self::CodexAppserver | Self::ClaudeHooks | Self::ClaudeJsonl | Self::CodexJsonl => {
                 EvidenceTier::Deterministic
             }
             Self::Poller => EvidenceTier::Heuristic,
@@ -76,6 +77,7 @@ impl SourceKind {
             Self::CodexAppserver => "codex_appserver",
             Self::ClaudeHooks => "claude_hooks",
             Self::ClaudeJsonl => "claude_jsonl",
+            Self::CodexJsonl => "codex_jsonl",
             Self::Poller => "poller",
         }
     }

@@ -6,6 +6,93 @@
 
 ---
 
+## 2026-03-03 — Phase 9 完了: Codex JSONL セマンティックソース 実装
+
+### T-codex01a/b/c 完了 (2026-03-03)
+
+**概要**: 4エージェント調査に基づき、Codex 検出を mtime ヒューリスティックから JSONL セマンティック解析に根本置換。
+
+**T-codex01a — 回帰テスト作成 (TDD)**
+- `crates/agtmux-source-codex-jsonl/src/fsm.rs`: 22 unit tests
+- `crates/agtmux-source-codex-jsonl/src/watcher.rs`: 4 unit tests
+- `crates/agtmux-source-codex-jsonl/src/discovery.rs`: 6 unit tests
+- `crates/agtmux-source-codex-jsonl/src/translate.rs`: 7 unit tests
+- `crates/agtmux-source-codex-jsonl/src/source.rs`: 7 unit tests + cursor pagination
+- `scripts/tests/e2e/scenarios/codex-semantic-states.sh`: synthetic JSONL injection e2e
+
+**T-codex01b — 新クレート実装**
+- `crates/agtmux-source-codex-jsonl/` 新規作成（5 モジュール）
+- `SourceKind::CodexJsonl` を `agtmux-core-v5/src/types.rs` に追加
+- `discovery.rs`: `lsof -p <pid> -d cwd -Fn` で CWD 取得 → `~/.codex/sessions/**/*.jsonl` 全走査 → `session_meta.payload.cwd` マッチ
+- `fsm.rs`: 6状態 FSM — `.payload.type` キー使用（旧実装の `.data.type` キーバグを修正）
+- 正しいイベント名: `task_started`, `task_complete`, `entered_review_mode`, `exited_review_mode`, `function_call`, `function_call_output`
+- Gate: `just verify` 834+ tests PASS
+
+**T-codex01c — poll_loop 接続 + 旧コード削除**
+- `codex_poller.rs`: 700行 → 4行スタブ（`CodexAppServerClient`, `scan_jsonl_sessions` Pass1/2/3, `CodexCaptureTracker` 等 削除）
+- `poll_loop.rs` Step 6a: App Server 180行ブロック → Codex JSONL source 50行に置換
+- `DaemonState` から削除: `codex_appserver_client`, `codex_appserver_had_connection`, `codex_supervisor`, `codex_capture_tracker`, `codex_source`
+- `DaemonState` に追加: `codex_jsonl_source: CodexJsonlSourceState`, `codex_jsonl_watchers`
+- `server.rs`: `codex_appserver` ソース kind 削除
+- Gateway: `SourceKind::CodexAppserver` → `SourceKind::CodexJsonl` 置換
+- `agtmux-runtime/Cargo.toml`: `agtmux-source-codex-appserver` → `agtmux-source-codex-jsonl`
+- Gate: `just verify` 800+ tests PASS, zero warnings, zero clippy
+
+---
+
+## 2026-03-02 — Phase 9 設計: Codex JSONL セマンティックソース 調査完了
+
+### 4 エージェント研究チーム調査 (2026-03-02)
+
+**背景**: v0.1.9〜v0.1.12 にわたる Codex 検出バグを根本解決するための調査。
+詳細: `docs/research/20260302/05_synthesis.md`
+
+**チーム構成**:
+- Agent A (Claude Opus): JSONL スキーマ詳細 + Proposal A
+- Agent B (Claude Opus): ESC シーケンス + cmux 分析 + Proposal B
+- Codex C (gpt-5.3): 1130 ファイルから実データ分析
+- Codex D (gpt-5.3): ESC + tmux アーキテクチャ調査
+
+### 重要発見（設計方針への反映）
+
+**1. JSONL JSON キーが違った**: `.data.type` ではなく `.payload.type`
+
+**2. 正しいイベント名**:
+
+| 旧仮定 | 実際のイベント（1130ファイルより） |
+|--------|-----------------------------------|
+| `turn/started` | `task_started` (1785件) |
+| `turn/completed` | `task_complete` (1561件) |
+| `waitingOnApproval` | `entered_review_mode` (46件) / `exited_review_mode` (46件) |
+
+**3. keepalive 行は存在しない**: Idle 時はファイル書き込みが停止するのみ。v0.1.11/v0.1.12 で戦っていた問題は存在しなかった。
+
+**4. WaitingApproval はヒューリスティック不要**: `entered_review_mode` が明示的に存在するため確定検出可能。
+
+**5. complete イベント名**: `function_call` / `function_call_output` (各 42968 件) が ToolExecuting の遷移シグナル。
+
+**6. cmux**: libghostty ベースの native macOS ターミナル。tmux から外部観測する agtmux とはアーキテクチャが異なる。OSC シーケンスは Phase 2（Post-MVP）で対応。
+
+### 確定 FSM
+
+```
+Init → (task_started) → Running
+Running → (function_call) → ToolExecuting → (function_call_output) → Running
+Running → (entered_review_mode) → WaitingApproval → (exited_review_mode) → Running
+Running/ToolExecuting → (task_complete / turn_aborted) → WaitingInput
+WaitingInput → (task_started) → Running
+WaitingInput → (process exit or 600s) → Ended
+```
+
+### 実装方針
+
+Phase 1（今すぐ）: `agtmux-source-codex-jsonl` 新クレート（T-codex01a/b/c）
+- TDD: 回帰テスト + e2e テスト先行
+- App Server, scan_jsonl_sessions, mtime コードを完全削除
+Phase 2（Post-MVP）: OSC 9;4 tap via pipe-pane（T-E04 継続）
+
+---
+
 ## 2026-03-02 — CI/CD 安定化 + Codex historical enrichment 改善
 
 ### v0.1.4 — 既存デーモン自動置換

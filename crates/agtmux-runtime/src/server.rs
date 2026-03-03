@@ -157,7 +157,6 @@ async fn handle_connection(
 
             let source_kind = match source_kind_str {
                 "poller" => agtmux_core_v5::types::SourceKind::Poller,
-                "codex_appserver" => agtmux_core_v5::types::SourceKind::CodexAppserver,
                 "claude_hooks" => agtmux_core_v5::types::SourceKind::ClaudeHooks,
                 "claude_jsonl" => agtmux_core_v5::types::SourceKind::ClaudeJsonl,
                 _ => {
@@ -249,29 +248,6 @@ async fn handle_connection(
                         Ok(event) => {
                             let mut st = state.lock().await;
                             st.claude_source.ingest(event);
-                            serde_json::json!({"status": "ok"})
-                        }
-                        Err(e) => {
-                            let error_response = serde_json::json!({
-                                "jsonrpc": "2.0",
-                                "error": {"code": -32602, "message": format!("invalid event: {e}")},
-                                "id": id,
-                            });
-                            let mut resp = serde_json::to_string(&error_response)?;
-                            resp.push('\n');
-                            writer.write_all(resp.as_bytes()).await?;
-                            return Ok(());
-                        }
-                    }
-                }
-                "codex_appserver" => {
-                    match serde_json::from_value::<
-                        agtmux_source_codex_appserver::translate::CodexRawEvent,
-                    >(params["event"].clone())
-                    {
-                        Ok(event) => {
-                            let mut st = state.lock().await;
-                            st.codex_source.ingest(event);
                             serde_json::json!({"status": "ok"})
                         }
                         Err(e) => {
@@ -1007,7 +983,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn source_ingest_codex_appserver_accepted() {
+    async fn source_ingest_codex_appserver_rejected() {
+        // codex_appserver source kind is no longer supported via UDS ingest;
+        // all Codex detection now uses agtmux-source-codex-jsonl (T-codex01c).
         let state = Arc::new(Mutex::new(make_state()));
         let request = serde_json::json!({
             "jsonrpc": "2.0",
@@ -1015,22 +993,18 @@ mod tests {
             "id": 2,
             "params": {
                 "source_kind": "codex_appserver",
-                "event": {
-                    "id": "cx-test-1",
-                    "event_type": "task.running",
-                    "session_id": "codex-sess",
-                    "timestamp": "2026-02-25T12:00:00Z",
-                    "pane_id": "%0",
-                    "payload": {}
-                }
+                "event": {}
             }
         });
 
         let resp = call_handler(Arc::clone(&state), request).await;
-        assert_eq!(resp["result"]["status"], "ok");
-
-        let st = state.lock().await;
-        assert_eq!(st.codex_source.buffered_len(), 1);
+        assert_eq!(resp["error"]["code"], -32602);
+        assert!(
+            resp["error"]["message"]
+                .as_str()
+                .expect("message")
+                .contains("unknown source_kind")
+        );
     }
 
     #[tokio::test]
@@ -1222,8 +1196,8 @@ mod tests {
             "method": "source.hello",
             "id": 25,
             "params": {
-                "source_id": "codex_appserver",
-                "source_kind": "codex_appserver",
+                "source_id": "claude_hooks",
+                "source_kind": "claude_hooks",
                 "protocol_version": 1
             }
         });
@@ -1238,7 +1212,7 @@ mod tests {
         let resp = call_handler(Arc::clone(&state), list_req).await;
         let entries = resp["result"].as_array().expect("should be array");
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0]["source_id"], "codex_appserver");
+        assert_eq!(entries[0]["source_id"], "claude_hooks");
         assert_eq!(entries[0]["lifecycle"], "active");
     }
 
@@ -1346,15 +1320,14 @@ mod tests {
     }
 
     #[test]
-    fn trust_guard_pre_registers_four_sources() {
+    fn trust_guard_pre_registers_three_sources() {
         let state = make_state();
         assert_eq!(
             state.trust_guard.registered_count(),
-            4,
-            "DaemonState::new() should pre-register poller, codex_appserver, claude_hooks, claude_jsonl"
+            3,
+            "DaemonState::new() should pre-register poller, claude_hooks, claude_jsonl"
         );
         assert!(state.trust_guard.is_registered("poller"));
-        assert!(state.trust_guard.is_registered("codex_appserver"));
         assert!(state.trust_guard.is_registered("claude_hooks"));
         assert!(state.trust_guard.is_registered("claude_jsonl"));
     }
