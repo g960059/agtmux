@@ -576,9 +576,16 @@ pub(crate) fn scan_jsonl_sessions(
     //
     // For heuristic codex panes not matched by the fresh scan (all their JSONL files are
     // older than JSONL_IDLE_THRESHOLD_SECS), search the past 7 days for the most-recently
-    // modified JSONL file whose session_meta.cwd matches the pane.  Emit a `thread.idle`
-    // event with `actual_activity_at = file_mtime` so the projection records the correct
-    // last-activity time (instead of "just now" from the daemon start).
+    // modified JSONL file whose session_meta.cwd matches the pane.  Always emits
+    // `thread.idle` with `actual_activity_at = file_mtime` so the projection records
+    // the correct last-activity time (instead of "just now" from the daemon start).
+    //
+    // Design note: we do NOT emit thread.active here even when the file mtime is fresh.
+    // Codex writes "keepalive" lines to the JSONL while waiting for user input (burst-write
+    // pattern, ~1 write/15 s).  Treating a fresh mtime as "active" causes updatedAt to
+    // oscillate every burst, making long-idle sessions flicker as "Running just now".
+    // Sessions that are truly running a task are detected by Pass 1 (lsof while writing)
+    // or Pass 2 (today/yesterday CWD scan during a burst).
     //
     // `is_heartbeat = false` is intentional: the first emission updates `updated_at` in
     // the projection; subsequent identical emissions are idempotent (same `actual_activity_at`).
@@ -620,9 +627,14 @@ pub(crate) fn scan_jsonl_sessions(
                     .and_then(|mtime| mtime.elapsed().ok())
                     .map(|d| d.as_secs())
                     .unwrap_or(u64::MAX);
-                // Pass 2 only covers today + yesterday.  A JSONL in an older date dir
-                // (e.g. 2026/02/23) with a fresh mtime means Codex is still writing to
-                // that file — do NOT skip it.
+                // Skip files already handled by the fresh scan (Pass 2).
+                // Also skip keepalive-write sessions: a fresh mtime in an old date
+                // dir most likely means Codex is alive but *waiting for user input*,
+                // not actively executing a task.  Treating those as "active" causes
+                // updatedAt to oscillate as long as Codex emits heartbeat writes.
+                if age_secs <= JSONL_IDLE_THRESHOLD_SECS {
+                    continue;
+                }
                 if age_secs > HISTORICAL_ENRICHMENT_SECS {
                     continue;
                 }
@@ -655,20 +667,13 @@ pub(crate) fn scan_jsonl_sessions(
             .map(|s| format!("jsonl-{s}"))
             .unwrap_or_else(|| format!("jsonl-{}", pane.pane_id));
 
-        // Branch: a fresh file in an old date dir means Codex is still writing.
-        let (hist_event_type, hist_activity_at) = if age_secs <= JSONL_ACTIVE_THRESHOLD_SECS {
-            ("thread.active", None)
-        } else {
-            let ts = now - chrono::Duration::seconds(age_secs as i64);
-            ("thread.idle", Some(ts))
-        };
+        let actual_activity_at = now - chrono::Duration::seconds(age_secs as i64);
 
         tracing::debug!(
-            "jsonl-history: pane={} session={} age={}s type={} cwd={}",
+            "jsonl-history: pane={} session={} age={}s cwd={}",
             pane.pane_id,
             session_id,
             age_secs,
-            hist_event_type,
             meta.cwd
         );
 
@@ -678,7 +683,7 @@ pub(crate) fn scan_jsonl_sessions(
                 pane.pane_id,
                 path.file_stem().and_then(|s| s.to_str()).unwrap_or("?")
             ),
-            event_type: hist_event_type.to_string(),
+            event_type: "thread.idle".to_string(),
             session_id,
             timestamp: now,
             pane_id: Some(pane.pane_id.clone()),
@@ -691,7 +696,7 @@ pub(crate) fn scan_jsonl_sessions(
                 "instructions": meta.instructions,
             }),
             is_heartbeat: false,
-            actual_activity_at: hist_activity_at,
+            actual_activity_at: Some(actual_activity_at),
         });
         matched_panes.insert(pane.pane_id.clone());
     }
