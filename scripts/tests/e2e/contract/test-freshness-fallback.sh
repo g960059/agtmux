@@ -10,6 +10,9 @@
 # So evidence_mode always becomes "heuristic" (never "none") after timeout.
 # The pane remains "managed" — only evidence tier downgrades.
 #
+# Uses claude_hooks source.ingest (tool_start) to establish deterministic binding.
+# The freshness/DOWN_THRESHOLD mechanism is source-agnostic.
+#
 # NOTE: This test sleeps ~18s to outlast the 15s DOWN_THRESHOLD.
 #       Expected total runtime: ~25s.
 
@@ -22,7 +25,7 @@ register_cleanup
 
 SESSION="e2e-freshness-$$"
 SOCKET="/tmp/agtmux-e2e-freshness-$$/agtmuxd.sock"
-THREAD_ID="e2e-fresh-thread-$$"
+SESSION_ID="e2e-fresh-sess-$$"
 INJECTOR_PID=""
 
 echo "=== test-freshness-fallback.sh ==="
@@ -32,7 +35,7 @@ tmux new-session -d -s "$SESSION" -n main 2>/dev/null
 
 PANE_ID=$(tmux list-panes -t "$SESSION:main" -F '#{pane_id}' 2>/dev/null | head -1)
 [ -n "$PANE_ID" ] || fail "could not get pane_id from tmux session $SESSION"
-log "using pane_id=$PANE_ID thread_id=$THREAD_ID"
+log "using pane_id=$PANE_ID session_id=$SESSION_ID"
 
 cleanup_freshness() {
     [ -n "$INJECTOR_PID" ] && kill "$INJECTOR_PID" 2>/dev/null || true
@@ -45,9 +48,10 @@ daemon_start "$SOCKET" 500
 sleep 1
 
 # ── Phase 1: Establish deterministic binding ────────────────────────────────
-# Use lifecycle.running via codex_appserver (CodexRawEvent accepts any event_type string).
+# Use claude_hooks tool_start to establish deterministic evidence_mode.
+# The DOWN_THRESHOLD mechanism is source-agnostic (resolver.rs tick_freshness).
 
-INJECTOR_PID=$(inject_codex_event_loop "$SOCKET" "lifecycle.running" "$THREAD_ID" "$PANE_ID")
+INJECTOR_PID=$(inject_claude_event_loop "$SOCKET" "tool_start" "$SESSION_ID" "$PANE_ID")
 log "Running injector PID=$INJECTOR_PID"
 
 wait_for_agtmux_state "$SOCKET" "$PANE_ID" "presence"       "managed"       30
@@ -58,9 +62,9 @@ pass "Phase 1: pane is managed / running / deterministic"
 
 # ── Phase 2: Stop injection → wait for DOWN_THRESHOLD ──────────────────────
 # DOWN_THRESHOLD = 15s (resolver.rs). tick_freshness() runs every poll tick (500ms).
-# We wait 18s after last injection to guarantee the threshold has passed.
+# We wait for up to 30s for the threshold to pass.
 
-log "stopping injection — waiting 18s for DOWN_THRESHOLD (15s) to expire"
+log "stopping injection — waiting for DOWN_THRESHOLD (15s) to expire"
 kill "$INJECTOR_PID" 2>/dev/null || true
 INJECTOR_PID=""
 
@@ -80,7 +84,7 @@ pass "Phase 3: pane remains managed (evidence_mode only, not presence)"
 # ── Phase 4: Re-establish deterministic ────────────────────────────────────
 # Injecting new events should promote back to deterministic.
 
-INJECTOR_PID=$(inject_codex_event_loop "$SOCKET" "lifecycle.running" "$THREAD_ID" "$PANE_ID")
+INJECTOR_PID=$(inject_claude_event_loop "$SOCKET" "tool_start" "$SESSION_ID" "$PANE_ID")
 log "re-injection PID=$INJECTOR_PID"
 
 wait_for_agtmux_state "$SOCKET" "$PANE_ID" "evidence_mode" "deterministic" 15

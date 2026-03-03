@@ -32,13 +32,20 @@ echo "[run-all] using agtmux: $AGTMUX_BIN ($("$AGTMUX_BIN" --version 2>/dev/null
 TESTS=(
     "$SCRIPT_DIR/test-schema.sh"
     "$SCRIPT_DIR/test-claude-state.sh"
-    "$SCRIPT_DIR/test-codex-state.sh"
-    "$SCRIPT_DIR/test-waiting-states.sh"
-    "$SCRIPT_DIR/test-error-state.sh"
     "$SCRIPT_DIR/test-list-consistency.sh"
     "$SCRIPT_DIR/test-multi-pane.sh"
     "$SCRIPT_DIR/test-freshness-fallback.sh"
+    "$SCRIPT_DIR/test-daemon-info.sh"
+    "$SCRIPT_DIR/test-provider-field.sh"
+    "$SCRIPT_DIR/test-source-lifecycle.sh"
+    "$SCRIPT_DIR/test-invalid-jsonrpc.sh"
+    "$SCRIPT_DIR/test-daemon-restart.sh"
 )
+# Removed (codex_appserver source removed in Phase 9):
+#   test-codex-state.sh, test-waiting-states.sh, test-error-state.sh
+# These tested codex state via source.ingest codex_appserver injection.
+# Codex FSM coverage is now in scenarios/codex-semantic-states.sh,
+# scenarios/codex-tool-execution.sh, scenarios/codex-approval-flow.sh.
 
 # ── Runner ────────────────────────────────────────────────────────────────
 

@@ -112,7 +112,7 @@ pub struct WaitOpts {
     pub no_waiting: bool,
 
     /// Scope to specific session
-    #[arg(long, short = 's')]
+    #[arg(long)]
     pub session: Option<String>,
 
     /// Timeout in seconds
