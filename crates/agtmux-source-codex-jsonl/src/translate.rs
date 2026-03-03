@@ -76,7 +76,7 @@ fn state_to_event_type(state: CodexSessionState) -> Option<&'static str> {
         CodexSessionState::Running => Some("activity.running"),
         CodexSessionState::ToolExecuting => Some("activity.running"),
         CodexSessionState::WaitingApproval => Some("activity.waiting_approval"),
-        CodexSessionState::WaitingInput => Some("activity.idle"),
+        CodexSessionState::WaitingInput => Some("activity.waiting_input"),
         CodexSessionState::Ended => None,
         CodexSessionState::Init => None,
     }
@@ -148,7 +148,7 @@ mod tests {
     }
 
     #[test]
-    fn waiting_input_produces_activity_idle() {
+    fn waiting_input_produces_activity_waiting_input() {
         let ev = translate_state_change(
             CodexSessionState::WaitingInput,
             "sess-1",
@@ -159,7 +159,7 @@ mod tests {
             4,
         );
         assert!(ev.is_some());
-        assert_eq!(ev.expect("event").event_type, "activity.idle");
+        assert_eq!(ev.expect("event").event_type, "activity.waiting_input");
     }
 
     #[test]

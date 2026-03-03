@@ -58,7 +58,7 @@ pass "Phase 1: Codex running and managed (deterministic)"
 # ── Phase 2: Wait for Codex to complete ──────────────────────────────────
 
 wait_until_provider_idle "$PANE_ID" 90 || log "WARN: provider-side idle check timed out"
-wait_for_agtmux_state "$SOCKET" "$PANE_ID" "activity_state" "idle" 90
+wait_for_agtmux_state "$SOCKET" "$PANE_ID" "activity_state" "waiting_input" 90
 
 pass "Phase 2: Codex completed task"
 

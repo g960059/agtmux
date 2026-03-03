@@ -6,11 +6,11 @@
 #
 #   Phase 0: pane discovered with session A's JSONL -> managed
 #   Phase 1: task_started in session A -> running
-#   Phase 2: task_complete in session A -> idle
+#   Phase 2: task_complete in session A -> waiting_input
 #   Phase 3: Session rotation: session A's JSONL is replaced by session B's
 #            (new file = new inode at the same path via rename)
 #   Phase 4: task_started in session B -> running again
-#   Phase 5: task_complete in session B -> idle
+#   Phase 5: task_complete in session B -> waiting_input
 #
 # This validates:
 #   - watcher.rs inode-change detection works end-to-end:
@@ -94,12 +94,12 @@ printf '{"type":"event_msg","payload":{"type":"task_started","taskId":"task-a-00
 wait_for_agtmux_state "$SOCKET" "$PANE_ID" "activity_state" "running" 30
 pass "Phase 1: activity_state=running in session A"
 
-# -- Phase 2: task_complete in session A -> idle --
+# -- Phase 2: task_complete in session A -> waiting_input --
 log "Phase 2: injecting task_complete in session A"
 printf '{"type":"event_msg","payload":{"type":"task_complete"}}\n' >> "$REAL_JSONL_A"
 
-wait_for_agtmux_state "$SOCKET" "$PANE_ID" "activity_state" "idle" 30
-pass "Phase 2: activity_state=idle (session A complete)"
+wait_for_agtmux_state "$SOCKET" "$PANE_ID" "activity_state" "waiting_input" 30
+pass "Phase 2: activity_state=waiting_input (session A complete)"
 
 # -- Phase 3: Session rotation --
 # Create a NEW session B file, then have it be discovered as the "most recent".
@@ -128,12 +128,12 @@ printf '{"type":"event_msg","payload":{"type":"task_started","taskId":"task-b-00
 wait_for_agtmux_state "$SOCKET" "$PANE_ID" "activity_state" "running" 30
 pass "Phase 4: activity_state=running in session B (after rotation)"
 
-# -- Phase 5: task_complete in session B -> idle --
+# -- Phase 5: task_complete in session B -> waiting_input --
 log "Phase 5: injecting task_complete in session B"
 printf '{"type":"event_msg","payload":{"type":"task_complete"}}\n' >> "$REAL_JSONL_B"
 
-wait_for_agtmux_state "$SOCKET" "$PANE_ID" "activity_state" "idle" 30
-pass "Phase 5: activity_state=idle in session B"
+wait_for_agtmux_state "$SOCKET" "$PANE_ID" "activity_state" "waiting_input" 30
+pass "Phase 5: activity_state=waiting_input in session B"
 
 # -- Verify provider and evidence mode are still correct after rotation --
 ACTUAL_PROVIDER=$(jq_get "$SOCKET" "$PANE_ID" "provider")

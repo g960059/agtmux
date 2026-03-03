@@ -7,7 +7,7 @@
 # States tested:
 #   Phase 0: pane discovered → presence=managed (idle_heartbeat from Init state)
 #   Phase 1: task_started    → activity_state = running
-#   Phase 2: task_complete   → activity_state = idle (WaitingInput)
+#   Phase 2: task_complete   → activity_state = waiting_input (WaitingInput FSM state)
 #   Phase 3: new task_started → running again
 #
 # Mechanism:
@@ -90,12 +90,12 @@ printf '{"type":"event_msg","payload":{"type":"task_started","taskId":"task-001"
 wait_for_agtmux_state "$SOCKET" "$PANE_ID" "activity_state" "running" 30
 pass "Phase 1: activity_state=running after task_started"
 
-# ── Phase 2: task_complete → WaitingInput (idle) ─────────────────────────────
-log "Phase 2: injecting task_complete → expect idle"
+# ── Phase 2: task_complete → WaitingInput ────────────────────────────────────
+log "Phase 2: injecting task_complete → expect waiting_input"
 printf '{"type":"event_msg","payload":{"type":"task_complete"}}\n' >> "$REAL_JSONL"
 
-wait_for_agtmux_state "$SOCKET" "$PANE_ID" "activity_state" "idle" 30
-pass "Phase 2: activity_state=idle after task_complete"
+wait_for_agtmux_state "$SOCKET" "$PANE_ID" "activity_state" "waiting_input" 30
+pass "Phase 2: activity_state=waiting_input after task_complete"
 
 # ── Phase 3: user_message + task_started → Running again ─────────────────────
 log "Phase 3: second task_started → expect running again"

@@ -212,6 +212,32 @@ Phase 7 (Distribution) と独立して実施可能。
 
 ## DOING
 
+### Phase 9 — Waiting State Detection Improvements
+
+- [ ] T-codex03a (P3) test-claude-approval.sh Phase 3 に明示的 sleep 追加 — follow-up from RP review
+  - Phase 3 で PermissionRequest injector kill 後、`sleep 4` を挿入してから tool_start injector を開始する
+  - 現状は暗黙の event expiry (<3s) に依存しており、閾値変更時に false-negative タイムアウトになる可能性
+  - blocked_by: なし
+
+- [ ] T-codex03b (P3) codex-title.sh online 再検証 — follow-up from RP review
+  - `idle → waiting_input` アサーション変更を live Codex セッションで確認する
+  - blocked_by: なし
+
+- [x] T-codex03 (P2) waiting_input/waiting_approval 検出修正 — DONE (2026-03-03)
+  - **背景**: agtmux-term が `waiting_input`/`waiting_approval` バッジを表示するが、2つのバグで
+    これらが `idle`/`unknown` に折りたたまれていた
+  - **Fix 1** (Codex): `crates/agtmux-source-codex-jsonl/src/translate.rs` line 79:
+    `WaitingInput → activity.idle` → `activity.waiting_input` に修正
+  - **Fix 2** (Claude hooks): `crates/agtmux-source-claude-hooks/src/translate.rs`:
+    `"Stop" | "SubagentStop" → "activity.waiting_input"` を追加
+  - **Fix 3** (e2e contract): `scripts/tests/e2e/contract/test-claude-approval.sh` 新規作成
+    (4 フェーズ: tool_start→running, PermissionRequest→waiting_approval, recovery, Stop→waiting_input)
+  - **Research**: `docs/research/claude-jsonl-waiting-states.md` — Claude JSONL には
+    waiting state シグナルが存在しないため JSONL ソースへの追加は不要
+  - **e2e シナリオ更新**: codex-semantic-states/codex-tool-execution/codex-approval-flow/
+    codex-session-rotation/codex-title の idle → waiting_input アサーション修正
+  - Gate: `just verify` PASS (unit tests); contract e2e 11/11 PASS
+
 ### Phase 9 — Codex JSONL Follow-ups (GO_WITH_CONDITIONS conditions)
 
 - [x] T-codex02a (P2) FSM test: WaitingApproval + task_complete → no-op — DONE (2026-03-03)

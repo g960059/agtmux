@@ -9,7 +9,7 @@
 #   Phase 4: entered_review_mode -> activity_state=waiting_approval (second tool)
 #   Phase 5: task_started (override) -> activity_state=running
 #            (task_started can fire from any state, including WaitingApproval)
-#   Phase 6: turn_aborted -> activity_state=idle (Ctrl+C path)
+#   Phase 6: turn_aborted -> activity_state=waiting_input (Ctrl+C path)
 #
 # This validates:
 #   - "waiting_approval" is exposed correctly via the JSON API (not just "running")
@@ -116,11 +116,11 @@ pass "Phase 5: activity_state=running (task_started overrides WaitingApproval)"
 
 # -- Phase 6: turn_aborted -> WaitingInput (idle) --
 # This tests the Ctrl+C / interrupt path: (Running | ToolExecuting, "event_msg", "turn_aborted") => WaitingInput
-log "Phase 6: injecting turn_aborted -> expect idle"
+log "Phase 6: injecting turn_aborted -> expect waiting_input"
 printf '{"type":"event_msg","payload":{"type":"turn_aborted","reason":"user_cancelled"}}\n' >> "$REAL_JSONL"
 
-wait_for_agtmux_state "$SOCKET" "$PANE_ID" "activity_state" "idle" 30
-pass "Phase 6: activity_state=idle after turn_aborted (Ctrl+C path)"
+wait_for_agtmux_state "$SOCKET" "$PANE_ID" "activity_state" "waiting_input" 30
+pass "Phase 6: activity_state=waiting_input after turn_aborted (Ctrl+C path)"
 
 # -- Verify provider=codex and evidence_mode=deterministic throughout --
 ACTUAL_PROVIDER=$(jq_get "$SOCKET" "$PANE_ID" "provider")

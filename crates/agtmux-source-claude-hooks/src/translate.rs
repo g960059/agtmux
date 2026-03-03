@@ -55,6 +55,7 @@ fn normalize_event_type(hook_type: &str) -> String {
         "UserPromptSubmit" => "activity.user_input".to_owned(),
         "PostToolUseFailure" => "lifecycle.error".to_owned(),
         "PreCompact" => "lifecycle.compacting".to_owned(),
+        "Stop" | "SubagentStop" => "activity.waiting_input".to_owned(),
         _ => "lifecycle.unknown".to_owned(),
     }
 }
@@ -114,6 +115,8 @@ mod tests {
             ("UserPromptSubmit", "activity.user_input"),
             ("PostToolUseFailure", "lifecycle.error"),
             ("PreCompact", "lifecycle.compacting"),
+            ("Stop", "activity.waiting_input"),
+            ("SubagentStop", "activity.waiting_input"),
         ];
         for (hook_type, expected) in cases {
             let raw = sample_event(hook_type, None);

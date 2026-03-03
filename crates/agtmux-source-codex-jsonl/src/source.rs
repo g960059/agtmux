@@ -295,8 +295,8 @@ mod tests {
     }
 
     #[test]
-    fn poll_files_emits_idle_on_task_complete() {
-        let tmp = tmp_dir("poll-idle");
+    fn poll_files_emits_waiting_input_on_task_complete() {
+        let tmp = tmp_dir("poll-waiting-input");
         let path = tmp.join("session.jsonl");
         let mut f = fs::File::create(&path).expect("test");
         writeln!(
@@ -322,14 +322,14 @@ mod tests {
         let events = source.poll_files(&mut watchers, &discoveries, now());
 
         // Should transition: Init→Running→WaitingInput
-        // activity.idle (from WaitingInput) should be present
-        let idle_real: Vec<_> = events
+        // activity.waiting_input (from WaitingInput) should be present as a non-heartbeat event
+        let waiting_input_real: Vec<_> = events
             .iter()
-            .filter(|e| e.event_type == "activity.idle" && !e.is_heartbeat)
+            .filter(|e| e.event_type == "activity.waiting_input" && !e.is_heartbeat)
             .collect();
         assert!(
-            !idle_real.is_empty(),
-            "task_complete should produce activity.idle (non-heartbeat)"
+            !waiting_input_real.is_empty(),
+            "task_complete should produce activity.waiting_input (non-heartbeat)"
         );
 
         let _ = fs::remove_dir_all(&tmp);

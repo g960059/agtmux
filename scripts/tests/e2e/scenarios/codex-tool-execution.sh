@@ -8,7 +8,7 @@
 #   Phase 3: function_call_output -> activity_state=running (back to Running)
 #   Phase 4: custom_tool_call -> activity_state=running (ToolExecuting again)
 #   Phase 5: custom_tool_call_output -> activity_state=running (back to Running)
-#   Phase 6: task_complete   -> activity_state=idle (WaitingInput)
+#   Phase 6: task_complete   -> activity_state=waiting_input (WaitingInput FSM state)
 #
 # This validates:
 #   - response_item events (function_call, function_call_output, custom_tool_call,
@@ -118,12 +118,12 @@ sleep 3
 ACTUAL_STATE=$(jq_get "$SOCKET" "$PANE_ID" "activity_state")
 assert_eq "Phase 5: custom_tool_call_output -> Running" "running" "$ACTUAL_STATE"
 
-# -- Phase 6: task_complete -> WaitingInput (idle) --
-log "Phase 6: injecting task_complete -> expect idle"
+# -- Phase 6: task_complete -> WaitingInput --
+log "Phase 6: injecting task_complete -> expect waiting_input"
 printf '{"type":"event_msg","payload":{"type":"task_complete"}}\n' >> "$REAL_JSONL"
 
-wait_for_agtmux_state "$SOCKET" "$PANE_ID" "activity_state" "idle" 30
-pass "Phase 6: activity_state=idle after task_complete"
+wait_for_agtmux_state "$SOCKET" "$PANE_ID" "activity_state" "waiting_input" 30
+pass "Phase 6: activity_state=waiting_input after task_complete"
 
 # -- Verify provider=codex throughout --
 ACTUAL_PROVIDER=$(jq_get "$SOCKET" "$PANE_ID" "provider")

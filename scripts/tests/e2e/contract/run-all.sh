@@ -40,6 +40,7 @@ TESTS=(
     "$SCRIPT_DIR/test-source-lifecycle.sh"
     "$SCRIPT_DIR/test-invalid-jsonrpc.sh"
     "$SCRIPT_DIR/test-daemon-restart.sh"
+    "$SCRIPT_DIR/test-claude-approval.sh"
 )
 # Removed (codex_appserver source removed in Phase 9):
 #   test-codex-state.sh, test-waiting-states.sh, test-error-state.sh
