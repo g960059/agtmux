@@ -35,7 +35,7 @@ pub fn translate(raw: &ClaudeHookEvent) -> SourceEventV2 {
         pane_generation: None,
         pane_birth_ts: None,
         source_event_id: Some(raw.hook_id.clone()),
-        event_type: normalize_event_type(&raw.hook_type),
+        event_type: resolve_event_type(&raw.hook_type, &raw.data),
         payload: raw.data.clone(),
         confidence: 1.0,
         is_heartbeat: false, // Claude hooks are always real activity (not periodic keep-alive)
@@ -56,7 +56,25 @@ fn normalize_event_type(hook_type: &str) -> String {
         "PostToolUseFailure" => "lifecycle.error".to_owned(),
         "PreCompact" => "lifecycle.compacting".to_owned(),
         "Stop" | "SubagentStop" => "activity.waiting_input".to_owned(),
+        "PreToolUse" | "PostToolUse" => "activity.running".to_owned(),
         _ => "lifecycle.unknown".to_owned(),
+    }
+}
+
+/// Resolve event_type, taking hook payload into account for hooks that
+/// require data-level dispatch (e.g. `Notification`).
+///
+/// For all other hook types the call is forwarded to [`normalize_event_type`].
+fn resolve_event_type(hook_type: &str, data: &serde_json::Value) -> String {
+    if hook_type == "Notification" {
+        match data.get("notification_type").and_then(|v| v.as_str()) {
+            Some("idle_prompt") => "activity.waiting_input".to_owned(),
+            Some("permission_prompt") => "activity.waiting_approval".to_owned(),
+            Some(_) => "lifecycle.notification".to_owned(),
+            None => "lifecycle.notification".to_owned(),
+        }
+    } else {
+        normalize_event_type(hook_type)
     }
 }
 
@@ -117,6 +135,8 @@ mod tests {
             ("PreCompact", "lifecycle.compacting"),
             ("Stop", "activity.waiting_input"),
             ("SubagentStop", "activity.waiting_input"),
+            ("PreToolUse", "activity.running"),
+            ("PostToolUse", "activity.running"),
         ];
         for (hook_type, expected) in cases {
             let raw = sample_event(hook_type, None);
@@ -152,5 +172,88 @@ mod tests {
         let without_pane = sample_event("idle", None);
         let ev_without = translate(&without_pane);
         assert!(ev_without.pane_id.is_none());
+    }
+
+    // ── T-E05: Notification hook dispatch ────────────────────────────────────
+
+    fn notification_event(notification_type: Option<&str>) -> ClaudeHookEvent {
+        let data = match notification_type {
+            Some(nt) => serde_json::json!({ "notification_type": nt }),
+            None => serde_json::json!({}),
+        };
+        ClaudeHookEvent {
+            hook_id: "h-notif".to_owned(),
+            hook_type: "Notification".to_owned(),
+            session_id: "sess-notif".to_owned(),
+            timestamp: Utc
+                .with_ymd_and_hms(2026, 1, 15, 10, 0, 0)
+                .single()
+                .expect("valid datetime"),
+            pane_id: None,
+            data,
+        }
+    }
+
+    #[test]
+    fn notification_idle_prompt() {
+        let raw = notification_event(Some("idle_prompt"));
+        let ev = translate(&raw);
+        assert_eq!(ev.event_type, "activity.waiting_input");
+    }
+
+    #[test]
+    fn notification_permission_prompt() {
+        let raw = notification_event(Some("permission_prompt"));
+        let ev = translate(&raw);
+        assert_eq!(ev.event_type, "activity.waiting_approval");
+    }
+
+    #[test]
+    fn notification_unknown_type() {
+        let raw = notification_event(Some("some_future_notification"));
+        let ev = translate(&raw);
+        assert_eq!(ev.event_type, "lifecycle.notification");
+    }
+
+    #[test]
+    fn notification_no_type_field() {
+        let raw = notification_event(None);
+        let ev = translate(&raw);
+        assert_eq!(ev.event_type, "lifecycle.notification");
+    }
+
+    // ── T-E06: PreToolUse / PostToolUse mapping ───────────────────────────────
+
+    #[test]
+    fn notification_non_string_type_field() {
+        // notification_type present but not a string (e.g. integer or null) → lifecycle.notification
+        let mut raw = notification_event(None);
+        raw.data = serde_json::json!({ "notification_type": 42 });
+        let ev = translate(&raw);
+        assert_eq!(ev.event_type, "lifecycle.notification");
+    }
+
+    #[test]
+    fn notification_null_type_field() {
+        let mut raw = notification_event(None);
+        raw.data = serde_json::json!({ "notification_type": null });
+        let ev = translate(&raw);
+        assert_eq!(ev.event_type, "lifecycle.notification");
+    }
+
+    // ── T-E06: PreToolUse / PostToolUse mapping ───────────────────────────────
+
+    #[test]
+    fn pre_tool_use_maps_to_running() {
+        let raw = sample_event("PreToolUse", None);
+        let ev = translate(&raw);
+        assert_eq!(ev.event_type, "activity.running");
+    }
+
+    #[test]
+    fn post_tool_use_maps_to_running() {
+        let raw = sample_event("PostToolUse", None);
+        let ev = translate(&raw);
+        assert_eq!(ev.event_type, "activity.running");
     }
 }

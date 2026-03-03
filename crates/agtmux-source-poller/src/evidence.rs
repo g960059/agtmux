@@ -39,6 +39,12 @@ pub fn claude_activity_signals() -> Vec<ActivitySignalDef> {
                 "\u{2819}".to_string(), // ⠙
                 "\u{2839}".to_string(), // ⠹
                 "\u{2838}".to_string(), // ⠸
+                "\u{283c}".to_string(), // ⠼
+                "\u{2834}".to_string(), // ⠴
+                "\u{2826}".to_string(), // ⠦
+                "\u{2827}".to_string(), // ⠧
+                "\u{2807}".to_string(), // ⠇
+                "\u{280f}".to_string(), // ⠏
             ],
         },
         ActivitySignalDef {

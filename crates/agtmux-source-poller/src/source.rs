@@ -56,6 +56,27 @@ fn activity_event_type(state: ActivityState) -> &'static str {
     }
 }
 
+// ─── Title-based activity classification ────────────────────────────
+
+/// Classify Claude pane activity from `pane_title` using the braille spinner set.
+///
+/// Claude Code sets the terminal title to `"⠋ Claude Code"` (spinner prefix) while
+/// running and `"Claude Code"` (no spinner) while idle. This function detects the
+/// running state from the title alone, providing a heuristic signal that works even
+/// when capture-line patterns are absent.
+///
+/// Returns `Some(Running)` if any braille spinner character is present in the title,
+/// `None` otherwise (no-op — absence is not treated as negative evidence).
+fn classify_claude_title_activity(title: &str) -> Option<ActivityState> {
+    // Full Claude Code braille spinner character set (U+2800–U+283F range)
+    const BRAILLE_SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    if title.chars().any(|c| BRAILLE_SPINNER.contains(&c)) {
+        Some(ActivityState::Running)
+    } else {
+        None
+    }
+}
+
 // ─── poll_pane ──────────────────────────────────────────────────────
 
 /// Process a single pane snapshot: detect agent, match activity, produce event.
@@ -85,9 +106,25 @@ pub fn poll_pane(snapshot: &PaneSnapshot) -> Option<PollResult> {
     let line_refs: Vec<&str> = snapshot.capture_lines.iter().map(String::as_str).collect();
     let activity_match = match_activity(&line_refs, &signals);
 
-    let activity_state = activity_match
+    let mut activity_state = activity_match
         .as_ref()
         .map_or(ActivityState::Unknown, |m| m.state);
+
+    // 4b. Title-based spinner upgrade (Claude only).
+    //
+    // If the pane title contains a braille spinner character and the current
+    // activity is Unknown or Idle (i.e. not already determined by a higher-signal
+    // capture-line match), promote to Running.
+    //
+    // States NOT overwritten: WaitingApproval, WaitingInput, Error, Running —
+    // capture-line evidence for those is more authoritative than the title alone.
+    // Spinner absence is intentionally treated as no-op (not negative evidence).
+    if detect_result.provider == Provider::Claude
+        && matches!(activity_state, ActivityState::Unknown | ActivityState::Idle)
+        && let Some(title_state) = classify_claude_title_activity(&snapshot.pane_title)
+    {
+        activity_state = title_state;
+    }
 
     // 5. Build SourceEventV2
     let event_id = format!(
@@ -818,5 +855,144 @@ mod tests {
             "last event accessible via absolute cursor"
         );
         assert_eq!(resp.next_cursor, Some("poller:6".to_string()));
+    }
+
+    // ── classify_claude_title_activity unit tests ────────────────────
+
+    #[test]
+    fn title_with_spinner_returns_running() {
+        // "⠋ Claude Code" — spinner prefix present
+        let result = classify_claude_title_activity("⠋ Claude Code");
+        assert_eq!(result, Some(ActivityState::Running));
+    }
+
+    #[test]
+    fn title_without_spinner_returns_none() {
+        // "Claude Code" — no spinner, idle title
+        let result = classify_claude_title_activity("Claude Code");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn empty_title_returns_none() {
+        let result = classify_claude_title_activity("");
+        assert_eq!(result, None);
+    }
+
+    // ── Additional spinner coverage ─────────────────────────────────
+
+    #[test]
+    fn title_with_each_spinner_char_returns_running() {
+        // Verify all 10 spinner characters trigger Running
+        let spinners = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+        for ch in spinners {
+            let title = format!("{ch} Claude Code");
+            assert_eq!(
+                classify_claude_title_activity(&title),
+                Some(ActivityState::Running),
+                "spinner char U+{:04X} should return Running",
+                ch as u32
+            );
+        }
+    }
+
+    // ── poll_pane title-based upgrade: Unknown → Running ────────────
+
+    #[test]
+    fn poll_pane_spinner_title_upgrades_unknown_to_running() {
+        // Capture lines have no recognizable pattern (→ Unknown), but title has spinner
+        let snapshot = PaneSnapshot {
+            pane_id: "%30".to_string(),
+            pane_title: "⠋ Claude Code".to_string(),
+            current_cmd: "claude".to_string(),
+            process_hint: Some("claude".to_string()),
+            capture_lines: vec!["some unrecognized output".to_string()],
+            captured_at: now(),
+        };
+        let result = poll_pane(&snapshot).expect("should detect Claude");
+        assert_eq!(result.provider, Provider::Claude);
+        assert_eq!(
+            result.activity_state,
+            ActivityState::Running,
+            "spinner in title should upgrade Unknown → Running"
+        );
+        assert_eq!(result.event.event_type, "activity.running");
+    }
+
+    #[test]
+    fn poll_pane_spinner_title_upgrades_idle_to_running() {
+        // Capture lines match Idle (❯), but title has spinner — spinner wins
+        let snapshot = PaneSnapshot {
+            pane_id: "%31".to_string(),
+            pane_title: "⠸ Claude Code".to_string(),
+            current_cmd: "claude".to_string(),
+            process_hint: Some("claude".to_string()),
+            capture_lines: vec!["\u{276f}".to_string()], // ❯ = Idle
+            captured_at: now(),
+        };
+        let result = poll_pane(&snapshot).expect("should detect Claude");
+        assert_eq!(
+            result.activity_state,
+            ActivityState::Running,
+            "spinner in title should upgrade Idle → Running"
+        );
+    }
+
+    #[test]
+    fn poll_pane_no_spinner_title_does_not_override_running() {
+        // Title has no spinner, but capture lines say Running — Running must be preserved
+        let snapshot = PaneSnapshot {
+            pane_id: "%32".to_string(),
+            pane_title: "Claude Code".to_string(),
+            current_cmd: "claude".to_string(),
+            process_hint: Some("claude".to_string()),
+            capture_lines: vec!["Thinking about the problem".to_string()],
+            captured_at: now(),
+        };
+        let result = poll_pane(&snapshot).expect("should detect Claude");
+        assert_eq!(
+            result.activity_state,
+            ActivityState::Running,
+            "Running from capture lines must not be overridden by absent spinner"
+        );
+    }
+
+    #[test]
+    fn poll_pane_spinner_title_does_not_override_waiting_approval() {
+        // Title has spinner, but capture lines show WaitingApproval — must not downgrade
+        let snapshot = PaneSnapshot {
+            pane_id: "%33".to_string(),
+            pane_title: "⠋ Claude Code".to_string(),
+            current_cmd: "claude".to_string(),
+            process_hint: Some("claude".to_string()),
+            capture_lines: vec!["Allow? Press Y to confirm".to_string()],
+            captured_at: now(),
+        };
+        let result = poll_pane(&snapshot).expect("should detect Claude");
+        assert_eq!(
+            result.activity_state,
+            ActivityState::WaitingApproval,
+            "WaitingApproval from capture lines must not be overridden by spinner title"
+        );
+    }
+
+    #[test]
+    fn poll_pane_spinner_title_codex_pane_no_upgrade() {
+        // Spinner-like title on a Codex pane must NOT trigger upgrade (Claude-only logic)
+        let snapshot = PaneSnapshot {
+            pane_id: "%34".to_string(),
+            pane_title: "⠋ codex".to_string(),
+            current_cmd: "codex".to_string(),
+            process_hint: Some("codex".to_string()),
+            capture_lines: vec!["some unrecognized output".to_string()],
+            captured_at: now(),
+        };
+        let result = poll_pane(&snapshot).expect("should detect Codex");
+        assert_eq!(result.provider, Provider::Codex);
+        assert_eq!(
+            result.activity_state,
+            ActivityState::Unknown,
+            "spinner-title upgrade is Claude-only; Codex pane must stay Unknown"
+        );
     }
 }

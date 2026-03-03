@@ -152,6 +152,34 @@ Phase 7 (Distribution) と独立して実施可能。
   - **e2e**: `test-claude-approval.sh` に Phase 0.5 として Notification hook のフェーズ追加
   - blocked_by: なし
 
+- [ ] T-E06 (P2) `PreToolUse`/`PostToolUse` → `activity.running` マッピング
+  - **目的**: `PreToolUse`・`PostToolUse` が `lifecycle.unknown` に落ちているバグを修正
+  - **背景**: 4-agent 比較分析で全エージェントが指摘した次点タスク。tool 実行中の最も頻繁なフックが無視されている
+  - **変更対象**: `crates/agtmux-source-claude-hooks/src/translate.rs`
+    - `normalize_event_type()` に以下を追加:
+      - `"PreToolUse"` → `"activity.running"`
+      - `"PostToolUse"` → `"activity.running"`
+    - 2 テストケースを追加
+  - **根拠**: PreToolUse は Claude がツールを呼ぼうとしているタイミング、PostToolUse はツール完了後で次ターン継続中 — いずれも `running` が正しい
+  - blocked_by: なし
+
+- [ ] T-E07 (P2) ブレイルスピナー pane_title 検出（ポーラー拡張）
+  - **目的**: Claude Code が OSC 2 で設定する terminal title のブレイルスピナーで `running` を heuristic 検出
+  - **背景**: cmux research で発見。`pane_title` は `#{pane_title}` で取得可能。hooks 不在環境での補助シグナル
+  - **変更対象**:
+    1. `crates/agtmux-source-poller/src/evidence.rs`:
+       - `claude_activity_signals()` の Running パターンに不足している 6 文字を追加:
+         `⠼⠴⠦⠧⠇⠏` (U+283C, U+2834, U+2826, U+2827, U+2807, U+280F)
+       - 現在は `⠋⠙⠹⠸` の 4 文字のみ
+    2. `crates/agtmux-source-poller/src/source.rs`:
+       - `classify_claude_title_activity(title: &str) -> Option<ActivityState>` ヘルパー追加
+       - `poll_pane()` で `detect_result.provider == Provider::Claude` の場合に適用
+       - Unknown / Idle の場合のみ Running に昇格（WaitingApproval / WaitingInput / Error は上書き禁止）
+       - spinner 不在は no-op（否定証拠として使わない）
+  - **制約**: Heuristic（confidence ~0.85）。hooks が正しく設定された環境では hooks が優先
+  - **テスト**: `classify_claude_title_activity()` のユニットテスト（spinner あり/なし/非 Claude タイトル）
+  - blocked_by: なし
+
 - [ ] T-E04 (P3) OSC Tap source — C-017 `agtmux-source-osc-tap` [Post-MVP]
   - **目的**: tmux `pipe-pane` 経由で OSC 9;4 progress bar シグナルを取得する semi-deterministic source
   - **前提条件**: tmux 3.3+、pipe-pane 先占競合なし（capability-gated）
@@ -230,6 +258,12 @@ Phase 7 (Distribution) と独立して実施可能。
 - [ ] T-codex03a (P3) test-claude-approval.sh Phase 3 に明示的 sleep 追加 — follow-up from RP review
   - Phase 3 で PermissionRequest injector kill 後、`sleep 4` を挿入してから tool_start injector を開始する
   - 現状は暗黙の event expiry (<3s) に依存しており、閾値変更時に false-negative タイムアウトになる可能性
+  - blocked_by: なし
+
+- [ ] T-E05a (P3) spinner-title WaitingInput 保護テスト — follow-up from RP review
+  - **目的**: `poll_pane_spinner_title_does_not_override_waiting_input` テスト追加
+  - **背景**: MT-2 gap — evidence.rs は WaitingInput を capture_lines から生成しないため poller 単体では直接テスト不可
+  - **方針**: ActivityState モック or evidence.rs に WaitingInput パターン追加 (将来対応)
   - blocked_by: なし
 
 - [ ] T-codex03b (P3) codex-title.sh online 再検証 — follow-up from RP review
