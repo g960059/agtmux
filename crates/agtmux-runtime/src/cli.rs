@@ -144,6 +144,10 @@ pub struct SetupHooksOpts {
     /// Check current hook registration status without writing (exits 1 if any hooks missing)
     #[arg(long)]
     pub check: bool,
+
+    /// Remove all agtmux hooks from settings.json (preserves other tools' hooks)
+    #[arg(long)]
+    pub unregister: bool,
 }
 
 /// Default socket path using $USER for per-user isolation.

@@ -129,6 +129,38 @@ Phase 7 (Distribution) と独立して実施可能。
   - `main.rs`: branch on `opts.check`
   - Gate: `just verify` PASS
 
+- [ ] T-E08 (P1) `apply_hooks()` surgical merge — hooks key 全置換バグ修正
+  - **目的**: 現在 `apply_hooks()` は `hooks` キーを丸ごと置換する（他ツールのhooksを破壊）。各 hook type ごとに `AGTMUX_HOOK_TYPE=` エントリーのみ差し替える surgical merge に修正する
+  - **変更対象**: `crates/agtmux-runtime/src/setup_hooks.rs`
+    - `apply_hooks()`: `obj.insert("hooks", ...)` → per-type `retain` + `push` に変更
+    - 既存 hooks オブジェクトの他キー（他ツールのエントリー）は保持
+  - **テスト**: 他ツールの hooks が保持されることを確認するユニットテスト
+  - blocked_by: なし
+
+- [ ] T-E09 (P1) `agtmux setup-hooks --unregister` — hooks 削除コマンド
+  - **目的**: `AGTMUX_HOOK_TYPE=` を含むエントリーのみ外科的に削除。アンインストール・設定リセット用
+  - **変更対象**:
+    - `crates/agtmux-runtime/src/cli.rs`: `SetupHooksOpts` に `--unregister: bool` 追加
+    - `crates/agtmux-runtime/src/setup_hooks.rs`: `remove_hooks(scope: &str)` 関数追加
+    - `crates/agtmux-runtime/src/main.rs`: `--unregister` ブランチ追加
+  - **動作**:
+    - 各 hook type の配列から `AGTMUX_HOOK_TYPE=` を含むコマンドを削除
+    - 配列が空になった hook type キーを削除
+    - `hooks` オブジェクトが空になったら `hooks` キー自体を削除
+    - 他ツールのエントリーは保持（idempotent、対象なくても exit 0）
+  - **テスト**: 他ツールhooksとの混在、全削除、設定ファイル不在のケース
+  - blocked_by: T-E08（surgical merge と同じロジックを共有）
+
+- [ ] T-term01 (P2) agtmux-term hooks 統合 — 申し送り資料に基づく実装
+  - **目的**: agtmux-term 起動時の hooks 自動チェック + Register/Unregister UI
+  - **申し送り**: `/tmp/agtmux-term-hooks-handoff.md`（永続化先: `docs/85_reviews/` か agtmux-term の docs へ）
+  - **変更対象**: `agtmux-term` リポジトリ
+    - `AppViewModel.swift`: `hookSetupStatus: @Published` + `performStartupHookCheck() async`
+    - `SidebarView.swift`: ⚠ バッジ（isOffline パターン流用）
+    - 空状態プロンプト: [Register Hooks] ボタン
+    - Settings パネル: [Verify] [Re-register] [Unregister] ボタン
+  - blocked_by: T-E08, T-E09
+
 - [ ] T-E03a (P3) check_hooks() integration test — follow-up from RP review
   - **目的**: `check_hooks()` を temp settings.json に対して呼び出す integration test (partially registered case)
   - **変更対象**: `crates/agtmux-runtime/src/setup_hooks.rs` test module

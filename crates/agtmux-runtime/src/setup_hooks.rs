@@ -66,30 +66,124 @@ fn shell_quote(path: &str) -> String {
     }
 }
 
-/// Generate the hooks configuration object for Claude Code settings.json.
-pub fn generate_hooks_config(script_path: &str) -> serde_json::Value {
-    let mut hooks = serde_json::Map::new();
-    let quoted = shell_quote(script_path);
+/// Perform the surgical per-type merge of agtmux hook entries into an existing settings value.
+///
+/// For each of the 11 HOOK_TYPES:
+/// 1. Gets or creates the `hooks` object (does NOT replace it).
+/// 2. Gets or creates the array for this hook_type.
+/// 3. Removes any existing agtmux entries (identified by `AGTMUX_HOOK_TYPE=` in `command`).
+/// 4. Appends the new agtmux entry.
+///
+/// This preserves all entries from other tools in every hook_type array.
+pub(crate) fn merge_hooks_into_settings(
+    settings: &mut serde_json::Value,
+    quoted_script: &str,
+) -> anyhow::Result<()> {
+    let obj = settings
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("settings.json is not a JSON object"))?;
+
+    let hooks_obj = obj
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("\"hooks\" in settings.json is not an object"))?;
 
     for hook_type in HOOK_TYPES {
-        let command = format!("AGTMUX_HOOK_TYPE={hook_type} {quoted}");
-        hooks.insert(
-            (*hook_type).to_string(),
-            serde_json::json!([{
-                "type": "command",
-                "command": command,
-            }]),
-        );
+        let command = format!("AGTMUX_HOOK_TYPE={hook_type} {quoted_script}");
+        let new_entry = serde_json::json!({"type": "command", "command": command});
+
+        let arr = hooks_obj
+            .entry(*hook_type)
+            .or_insert_with(|| serde_json::json!([]))
+            .as_array_mut()
+            .ok_or_else(|| anyhow::anyhow!("hook entry for {hook_type} is not an array"))?;
+
+        // Remove existing agtmux entries (idempotent)
+        arr.retain(|entry| {
+            entry
+                .get("command")
+                .and_then(|c| c.as_str())
+                .map(|cmd| !cmd.contains("AGTMUX_HOOK_TYPE="))
+                .unwrap_or(true)
+        });
+        arr.push(new_entry);
     }
 
-    serde_json::Value::Object(hooks)
+    Ok(())
 }
 
-/// Apply hook configuration to the settings file (merge, not overwrite).
+/// Perform the surgical removal of agtmux hook entries from an existing settings value.
+///
+/// Only removes entries whose `command` field contains `AGTMUX_HOOK_TYPE=`.
+/// Empty hook-type arrays and an empty `hooks` object are cleaned up.
+pub(crate) fn remove_hooks_from_settings(settings: &mut serde_json::Value) -> anyhow::Result<()> {
+    let obj = settings
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("settings.json is not a JSON object"))?;
+
+    if let Some(hooks_val) = obj.get_mut("hooks") {
+        if let Some(hooks) = hooks_val.as_object_mut() {
+            // Remove agtmux entries from each hook type
+            for hook_type in HOOK_TYPES {
+                if let Some(arr) = hooks.get_mut(*hook_type).and_then(|v| v.as_array_mut()) {
+                    arr.retain(|entry| {
+                        entry
+                            .get("command")
+                            .and_then(|c| c.as_str())
+                            .map(|cmd| !cmd.contains("AGTMUX_HOOK_TYPE="))
+                            .unwrap_or(true)
+                    });
+                }
+            }
+            // Remove hook_type keys where array is now empty.
+            // Restrict to HOOK_TYPES only — do NOT remove empty arrays belonging to
+            // third-party tools registered under keys we don't own.
+            let hook_type_set: std::collections::HashSet<&str> =
+                HOOK_TYPES.iter().copied().collect();
+            let to_remove: Vec<String> = hooks
+                .iter()
+                .filter_map(|(k, v)| {
+                    if hook_type_set.contains(k.as_str())
+                        && v.as_array().map(|a| a.is_empty()).unwrap_or(false)
+                    {
+                        Some(k.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            for k in &to_remove {
+                hooks.remove(k.as_str());
+            }
+        }
+        // Remove hooks key if object is now empty
+        if obj
+            .get("hooks")
+            .and_then(|h| h.as_object())
+            .map(|h| h.is_empty())
+            .unwrap_or(false)
+        {
+            obj.remove("hooks");
+        }
+    }
+
+    Ok(())
+}
+
+/// Apply hook configuration to the settings file (surgical per-type merge).
+///
+/// For each of the 11 HOOK_TYPES:
+/// 1. Gets or creates the `hooks` object (does NOT replace it).
+/// 2. Gets or creates the array for this hook_type.
+/// 3. Removes any existing agtmux entries (identified by `AGTMUX_HOOK_TYPE=` in `command`).
+/// 4. Appends the new agtmux entry.
+///
+/// This preserves all entries from other tools in every hook_type array.
 pub fn apply_hooks(opts: &SetupHooksOpts) -> anyhow::Result<PathBuf> {
     let path = settings_path(&opts.scope)?;
     let script = resolve_hook_script(opts.hook_script.as_deref())?;
-    let hooks = generate_hooks_config(&script);
+    let quoted = shell_quote(&script);
 
     // Read existing settings or start fresh
     let mut settings: serde_json::Value = if path.exists() {
@@ -99,11 +193,7 @@ pub fn apply_hooks(opts: &SetupHooksOpts) -> anyhow::Result<PathBuf> {
         serde_json::json!({})
     };
 
-    // Merge hooks into settings
-    let obj = settings
-        .as_object_mut()
-        .ok_or_else(|| anyhow::anyhow!("settings.json is not a JSON object"))?;
-    obj.insert("hooks".to_string(), hooks);
+    merge_hooks_into_settings(&mut settings, &quoted)?;
 
     // Ensure parent directory exists
     if let Some(parent) = path.parent() {
@@ -113,6 +203,27 @@ pub fn apply_hooks(opts: &SetupHooksOpts) -> anyhow::Result<PathBuf> {
     let output = serde_json::to_string_pretty(&settings)?;
     std::fs::write(&path, format!("{output}\n"))?;
 
+    Ok(path)
+}
+
+/// Remove agtmux hook entries from the settings file.
+///
+/// Only removes entries whose `command` field contains `AGTMUX_HOOK_TYPE=`.
+/// Other tools' hook entries are preserved.
+/// Empty hook-type arrays and an empty `hooks` object are cleaned up.
+/// If the settings file does not exist, returns Ok(path) without error.
+pub fn remove_hooks(scope: &str) -> anyhow::Result<PathBuf> {
+    let path = settings_path(scope)?;
+    if !path.exists() {
+        return Ok(path); // nothing to do, not an error
+    }
+    let content = std::fs::read_to_string(&path)?;
+    let mut settings: serde_json::Value = serde_json::from_str(&content)?;
+
+    remove_hooks_from_settings(&mut settings)?;
+
+    let output = serde_json::to_string_pretty(&settings)?;
+    std::fs::write(&path, format!("{output}\n"))?;
     Ok(path)
 }
 
@@ -190,25 +301,208 @@ pub fn check_hooks(scope: &str) -> anyhow::Result<HookCheckResult> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn generate_hooks_config_all_types() {
-        let config = generate_hooks_config("/usr/local/bin/agtmux-claude-hook.sh");
-        let obj = config.as_object().expect("should be object");
+    // ── Pure value-logic tests (no file I/O, no CWD, safe to run in parallel) ──
 
-        // All hook types present
+    /// Build a fresh empty settings value.
+    fn empty_settings() -> serde_json::Value {
+        serde_json::json!({})
+    }
+
+    /// Build settings pre-populated with one foreign entry for hook_type.
+    fn settings_with_foreign(hook_type: &str) -> serde_json::Value {
+        serde_json::json!({
+            "hooks": {
+                hook_type: [{"type": "command", "command": "other-tool-hook.sh"}]
+            }
+        })
+    }
+
+    // ── merge_hooks_into_settings (T-E08) ─────────────────────────────
+
+    #[test]
+    fn merge_writes_all_hook_types() {
+        let mut s = empty_settings();
+        merge_hooks_into_settings(&mut s, "agtmux-claude-hook.sh").expect("merge ok");
+
+        let hooks_obj = s["hooks"].as_object().expect("hooks object");
         for hook_type in HOOK_TYPES {
-            assert!(
-                obj.contains_key(*hook_type),
-                "missing hook type: {hook_type}"
-            );
-            let arr = obj[*hook_type].as_array().expect("should be array");
+            let arr = hooks_obj[*hook_type].as_array().expect("array");
             assert_eq!(arr.len(), 1);
             assert_eq!(arr[0]["type"], "command");
-            let cmd = arr[0]["command"].as_str().expect("command string");
+            let cmd = arr[0]["command"].as_str().expect("cmd");
             assert!(cmd.contains(hook_type));
             assert!(cmd.contains("agtmux-claude-hook.sh"));
         }
     }
+
+    #[test]
+    fn merge_escapes_path_with_spaces() {
+        let mut s = empty_settings();
+        // shell_quote is called externally before merge; pass the quoted string directly
+        let quoted = shell_quote("/path/with spaces/hook.sh");
+        merge_hooks_into_settings(&mut s, &quoted).expect("merge ok");
+        let cmd = s["hooks"]["PreToolUse"][0]["command"]
+            .as_str()
+            .expect("cmd");
+        assert!(
+            cmd.contains("'/path/with spaces/hook.sh'"),
+            "path with spaces should be single-quoted, got: {cmd}"
+        );
+    }
+
+    #[test]
+    fn merge_escapes_path_with_quotes() {
+        let mut s = empty_settings();
+        let quoted = shell_quote("/path/it's/hook.sh");
+        merge_hooks_into_settings(&mut s, &quoted).expect("merge ok");
+        let cmd = s["hooks"]["PreToolUse"][0]["command"]
+            .as_str()
+            .expect("cmd");
+        assert!(
+            cmd.contains("'\\''"),
+            "path with single quotes should be escaped, got: {cmd}"
+        );
+        assert!(
+            !cmd.contains("it's/hook"),
+            "raw single quote should not appear unescaped, got: {cmd}"
+        );
+    }
+
+    #[test]
+    fn apply_hooks_preserves_other_tools_hooks() {
+        let mut s = settings_with_foreign("PreToolUse");
+        merge_hooks_into_settings(&mut s, "agtmux-claude-hook.sh").expect("merge ok");
+
+        let arr = s["hooks"]["PreToolUse"].as_array().expect("array");
+
+        let has_foreign = arr.iter().any(|e| {
+            e.get("command")
+                .and_then(|c| c.as_str())
+                .map(|cmd| cmd == "other-tool-hook.sh")
+                .unwrap_or(false)
+        });
+        let has_agtmux = arr.iter().any(|e| {
+            e.get("command")
+                .and_then(|c| c.as_str())
+                .map(|cmd| cmd.contains("AGTMUX_HOOK_TYPE="))
+                .unwrap_or(false)
+        });
+        assert!(has_foreign, "foreign entry should be preserved");
+        assert!(has_agtmux, "agtmux entry should be added");
+    }
+
+    #[test]
+    fn apply_hooks_is_idempotent_with_surgical_merge() {
+        let mut s = empty_settings();
+        merge_hooks_into_settings(&mut s, "agtmux-claude-hook.sh").expect("first merge ok");
+        merge_hooks_into_settings(&mut s, "agtmux-claude-hook.sh").expect("second merge ok");
+
+        for hook_type in HOOK_TYPES {
+            let arr = s["hooks"][hook_type]
+                .as_array()
+                .unwrap_or_else(|| panic!("expected array for {hook_type}"));
+            let agtmux_count = arr
+                .iter()
+                .filter(|e| {
+                    e.get("command")
+                        .and_then(|c| c.as_str())
+                        .map(|cmd| cmd.contains("AGTMUX_HOOK_TYPE="))
+                        .unwrap_or(false)
+                })
+                .count();
+            assert_eq!(
+                agtmux_count, 1,
+                "expected exactly 1 agtmux entry for {hook_type}, got {agtmux_count}"
+            );
+        }
+    }
+
+    // ── remove_hooks_from_settings (T-E09) ────────────────────────────
+
+    #[test]
+    fn remove_hooks_removes_only_agtmux_entries() {
+        let mut s = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    {"type": "command", "command": "AGTMUX_HOOK_TYPE=PreToolUse agtmux-claude-hook.sh"},
+                    {"type": "command", "command": "other-tool-hook.sh"}
+                ]
+            }
+        });
+        remove_hooks_from_settings(&mut s).expect("remove ok");
+
+        let arr = s["hooks"]["PreToolUse"].as_array().expect("array");
+        assert_eq!(arr.len(), 1, "only foreign entry should remain");
+        assert_eq!(arr[0]["command"].as_str().unwrap(), "other-tool-hook.sh");
+    }
+
+    #[test]
+    fn remove_hooks_cleans_empty_arrays() {
+        // Build a settings with only agtmux entries for all hook types
+        let mut hooks_map = serde_json::Map::new();
+        for hook_type in HOOK_TYPES {
+            hooks_map.insert(
+                (*hook_type).to_string(),
+                serde_json::json!([{
+                    "type": "command",
+                    "command": format!("AGTMUX_HOOK_TYPE={hook_type} agtmux-claude-hook.sh")
+                }]),
+            );
+        }
+        let mut s = serde_json::json!({"hooks": hooks_map});
+        remove_hooks_from_settings(&mut s).expect("remove ok");
+
+        assert!(
+            s.get("hooks").is_none(),
+            "hooks key should be removed when all arrays are empty"
+        );
+    }
+
+    #[test]
+    fn remove_hooks_noop_on_empty_settings() {
+        let mut s = empty_settings();
+        remove_hooks_from_settings(&mut s).expect("remove on empty ok");
+        // No hooks key was present and none should appear
+        assert!(s.get("hooks").is_none());
+    }
+
+    #[test]
+    fn remove_hooks_preserves_other_settings_keys() {
+        let mut s = serde_json::json!({
+            "model": "claude-opus-4-6",
+            "hooks": {
+                "PreToolUse": [
+                    {"type": "command", "command": "AGTMUX_HOOK_TYPE=PreToolUse agtmux-claude-hook.sh"}
+                ]
+            }
+        });
+        remove_hooks_from_settings(&mut s).expect("remove ok");
+
+        assert_eq!(
+            s.get("model").and_then(|v| v.as_str()),
+            Some("claude-opus-4-6"),
+            "non-hooks settings keys must be preserved"
+        );
+    }
+
+    // ── round-trip: merge then remove ────────────────────────────────
+
+    #[test]
+    fn merge_then_remove_leaves_settings_unchanged() {
+        let original = serde_json::json!({
+            "model": "claude-opus-4-6",
+            "hooks": {
+                "PreToolUse": [{"type": "command", "command": "other-tool-hook.sh"}]
+            }
+        });
+        let mut s = original.clone();
+        merge_hooks_into_settings(&mut s, "agtmux-claude-hook.sh").expect("merge ok");
+        remove_hooks_from_settings(&mut s).expect("remove ok");
+
+        assert_eq!(s, original, "round-trip must restore original state");
+    }
+
+    // ── settings_path / resolve_hook_script / HookCheckResult ────────
 
     #[test]
     fn settings_path_project() {
@@ -235,41 +529,8 @@ mod tests {
         assert_eq!(result, "/custom/path.sh");
     }
 
-    // ── T-118 F2: path escaping tests ────────────────────────────────
-
-    #[test]
-    fn generate_hooks_config_escapes_path_with_spaces() {
-        let config = generate_hooks_config("/path/with spaces/hook.sh");
-        let obj = config.as_object().expect("object");
-        let cmd = obj["PreToolUse"][0]["command"].as_str().expect("cmd");
-        assert!(
-            cmd.contains("'/path/with spaces/hook.sh'"),
-            "path with spaces should be single-quoted, got: {cmd}"
-        );
-    }
-
-    #[test]
-    fn generate_hooks_config_escapes_path_with_quotes() {
-        let config = generate_hooks_config("/path/it's/hook.sh");
-        let obj = config.as_object().expect("object");
-        let cmd = obj["PreToolUse"][0]["command"].as_str().expect("cmd");
-        // Single quote inside path should be escaped as '\''
-        assert!(
-            cmd.contains("'\\''"),
-            "path with single quotes should be escaped, got: {cmd}"
-        );
-        assert!(
-            !cmd.contains("it's/hook"),
-            "raw single quote should not appear unescaped, got: {cmd}"
-        );
-    }
-
     #[test]
     fn check_hooks_all_missing_when_no_settings() {
-        // Use a non-existent temp path via HOME override would be complex;
-        // instead test the settings_path + check logic by calling check_hooks
-        // with a settings file that has no hooks key.
-        // We can test check_hooks indirectly by constructing the result manually.
         let result = HookCheckResult {
             statuses: HOOK_TYPES
                 .iter()
@@ -302,5 +563,74 @@ mod tests {
         };
         assert!(!result.all_registered());
         assert_eq!(result.missing(), vec!["SessionEnd"]);
+    }
+
+    // ── MT-5: B-1 fix — remove_hooks must not delete third-party empty arrays ──
+
+    #[test]
+    fn remove_hooks_does_not_delete_third_party_empty_arrays() {
+        // A third-party tool left an empty array under a non-HOOK_TYPES key.
+        // --unregister must NOT delete it.
+        let mut settings = serde_json::json!({
+            "hooks": {
+                "CustomHook": [],           // third-party empty array
+                "PreToolUse": [{
+                    "type": "command",
+                    "command": "AGTMUX_HOOK_TYPE=PreToolUse /some/hook.sh"
+                }]
+            }
+        });
+        remove_hooks_from_settings(&mut settings).expect("remove ok");
+        // "CustomHook" must survive
+        let hooks = settings["hooks"].as_object().expect("hooks object");
+        assert!(
+            hooks.contains_key("CustomHook"),
+            "third-party empty array must be preserved"
+        );
+        // "PreToolUse" was the only agtmux entry → removed → array empty → key removed
+        assert!(
+            !hooks.contains_key("PreToolUse"),
+            "agtmux PreToolUse key should be removed"
+        );
+    }
+
+    // ── MT-1: merge_hooks_into_settings with non-object hooks value ──────────
+
+    #[test]
+    fn merge_hooks_errors_when_hooks_key_is_not_object() {
+        let mut settings = serde_json::json!({ "hooks": null });
+        let result = merge_hooks_into_settings(&mut settings, "/hook.sh");
+        assert!(result.is_err(), "null hooks value should be an error");
+    }
+
+    #[test]
+    fn merge_hooks_errors_when_hooks_key_is_array() {
+        let mut settings = serde_json::json!({ "hooks": [] });
+        let result = merge_hooks_into_settings(&mut settings, "/hook.sh");
+        assert!(result.is_err(), "array hooks value should be an error");
+    }
+
+    // ── MT-2: remove_hooks_from_settings with non-object hooks value ─────────
+
+    #[test]
+    fn remove_hooks_noop_when_hooks_is_null() {
+        let mut settings = serde_json::json!({ "hooks": null });
+        remove_hooks_from_settings(&mut settings).expect("remove on null hooks ok");
+        // hooks key still present and still null (unchanged)
+        assert_eq!(settings["hooks"], serde_json::Value::Null);
+    }
+
+    // ── MT-6: merge_hooks_into_settings when hook_type value is not an array ─
+
+    #[test]
+    fn merge_hooks_errors_when_hook_type_value_is_not_array() {
+        let mut settings = serde_json::json!({
+            "hooks": { "PreToolUse": "not-an-array" }
+        });
+        let result = merge_hooks_into_settings(&mut settings, "/hook.sh");
+        assert!(
+            result.is_err(),
+            "non-array hook_type value should be an error"
+        );
     }
 }

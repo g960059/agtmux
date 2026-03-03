@@ -82,7 +82,10 @@ async fn main() -> anyhow::Result<()> {
             cmd_json::cmd_json(&socket_path, opts.health).await?;
         }
         cli::Command::SetupHooks(opts) => {
-            if opts.check {
+            if opts.unregister {
+                let path = setup_hooks::remove_hooks(&opts.scope)?;
+                println!("agtmux hooks removed from {}", path.display());
+            } else if opts.check {
                 let result = setup_hooks::check_hooks(&opts.scope)?;
                 let settings_path = setup_hooks::settings_path(&opts.scope)?;
                 println!("Hook configuration check ({}):", settings_path.display());
