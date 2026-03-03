@@ -139,46 +139,18 @@ Phase 7 (Distribution) と独立して実施可能。
   - **変更対象**: `crates/agtmux-runtime/src/poll_loop.rs` test module
   - blocked_by: T-E01
 
-- [ ] T-E05 (P2) `Notification` フック `notification_type` 解析 — follow-up from cmux research
-  - **目的**: `Notification` hook が `lifecycle.unknown` に落ちているバグを修正
-  - **背景**: cmux は `notification_type = idle_prompt / permission_prompt` で状態を判別している
-    → agtmux の `normalize_event_type()` は `"Notification"` を処理していない
-  - **変更対象**: `crates/agtmux-source-claude-hooks/src/translate.rs`
-    - `translate()` シグネチャを変更して `data: &serde_json::Value` も渡す、または
-    - `normalize_event_type()` に `data` フィールドも受け取る引数を追加
-    - `notification_type = "idle_prompt"` → `"activity.waiting_input"`
-    - `notification_type = "permission_prompt"` → `"activity.waiting_approval"`
-    - 未知の `notification_type` → `"lifecycle.notification"` (not unknown)
-  - **e2e**: `test-claude-approval.sh` に Phase 0.5 として Notification hook のフェーズ追加
-  - blocked_by: なし
+- [x] T-E05 (P2) `Notification` フック `notification_type` 解析 — DONE (2026-03-03)
+  - `resolve_event_type()` wrapper 追加。idle_prompt→waiting_input, permission_prompt→waiting_approval
+  - commit: 1955b28
 
-- [ ] T-E06 (P2) `PreToolUse`/`PostToolUse` → `activity.running` マッピング
-  - **目的**: `PreToolUse`・`PostToolUse` が `lifecycle.unknown` に落ちているバグを修正
-  - **背景**: 4-agent 比較分析で全エージェントが指摘した次点タスク。tool 実行中の最も頻繁なフックが無視されている
-  - **変更対象**: `crates/agtmux-source-claude-hooks/src/translate.rs`
-    - `normalize_event_type()` に以下を追加:
-      - `"PreToolUse"` → `"activity.running"`
-      - `"PostToolUse"` → `"activity.running"`
-    - 2 テストケースを追加
-  - **根拠**: PreToolUse は Claude がツールを呼ぼうとしているタイミング、PostToolUse はツール完了後で次ターン継続中 — いずれも `running` が正しい
-  - blocked_by: なし
+- [x] T-E06 (P2) `PreToolUse`/`PostToolUse` → `activity.running` マッピング — DONE (2026-03-03)
+  - `normalize_event_type()` に PreToolUse/PostToolUse arm 追加
+  - commit: 1955b28
 
-- [ ] T-E07 (P2) ブレイルスピナー pane_title 検出（ポーラー拡張）
-  - **目的**: Claude Code が OSC 2 で設定する terminal title のブレイルスピナーで `running` を heuristic 検出
-  - **背景**: cmux research で発見。`pane_title` は `#{pane_title}` で取得可能。hooks 不在環境での補助シグナル
-  - **変更対象**:
-    1. `crates/agtmux-source-poller/src/evidence.rs`:
-       - `claude_activity_signals()` の Running パターンに不足している 6 文字を追加:
-         `⠼⠴⠦⠧⠇⠏` (U+283C, U+2834, U+2826, U+2827, U+2807, U+280F)
-       - 現在は `⠋⠙⠹⠸` の 4 文字のみ
-    2. `crates/agtmux-source-poller/src/source.rs`:
-       - `classify_claude_title_activity(title: &str) -> Option<ActivityState>` ヘルパー追加
-       - `poll_pane()` で `detect_result.provider == Provider::Claude` の場合に適用
-       - Unknown / Idle の場合のみ Running に昇格（WaitingApproval / WaitingInput / Error は上書き禁止）
-       - spinner 不在は no-op（否定証拠として使わない）
-  - **制約**: Heuristic（confidence ~0.85）。hooks が正しく設定された環境では hooks が優先
-  - **テスト**: `classify_claude_title_activity()` のユニットテスト（spinner あり/なし/非 Claude タイトル）
-  - blocked_by: なし
+- [x] T-E07 (P2) ブレイルスピナー pane_title 検出（ポーラー拡張）— DONE (2026-03-03)
+  - evidence.rs: Running パターンを完全 10 文字セットに拡張 (⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏)
+  - source.rs: `classify_claude_title_activity()` + title-upgrade guard (Claude-only, Unknown/Idle のみ昇格)
+  - commit: 1955b28
 
 - [ ] T-E04 (P3) OSC Tap source — C-017 `agtmux-source-osc-tap` [Post-MVP]
   - **目的**: tmux `pipe-pane` 経由で OSC 9;4 progress bar シグナルを取得する semi-deterministic source
