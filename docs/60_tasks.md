@@ -139,6 +139,19 @@ Phase 7 (Distribution) と独立して実施可能。
   - **変更対象**: `crates/agtmux-runtime/src/poll_loop.rs` test module
   - blocked_by: T-E01
 
+- [ ] T-E05 (P2) `Notification` フック `notification_type` 解析 — follow-up from cmux research
+  - **目的**: `Notification` hook が `lifecycle.unknown` に落ちているバグを修正
+  - **背景**: cmux は `notification_type = idle_prompt / permission_prompt` で状態を判別している
+    → agtmux の `normalize_event_type()` は `"Notification"` を処理していない
+  - **変更対象**: `crates/agtmux-source-claude-hooks/src/translate.rs`
+    - `translate()` シグネチャを変更して `data: &serde_json::Value` も渡す、または
+    - `normalize_event_type()` に `data` フィールドも受け取る引数を追加
+    - `notification_type = "idle_prompt"` → `"activity.waiting_input"`
+    - `notification_type = "permission_prompt"` → `"activity.waiting_approval"`
+    - 未知の `notification_type` → `"lifecycle.notification"` (not unknown)
+  - **e2e**: `test-claude-approval.sh` に Phase 0.5 として Notification hook のフェーズ追加
+  - blocked_by: なし
+
 - [ ] T-E04 (P3) OSC Tap source — C-017 `agtmux-source-osc-tap` [Post-MVP]
   - **目的**: tmux `pipe-pane` 経由で OSC 9;4 progress bar シグナルを取得する semi-deterministic source
   - **前提条件**: tmux 3.3+、pipe-pane 先占競合なし（capability-gated）
