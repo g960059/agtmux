@@ -86,8 +86,8 @@ None.
 
 **GO_WITH_CONDITIONS**
 
-Conditions (register as follow-up tasks):
-1. Add FSM test: `WaitingApproval + task_complete` should remain `WaitingApproval` (non-blocking correctness gap in test suite).
-2. Add `canonicalize_path` unit test for `/tmp` → `/private/tmp` substitution path.
+Conditions (resolved — included in commit bfccdc4):
+1. ✅ Added `waiting_approval_task_complete_is_noop` test to `fsm.rs`.
+2. ✅ Added `canonicalize_path_tmp_fallback_substitutes_private_tmp` test to `discovery.rs`.
 
 Core implementation is correct: FSM transitions are sound and fully covered for the happy paths, `lsof -p <pid> -d cwd -Fn` parsing correctly guards against macOS outputting all-process CWDs (PID block prefix check at discovery.rs:191-206), DaemonState old fields are fully removed, `SourceKind::CodexJsonl` is wired correctly into Gateway, and `source.ingest` for `codex_appserver` fails loudly with -32602. The 50 codex-jsonl tests plus the runtime integration test (`poll_tick_pulls_from_codex_jsonl_source`) provide adequate regression coverage for the main scenarios.
