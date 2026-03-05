@@ -12,8 +12,95 @@ use agtmux_core_v5::types::{EvidenceMode, PanePresence};
 
 use crate::poll_loop::DaemonState;
 
+/// Cached pane snapshot shared between poll loop (writer) and UDS server (reader).
+#[derive(Debug, Clone)]
+pub struct PaneCacheSnapshot {
+    pub panes: serde_json::Value,
+    pub inventory_updated_at: chrono::DateTime<chrono::Utc>,
+    pub metadata_stale: bool,
+    pub metadata_last_success_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub metadata_failure_streak: u32,
+    pub metadata_backoff_until: Option<chrono::DateTime<chrono::Utc>>,
+    pub metadata_last_error: Option<String>,
+}
+
+impl Default for PaneCacheSnapshot {
+    fn default() -> Self {
+        Self {
+            panes: serde_json::Value::Array(Vec::new()),
+            inventory_updated_at: chrono::Utc::now(),
+            metadata_stale: false,
+            metadata_last_success_at: None,
+            metadata_failure_streak: 0,
+            metadata_backoff_until: None,
+            metadata_last_error: None,
+        }
+    }
+}
+
+pub type SharedPaneCache = Arc<std::sync::RwLock<PaneCacheSnapshot>>;
+
+pub fn new_pane_cache() -> SharedPaneCache {
+    Arc::new(std::sync::RwLock::new(PaneCacheSnapshot::default()))
+}
+
+pub(crate) fn refresh_pane_cache(
+    cache: &SharedPaneCache,
+    state: &DaemonState,
+    inventory_updated_at: chrono::DateTime<chrono::Utc>,
+) {
+    let panes = build_pane_list(state);
+    if let Ok(mut snapshot) = cache.write() {
+        snapshot.panes = panes;
+        snapshot.inventory_updated_at = inventory_updated_at;
+        snapshot.metadata_stale = state.metadata_stale;
+        snapshot.metadata_last_success_at = state.metadata_last_success_at;
+        snapshot.metadata_failure_streak = state.metadata_failure_streak;
+        snapshot.metadata_backoff_until = state.metadata_backoff_until;
+        snapshot.metadata_last_error = state.metadata_last_error.clone();
+    }
+}
+
+fn read_cached_panes(cache: &SharedPaneCache) -> serde_json::Value {
+    cache
+        .read()
+        .map(|snapshot| snapshot.panes.clone())
+        .unwrap_or_else(|_| serde_json::Value::Array(Vec::new()))
+}
+
+fn read_cached_snapshot(cache: &SharedPaneCache) -> serde_json::Value {
+    match cache.read() {
+        Ok(snapshot) => serde_json::json!({
+            "panes": snapshot.panes.clone(),
+            "inventory_updated_at": snapshot.inventory_updated_at,
+            "metadata": {
+                "stale": snapshot.metadata_stale,
+                "last_success_at": snapshot.metadata_last_success_at,
+                "failure_streak": snapshot.metadata_failure_streak,
+                "backoff_until": snapshot.metadata_backoff_until,
+                "last_error": snapshot.metadata_last_error.clone(),
+            },
+        }),
+        Err(_) => serde_json::json!({
+            "panes": [],
+            "inventory_updated_at": chrono::Utc::now(),
+            "metadata": {
+                "stale": true,
+                "last_success_at": null,
+                "failure_streak": 0,
+                "backoff_until": null,
+                "last_error": "cache unavailable",
+            },
+        }),
+    }
+}
+
 /// Run the UDS JSON-RPC server.
-pub async fn run_server(socket_path: &str, state: Arc<Mutex<DaemonState>>) -> anyhow::Result<()> {
+pub async fn run_server(
+    socket_path: &str,
+    state: Arc<Mutex<DaemonState>>,
+    pane_cache: SharedPaneCache,
+) -> anyhow::Result<()> {
     // Create socket directory with mode 0700
     let socket_dir = std::path::Path::new(socket_path)
         .parent()
@@ -96,8 +183,9 @@ pub async fn run_server(socket_path: &str, state: Arc<Mutex<DaemonState>>) -> an
     loop {
         let (stream, _) = listener.accept().await?;
         let state = Arc::clone(&state);
+        let pane_cache = Arc::clone(&pane_cache);
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, state).await {
+            if let Err(e) = handle_connection(stream, state, pane_cache).await {
                 tracing::debug!("connection error: {e}");
             }
         });
@@ -107,6 +195,7 @@ pub async fn run_server(socket_path: &str, state: Arc<Mutex<DaemonState>>) -> an
 async fn handle_connection(
     stream: tokio::net::UnixStream,
     state: Arc<Mutex<DaemonState>>,
+    pane_cache: SharedPaneCache,
 ) -> anyhow::Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -118,10 +207,8 @@ async fn handle_connection(
     let id = request["id"].clone();
 
     let result = match method {
-        "list_panes" => {
-            let st = state.lock().await;
-            build_pane_list(&st)
-        }
+        "list_panes" => read_cached_panes(&pane_cache),
+        "list_panes_snapshot" => read_cached_snapshot(&pane_cache),
         "list_sessions" => {
             let st = state.lock().await;
             let sessions = st.daemon.list_sessions();
@@ -360,6 +447,11 @@ pub(crate) fn build_pane_list(state: &DaemonState) -> serde_json::Value {
             "current_path": tmux_info.map(|t| &t.current_path),
             "git_branch": serde_json::Value::Null,
             "updated_at": pane.updated_at,
+            "metadata_stale": state.metadata_stale,
+            "metadata_last_success_at": state.metadata_last_success_at,
+            "metadata_failure_streak": state.metadata_failure_streak,
+            "metadata_backoff_until": state.metadata_backoff_until,
+            "metadata_last_error": state.metadata_last_error.clone(),
         }));
     }
 
@@ -388,6 +480,11 @@ pub(crate) fn build_pane_list(state: &DaemonState) -> serde_json::Value {
                 "current_cmd": tmux_pane.current_cmd,
                 "current_path": tmux_pane.current_path,
                 "git_branch": serde_json::Value::Null,
+                "metadata_stale": state.metadata_stale,
+                "metadata_last_success_at": state.metadata_last_success_at,
+                "metadata_failure_streak": state.metadata_failure_streak,
+                "metadata_backoff_until": state.metadata_backoff_until,
+                "metadata_last_error": state.metadata_last_error.clone(),
             }));
         }
     }
@@ -922,6 +1019,61 @@ mod tests {
         assert_eq!(result["pane_changes"], 0);
     }
 
+    #[tokio::test]
+    async fn list_panes_snapshot_includes_cache_metadata() {
+        let mut state = make_state();
+        state.last_panes = vec![TmuxPaneInfo {
+            pane_id: "%40".to_string(),
+            session_name: "work".to_string(),
+            window_name: "main".to_string(),
+            current_cmd: "zsh".to_string(),
+            ..Default::default()
+        }];
+        state.metadata_stale = true;
+        state.metadata_failure_streak = 2;
+        state.metadata_last_error = Some("metadata timeout".to_string());
+        let state = Arc::new(Mutex::new(state));
+
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "list_panes_snapshot",
+            "id": 90,
+            "params": {}
+        });
+
+        let resp = call_handler(Arc::clone(&state), request).await;
+        assert!(resp["result"]["panes"].is_array());
+        assert_eq!(resp["result"]["panes"][0]["pane_id"], "%40");
+        assert_eq!(resp["result"]["metadata"]["stale"], true);
+        assert_eq!(resp["result"]["metadata"]["failure_streak"], 2);
+        assert_eq!(resp["result"]["metadata"]["last_error"], "metadata timeout");
+    }
+
+    #[tokio::test]
+    async fn list_panes_returns_cached_rows() {
+        let mut state = make_state();
+        state.last_panes = vec![TmuxPaneInfo {
+            pane_id: "%41".to_string(),
+            session_name: "work".to_string(),
+            window_name: "main".to_string(),
+            current_cmd: "zsh".to_string(),
+            ..Default::default()
+        }];
+        let state = Arc::new(Mutex::new(state));
+
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "list_panes",
+            "id": 91,
+            "params": {}
+        });
+
+        let resp = call_handler(Arc::clone(&state), request).await;
+        let panes = resp["result"].as_array().expect("array");
+        assert_eq!(panes.len(), 1);
+        assert_eq!(panes[0]["pane_id"], "%41");
+    }
+
     // ── source.ingest tests (via UDS handler) ──────────────────────────
 
     /// Helper: send a JSON-RPC request through handle_connection and return the response.
@@ -929,6 +1081,12 @@ mod tests {
         state: Arc<Mutex<DaemonState>>,
         request: serde_json::Value,
     ) -> serde_json::Value {
+        let pane_cache = new_pane_cache();
+        {
+            let st = state.lock().await;
+            refresh_pane_cache(&pane_cache, &st, Utc::now());
+        }
+
         let (client, server) = tokio::net::UnixStream::pair().expect("unix pair");
         let (mut c_reader, mut c_writer) = client.into_split();
 
@@ -949,7 +1107,7 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(buf.trim()).expect("parse response")
         };
 
-        let handle_fut = handle_connection(server, state);
+        let handle_fut = handle_connection(server, state, pane_cache);
 
         let (_, response, _) = tokio::join!(write_fut, read_fut, handle_fut);
         response

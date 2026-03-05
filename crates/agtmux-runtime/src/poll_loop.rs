@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use chrono::Utc;
+use chrono::{TimeDelta, Utc};
 use tokio::sync::Mutex;
 use tokio::time::{Duration, interval};
 
@@ -65,6 +65,16 @@ pub struct DaemonState {
     /// pane_id → transcript JSONL path, populated by SessionStart hooks.
     /// Used for P1 (highest-priority) JSONL discovery in poll_tick.
     pub transcript_path_hints: std::collections::HashMap<String, std::path::PathBuf>,
+    /// True when metadata overlay is stale and inventory-only fallback is active.
+    pub metadata_stale: bool,
+    /// Last successful metadata overlay time.
+    pub metadata_last_success_at: Option<chrono::DateTime<Utc>>,
+    /// Last metadata overlay error message.
+    pub metadata_last_error: Option<String>,
+    /// Consecutive metadata overlay failures.
+    pub metadata_failure_streak: u32,
+    /// Next allowed metadata refresh time under backoff.
+    pub metadata_backoff_until: Option<chrono::DateTime<Utc>>,
 }
 
 impl DaemonState {
@@ -124,6 +134,11 @@ impl DaemonState {
             last_latency_eval: None,
             conversation_titles: std::collections::HashMap::new(),
             transcript_path_hints: std::collections::HashMap::new(),
+            metadata_stale: false,
+            metadata_last_success_at: None,
+            metadata_last_error: None,
+            metadata_failure_streak: 0,
+            metadata_backoff_until: None,
         }
     }
 }
@@ -132,22 +147,30 @@ impl DaemonState {
 pub async fn run_daemon(opts: DaemonOpts, socket_path: &str) -> anyhow::Result<()> {
     let executor = Arc::new(build_executor(&opts));
     let state = Arc::new(Mutex::new(DaemonState::new()));
+    let pane_cache = server::new_pane_cache();
+
+    {
+        let st = state.lock().await;
+        server::refresh_pane_cache(&pane_cache, &st, Utc::now());
+    }
 
     // Start UDS server
     let server_state = Arc::clone(&state);
+    let server_cache = Arc::clone(&pane_cache);
     let server_socket = socket_path.to_string();
     let server_handle = tokio::spawn(async move {
-        if let Err(e) = server::run_server(&server_socket, server_state).await {
+        if let Err(e) = server::run_server(&server_socket, server_state, server_cache).await {
             tracing::error!("UDS server error: {e}");
         }
     });
 
     // Start poll loop
     let poll_state = Arc::clone(&state);
+    let poll_cache = Arc::clone(&pane_cache);
     let poll_executor = Arc::clone(&executor);
     let poll_ms = opts.poll_interval_ms;
     let poll_handle = tokio::spawn(async move {
-        run_poll_loop(poll_executor, poll_state, poll_ms).await;
+        run_poll_loop(poll_executor, poll_state, poll_cache, poll_ms).await;
     });
 
     // Wait for shutdown signal (ctrl-c or SIGTERM)
@@ -213,6 +236,7 @@ fn parse_gw_cursor(cursor: &str) -> Option<u64> {
 async fn run_poll_loop<R: TmuxCommandRunner + 'static>(
     executor: Arc<R>,
     state: Arc<Mutex<DaemonState>>,
+    pane_cache: server::SharedPaneCache,
     poll_ms: u64,
 ) {
     let mut ticker = interval(Duration::from_millis(poll_ms));
@@ -220,7 +244,7 @@ async fn run_poll_loop<R: TmuxCommandRunner + 'static>(
     loop {
         ticker.tick().await;
 
-        if let Err(e) = poll_tick(&executor, &state).await {
+        if let Err(e) = poll_tick_with_cache(&executor, &state, &pane_cache).await {
             tracing::warn!("poll tick failed: {e}");
         }
     }
@@ -230,60 +254,146 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
     executor: &Arc<R>,
     state: &Arc<Mutex<DaemonState>>,
 ) -> anyhow::Result<()> {
+    let ephemeral_cache = server::new_pane_cache();
+    poll_tick_with_cache(executor, state, &ephemeral_cache).await
+}
+
+fn metadata_backoff_delay_ms(streak: u32) -> i64 {
+    const INITIAL_MS: i64 = 500;
+    const MAX_MS: i64 = 8000;
+
+    let exp = streak.saturating_sub(1).min(8);
+    let delay = INITIAL_MS.saturating_mul(1_i64 << exp);
+    delay.min(MAX_MS)
+}
+
+async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
+    executor: &Arc<R>,
+    state: &Arc<Mutex<DaemonState>>,
+    pane_cache: &server::SharedPaneCache,
+) -> anyhow::Result<()> {
     let tick_start = std::time::Instant::now();
     let now = Utc::now();
 
     // 1. List panes (blocking subprocess)
     let exec = Arc::clone(executor);
     let panes: Vec<TmuxPaneInfo> =
-        tokio::task::spawn_blocking(move || list_panes(&*exec)).await??;
+        match tokio::task::spawn_blocking(move || list_panes(&*exec)).await {
+            Ok(Ok(panes)) => panes,
+            Ok(Err(e)) => {
+                let mut st = state.lock().await;
+                st.metadata_stale = true;
+                st.metadata_last_error = Some(format!("inventory fetch failed: {e}"));
+                server::refresh_pane_cache(pane_cache, &st, now);
+                return Ok(());
+            }
+            Err(e) => {
+                let mut st = state.lock().await;
+                st.metadata_stale = true;
+                st.metadata_last_error = Some(format!("inventory task failed: {e}"));
+                server::refresh_pane_cache(pane_cache, &st, now);
+                return Ok(());
+            }
+        };
 
     tracing::debug!("listed {} panes", panes.len());
 
-    // 2. Update generation tracker
-    {
+    // 2. Update generation tracker and publish inventory-first cached snapshot.
+    let generation_tracker = {
         let mut st = state.lock().await;
         let pane_ids: Vec<&str> = panes.iter().map(|p| p.pane_id.as_str()).collect();
         st.generation_tracker.update(&pane_ids, now);
         st.last_panes = panes.clone();
-    }
+        server::refresh_pane_cache(pane_cache, &st, now);
+        st.generation_tracker.clone()
+    };
+
+    // 2b. Metadata backoff gate.
+    let metadata_backoff_active = {
+        let st = state.lock().await;
+        st.metadata_backoff_until
+            .map(|until| now < until)
+            .unwrap_or(false)
+    };
 
     // 2.5. Scan all processes once per tick for deep agent identification (T-128).
     // Executed in a blocking thread to avoid starving the async runtime.
-    let process_map = tokio::task::spawn_blocking(scan_all_processes)
+    let mut metadata_failure_reason: Option<String> = None;
+    let process_map = if metadata_backoff_active {
+        std::collections::HashMap::new()
+    } else {
+        match tokio::time::timeout(
+            Duration::from_millis(300),
+            tokio::task::spawn_blocking(scan_all_processes),
+        )
         .await
-        .unwrap_or_default();
+        {
+            Ok(Ok(map)) => map,
+            Ok(Err(e)) => {
+                metadata_failure_reason = Some(format!("process scan task failed: {e}"));
+                std::collections::HashMap::new()
+            }
+            Err(_) => {
+                metadata_failure_reason = Some("process scan timeout".to_string());
+                std::collections::HashMap::new()
+            }
+        }
+    };
 
     // 3. Capture each pane and build snapshots
     let mut snapshots = Vec::with_capacity(panes.len());
+    let mut capture_failures = 0usize;
 
     for pane in &panes {
-        let exec = Arc::clone(executor);
-        let pane_id = pane.pane_id.clone();
-
-        let capture_lines =
-            match tokio::task::spawn_blocking(move || capture_pane(&*exec, &pane_id, 50)).await {
-                Ok(Ok(lines)) => lines,
-                Ok(Err(e)) => {
+        let capture_lines = if metadata_backoff_active {
+            Vec::new()
+        } else {
+            let exec = Arc::clone(executor);
+            let pane_id = pane.pane_id.clone();
+            match tokio::time::timeout(
+                Duration::from_millis(150),
+                tokio::task::spawn_blocking(move || capture_pane(&*exec, &pane_id, 50)),
+            )
+            .await
+            {
+                Ok(Ok(Ok(lines))) => lines,
+                Ok(Ok(Err(e))) => {
+                    capture_failures += 1;
                     tracing::debug!("capture failed for {}: {e}", pane.pane_id);
                     Vec::new()
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
+                    capture_failures += 1;
                     tracing::debug!("capture task failed for {}: {e}", pane.pane_id);
                     Vec::new()
                 }
-            };
+                Err(_) => {
+                    capture_failures += 1;
+                    tracing::debug!("capture timeout for {}", pane.pane_id);
+                    Vec::new()
+                }
+            }
+        };
 
-        let st = state.lock().await;
         let snapshot = to_pane_snapshot(
             pane,
             capture_lines,
-            &st.generation_tracker,
+            &generation_tracker,
             now,
             Some(&process_map),
         );
-        drop(st);
         snapshots.push(snapshot);
+    }
+
+    if !metadata_backoff_active
+        && capture_failures > 0
+        && capture_failures.saturating_mul(2) >= panes.len().max(1)
+        && metadata_failure_reason.is_none()
+    {
+        metadata_failure_reason = Some(format!(
+            "pane capture degraded: {capture_failures}/{}",
+            panes.len()
+        ));
     }
 
     // 4. Process through pipeline
@@ -314,7 +424,7 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
     // their JSONL files and running a semantic FSM (not mtime heuristics).
     //
     // Only panes with process_hint="codex" are included.
-    {
+    if !metadata_backoff_active && metadata_failure_reason.is_none() {
         let snapshot_hint: std::collections::HashMap<&str, Option<&str>> = snapshots
             .iter()
             .map(|s| (s.pane_id.as_str(), s.process_hint.as_deref()))
@@ -375,7 +485,7 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
     //   - process_hint="codex":  handled by Step 6a (Codex JSONL source)
     //   - process_hint=None + current_cmd NOT in allowlist (yazi, htop, vim, …)
     //   - any other unknown hint: fail-closed
-    {
+    if !metadata_backoff_active && metadata_failure_reason.is_none() {
         /// Neutral-runtime commands that can host a Claude JSONL session.
         /// Panes with process_hint=None are only included if current_cmd matches.
         /// This prevents false-positive Claude attribution for terminal tools
@@ -747,6 +857,24 @@ async fn poll_tick<R: TmuxCommandRunner + 'static>(
     }
     st.last_latency_eval = Some(eval);
 
+    if metadata_backoff_active {
+        st.metadata_stale = true;
+    } else if let Some(reason) = metadata_failure_reason {
+        st.metadata_stale = true;
+        st.metadata_failure_streak = st.metadata_failure_streak.saturating_add(1);
+        st.metadata_last_error = Some(reason);
+        let delay_ms = metadata_backoff_delay_ms(st.metadata_failure_streak);
+        st.metadata_backoff_until = Some(now + TimeDelta::milliseconds(delay_ms));
+    } else {
+        st.metadata_stale = false;
+        st.metadata_last_success_at = Some(now);
+        st.metadata_last_error = None;
+        st.metadata_failure_streak = 0;
+        st.metadata_backoff_until = None;
+    }
+
+    server::refresh_pane_cache(pane_cache, &st, now);
+
     Ok(())
 }
 
@@ -950,7 +1078,15 @@ mod tests {
         let state = new_state();
 
         let result = poll_tick(&backend, &state).await;
-        assert!(result.is_err(), "should propagate list-panes failure");
+        assert!(
+            result.is_ok(),
+            "inventory failure should preserve state without aborting tick"
+        );
+        let st = state.lock().await;
+        assert!(
+            st.metadata_stale,
+            "metadata should be marked stale on failure"
+        );
     }
 
     #[tokio::test]

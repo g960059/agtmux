@@ -2303,3 +2303,23 @@ JSONL スキャナーなし) を発見 → デーモンが stale binary で起�
   将来 Codex ロングタスク対応が必要な場合は JSONL_ACTIVE_THRESHOLD_SECS の引き上げを検討。
 - P2 (notLoaded stale bindings): **Pre-existing** — App Server client path で今回変更外。
 - Orchestrator 判定: **GO**
+
+## 2026-03-05 — agtmux-term V2 最終案採択（A0先行）+ Orchestrator handover
+
+### 決定
+- 既存レビュー（codex/claude）を統合し、実装順序を A0/A1/A2 に再スコープ。
+- **A0（UX fix）を最優先**: inventory-first + metadata non-blocking overlay を cross-repo で実装する。
+
+### 採択理由
+- ユーザー体感問題（初回表示遅延、sidebar空白、metadata timeout影響）は、
+  protocol刷新より先に `local UI blocking` を除去することで最短改善できるため。
+
+### 反映
+- handover doc 作成:
+  - `docs/85_reviews/RP-20260305-agtmux-term-v2-a0-handover.md`
+- 最終案（term側出力）:
+  - `/tmp/agtmux-v2-final-plan-20260305-v3.md`
+
+### Next
+- daemon/runtime: cached snapshot即時返却 + non-destructive metadata failure semantics 実装
+- term: inventory/metadata lane分離（A0）を実装

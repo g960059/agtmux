@@ -7,6 +7,10 @@
 4. `docs/40_design.md` (`Main (MVP Slice)` のみ読む)
 5. `docs/50_plan.md` (Phase 1-2)
 
+## Cross-Repo V2 A0
+- Final plan (term-side output): `/tmp/agtmux-v2-final-plan-20260305-v3.md`
+- Orchestrator handover: `docs/85_reviews/RP-20260305-agtmux-term-v2-a0-handover.md`
+
 ## Phase 3 Hardening (COMPLETE — 585 tests)
 - `docs/50_plan.md` (Phase 3 section)
 - `docs/60_tasks.md` (T-115〜T-118 DONE)

@@ -87,6 +87,11 @@ fn pane_to_json_v1(
         "current_cmd": pane["current_cmd"],
         "updated_at": pane.get("updated_at").cloned().unwrap_or(serde_json::Value::Null),
         "age_secs": calculate_age_secs(pane.get("updated_at").and_then(|v| v.as_str())),
+        "metadata_stale": pane.get("metadata_stale").cloned().unwrap_or(serde_json::Value::Bool(false)),
+        "metadata_last_success_at": pane.get("metadata_last_success_at").cloned().unwrap_or(serde_json::Value::Null),
+        "metadata_failure_streak": pane.get("metadata_failure_streak").cloned().unwrap_or(serde_json::json!(0)),
+        "metadata_backoff_until": pane.get("metadata_backoff_until").cloned().unwrap_or(serde_json::Value::Null),
+        "metadata_last_error": pane.get("metadata_last_error").cloned().unwrap_or(serde_json::Value::Null),
     })
 }
 
@@ -94,6 +99,7 @@ fn pane_to_json_v1(
 pub(crate) fn build_json_v1(
     panes: &[serde_json::Value],
     branch_map: &std::collections::HashMap<String, String>,
+    cache: Option<&serde_json::Value>,
 ) -> serde_json::Value {
     let json_panes: Vec<serde_json::Value> = panes
         .iter()
@@ -103,6 +109,7 @@ pub(crate) fn build_json_v1(
     serde_json::json!({
         "version": 1,
         "panes": json_panes,
+        "cache": cache.cloned().unwrap_or(serde_json::Value::Null),
     })
 }
 
@@ -115,11 +122,27 @@ pub async fn cmd_json(socket_path: &str, health: bool) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let panes = rpc_call(socket_path, "list_panes").await?;
-    let arr = panes.as_array().cloned().unwrap_or_default();
+    let snapshot = match rpc_call(socket_path, "list_panes_snapshot").await {
+        Ok(snapshot) => snapshot,
+        Err(_) => rpc_call(socket_path, "list_panes").await?,
+    };
+    let (arr, cache_meta) = if let Some(obj) = snapshot.as_object() {
+        let panes = obj
+            .get("panes")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let cache = Some(serde_json::json!({
+            "inventory_updated_at": obj.get("inventory_updated_at").cloned().unwrap_or(serde_json::Value::Null),
+            "metadata": obj.get("metadata").cloned().unwrap_or(serde_json::Value::Null),
+        }));
+        (panes, cache)
+    } else {
+        (snapshot.as_array().cloned().unwrap_or_default(), None)
+    };
     let branch_map = build_branch_map(&arr);
 
-    let output = build_json_v1(&arr, &branch_map);
+    let output = build_json_v1(&arr, &branch_map, cache_meta.as_ref());
     let json = serde_json::to_string_pretty(&output)?;
     println!("{json}");
 
@@ -200,7 +223,7 @@ mod tests {
     fn json_schema_version_is_1() {
         let panes: Vec<serde_json::Value> = vec![];
         let branch_map = std::collections::HashMap::new();
-        let output = build_json_v1(&panes, &branch_map);
+        let output = build_json_v1(&panes, &branch_map, None);
         assert_eq!(output["version"], 1);
         assert!(output["panes"].is_array());
     }
@@ -224,7 +247,7 @@ mod tests {
         let branch_map: std::collections::HashMap<String, String> =
             [("/Users/me/repo".to_string(), "feat/oauth".to_string())].into();
 
-        let output = build_json_v1(&[pane], &branch_map);
+        let output = build_json_v1(&[pane], &branch_map, None);
         let p = &output["panes"][0];
 
         assert_eq!(p["pane_id"], "%0");

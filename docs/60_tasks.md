@@ -484,3 +484,8 @@ Phase 7 (Distribution) と独立して実施可能。
   - Evidence: FR-039〜FR-047 を docs に固定
 - [x] T-000 docs skeleton imported from template
   - Evidence: `~/Downloads/docs-first-template/docs` を基に初期構造作成済み
+
+- [ ] T-XTERM-A0 (P1) Cross-repo: agtmux-term V2 A0 support (inventory-first UX)
+  - 目的: term側のinventory-first renderingを成立させるため、daemon `json` の cached snapshot即時返却と metadata failure non-destructive semantics を固定する
+  - Handover: `docs/85_reviews/RP-20260305-agtmux-term-v2-a0-handover.md`
+  - blocked_by: なし
