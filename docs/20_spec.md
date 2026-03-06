@@ -139,6 +139,8 @@
 - FR-058 `[MVP]`: Claude JSONL source は fd-based discovery（macOS: `lsof -p {pid} -F n`、Linux: `/proc/{pid}/fd/*` readlink）を CWD-based discovery と並走する secondary discovery path として追加する。同一 CWD に複数 pane が存在する場合の ambiguity 問題を根本解決する。
 - FR-059 `[MVP]`: Claude JSONL source の discovery priority は以下の順とする：Primary: hook payload `transcript_path`（直接パス）→ Secondary: fd-based discovery → Tertiary: CWD-based discovery（既存、fallback）。Primary が利用可能な場合は sessions-index.json の parse が不要になる。
 - FR-060 `[Post-MVP]`: OSC Tap source（C-017）は tmux `pipe-pane` 経由で PTY バイトを取得し、Claude Code が emit する `OSC 9;4` (progress bar) シーケンスを semi-deterministic source として提供する。source rank は `hooks (0) > jsonl (1) > osc_tap (2) > poller (3)`。capability-gated（tmux 3.3+、pipe-pane 先占確認）。OSC 不在は negative evidence として使用しない。**OSC 133 は Claude Code が現時点で emit しないため採用しない**（GitHub issue #26235: open feature request）。
+- FR-061 `[Post-MVP]`: agtmux-term V2 A1 向け UI 同期 API は `ui.bootstrap.v2` と `ui.changes.v2` を提供し、bootstrap は `epoch` と `snapshot_seq` を含む完全スナップショット、changes は `epoch + seq` 単位の順序付き差分列を返す。`seq` は daemon projection change log の単調増加値を基準とし、epoch をまたいだ差分混在を禁止する。
+- FR-062 `[Post-MVP]`: `ui.changes.v2` は client cursor の epoch 不一致・trim 済み seq・不正 cursor を検出した場合、暗黙 rewind や部分 replay を行わず `resync_required` を明示返却しなければならない。client はその応答を受けて `ui.bootstrap.v2` を再取得する。
 
 ## Non-functional Requirements
 - Phase gate:

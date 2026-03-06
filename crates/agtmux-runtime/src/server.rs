@@ -9,6 +9,7 @@ use tokio::sync::Mutex;
 
 use agtmux_core_v5::title::{TitleInput, resolve_title};
 use agtmux_core_v5::types::{EvidenceMode, PanePresence};
+use agtmux_daemon_v5::projection::ReplayCursor;
 
 use crate::poll_loop::DaemonState;
 
@@ -218,6 +219,21 @@ async fn handle_connection(
             let st = state.lock().await;
             let health = st.gateway.list_source_health();
             serde_json::to_value(health)?
+        }
+        "ui.bootstrap.v2" => {
+            let st = state.lock().await;
+            build_ui_bootstrap_v2(&st)
+        }
+        "ui.changes.v2" => {
+            let params = &request["params"];
+            let cursor = parse_replay_cursor(&params["cursor"]);
+            let limit = params["limit"]
+                .as_u64()
+                .and_then(|n| usize::try_from(n).ok())
+                .unwrap_or(100)
+                .clamp(1, 1000);
+            let st = state.lock().await;
+            build_ui_changes_v2(&st, cursor, limit)
         }
         "state_changed" => {
             let params = &request["params"];
@@ -542,6 +558,99 @@ pub(crate) fn build_latency_status(state: &DaemonState) -> serde_json::Value {
     }
 }
 
+fn parse_replay_cursor(value: &serde_json::Value) -> Option<ReplayCursor> {
+    Some(ReplayCursor {
+        epoch: value.get("epoch")?.as_u64()?,
+        seq: value.get("seq")?.as_u64()?,
+    })
+}
+
+fn build_session_list(state: &DaemonState) -> serde_json::Value {
+    serde_json::to_value(state.daemon.list_sessions()).unwrap_or_else(|_| serde_json::json!([]))
+}
+
+fn build_resync_required(
+    current_epoch: u64,
+    latest_snapshot_seq: u64,
+    reason: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "resync_required": {
+            "current_epoch": current_epoch,
+            "latest_snapshot_seq": latest_snapshot_seq,
+            "reason": reason,
+        }
+    })
+}
+
+fn build_change_entry(change: &agtmux_daemon_v5::projection::StateChange) -> serde_json::Value {
+    let mut entry = serde_json::json!({
+        "seq": change.version,
+        "session_key": change.session_key,
+        "timestamp": change.timestamp,
+    });
+
+    if let Some(ref pane_id) = change.pane_id {
+        entry["pane_id"] = serde_json::Value::String(pane_id.clone());
+    }
+    if let Some(ref pane_state) = change.pane_state {
+        entry["pane"] = serde_json::to_value(pane_state).unwrap_or(serde_json::Value::Null);
+    }
+    if let Some(ref session_state) = change.session_state {
+        entry["session"] = serde_json::to_value(session_state).unwrap_or(serde_json::Value::Null);
+    }
+
+    entry
+}
+
+pub(crate) fn build_ui_bootstrap_v2(state: &DaemonState) -> serde_json::Value {
+    let replay_cursor = state.daemon.replay_cursor();
+    serde_json::json!({
+        "epoch": replay_cursor.epoch,
+        "snapshot_seq": replay_cursor.seq,
+        "panes": build_pane_list(state),
+        "sessions": build_session_list(state),
+        "generated_at": chrono::Utc::now(),
+        "replay_cursor": {
+            "epoch": replay_cursor.epoch,
+            "seq": replay_cursor.seq,
+        },
+    })
+}
+
+pub(crate) fn build_ui_changes_v2(
+    state: &DaemonState,
+    cursor: Option<ReplayCursor>,
+    limit: usize,
+) -> serde_json::Value {
+    let Some(cursor) = cursor else {
+        let replay_cursor = state.daemon.replay_cursor();
+        return build_resync_required(replay_cursor.epoch, replay_cursor.seq, "invalid_cursor");
+    };
+
+    match state.daemon.replay_changes(cursor, limit) {
+        Ok(batch) => serde_json::json!({
+            "epoch": batch.epoch,
+            "changes": batch
+                .changes
+                .iter()
+                .map(|change| build_change_entry(change))
+                .collect::<Vec<_>>(),
+            "from_seq": batch.from_seq,
+            "to_seq": batch.to_seq,
+            "next_cursor": {
+                "epoch": batch.next_cursor.epoch,
+                "seq": batch.next_cursor.seq,
+            },
+        }),
+        Err(resync) => build_resync_required(
+            resync.current_epoch,
+            resync.latest_snapshot_seq,
+            resync.reason,
+        ),
+    }
+}
+
 /// Build a `state_changed` response: changes since a given version with full state.
 ///
 /// Returns pane/session state for each change, plus the current version for
@@ -550,40 +659,39 @@ pub(crate) fn build_state_changed(state: &DaemonState, since_version: u64) -> se
     let changes = state.daemon.changes_since(since_version);
     let current_version = state.daemon.version();
 
-    let mut entries = Vec::new();
-    for change in &changes {
-        let mut entry = serde_json::json!({
-            "version": change.version,
-            "session_key": change.session_key,
-            "timestamp": change.timestamp,
-        });
+    let entries = changes
+        .iter()
+        .map(|change| {
+            let mut entry = serde_json::json!({
+                "version": change.version,
+                "session_key": change.session_key,
+                "timestamp": change.timestamp,
+            });
 
-        // Include pane state if the change is pane-level
-        if let Some(ref pane_id) = change.pane_id {
-            entry["pane_id"] = serde_json::Value::String(pane_id.clone());
-            if let Some(pane) = state.daemon.get_pane(pane_id) {
+            if let Some(ref pane_id) = change.pane_id {
+                entry["pane_id"] = serde_json::Value::String(pane_id.clone());
+            }
+            if let Some(ref pane_state) = change.pane_state {
                 entry["pane_state"] = serde_json::json!({
-                    "signature_class": pane.signature_class,
-                    "evidence_mode": pane.evidence_mode,
-                    "activity_state": format!("{:?}", pane.activity_state),
-                    "provider": pane.provider.map(|p| p.as_str()),
-                    "signature_confidence": pane.signature_confidence,
+                    "signature_class": pane_state.signature_class,
+                    "evidence_mode": pane_state.evidence_mode,
+                    "activity_state": format!("{:?}", pane_state.activity_state),
+                    "provider": pane_state.provider.map(|p| p.as_str()),
+                    "signature_confidence": pane_state.signature_confidence,
                 });
             }
-        }
+            if let Some(ref session_state) = change.session_state {
+                entry["session_state"] = serde_json::json!({
+                    "presence": session_state.presence,
+                    "evidence_mode": session_state.evidence_mode,
+                    "activity_state": format!("{:?}", session_state.activity_state),
+                    "winner_tier": session_state.winner_tier,
+                });
+            }
 
-        // Include session state
-        if let Some(session) = state.daemon.get_session(&change.session_key) {
-            entry["session_state"] = serde_json::json!({
-                "presence": session.presence,
-                "evidence_mode": session.evidence_mode,
-                "activity_state": format!("{:?}", session.activity_state),
-                "winner_tier": session.winner_tier,
-            });
-        }
-
-        entries.push(entry);
-    }
+            entry
+        })
+        .collect::<Vec<_>>();
 
     serde_json::json!({
         "changes": entries,
@@ -1019,6 +1127,39 @@ mod tests {
         assert_eq!(result["pane_changes"], 0);
     }
 
+    #[test]
+    fn ui_bootstrap_v2_includes_required_fields() {
+        let state = make_managed_state();
+
+        let result = build_ui_bootstrap_v2(&state);
+        assert_eq!(result["epoch"], 1);
+        assert_eq!(result["snapshot_seq"], state.daemon.version());
+        assert!(result["panes"].is_array());
+        assert!(result["sessions"].is_array());
+        assert!(result.get("generated_at").is_some());
+        assert_eq!(result["replay_cursor"]["epoch"], 1);
+        assert_eq!(result["replay_cursor"]["seq"], state.daemon.version());
+    }
+
+    #[test]
+    fn ui_changes_v2_returns_ordered_changes() {
+        let state = make_managed_state();
+
+        let result = build_ui_changes_v2(&state, Some(ReplayCursor { epoch: 1, seq: 0 }), 10);
+        let changes = result["changes"].as_array().expect("changes array");
+
+        assert_eq!(result["epoch"], 1);
+        assert_eq!(result["from_seq"], 1);
+        assert_eq!(result["to_seq"], state.daemon.version());
+        assert_eq!(result["next_cursor"]["epoch"], 1);
+        assert_eq!(result["next_cursor"]["seq"], state.daemon.version());
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[0]["seq"], 1);
+        assert_eq!(changes[1]["seq"], 2);
+        assert!(changes[0]["session"].is_object());
+        assert!(changes[1]["pane"].is_object());
+    }
+
     #[tokio::test]
     async fn list_panes_snapshot_includes_cache_metadata() {
         let mut state = make_state();
@@ -1072,6 +1213,87 @@ mod tests {
         let panes = resp["result"].as_array().expect("array");
         assert_eq!(panes.len(), 1);
         assert_eq!(panes[0]["pane_id"], "%41");
+    }
+
+    #[tokio::test]
+    async fn ui_bootstrap_v2_handler_returns_snapshot() {
+        let state = Arc::new(Mutex::new(make_managed_state()));
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "ui.bootstrap.v2",
+            "id": 92,
+            "params": {}
+        });
+
+        let resp = call_handler(Arc::clone(&state), request).await;
+        assert_eq!(resp["result"]["epoch"], 1);
+        assert!(resp["result"]["panes"].is_array());
+        assert!(resp["result"]["sessions"].is_array());
+    }
+
+    #[tokio::test]
+    async fn ui_changes_v2_handler_resyncs_on_epoch_mismatch() {
+        let state = Arc::new(Mutex::new(make_managed_state()));
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "ui.changes.v2",
+            "id": 93,
+            "params": {
+                "cursor": {"epoch": 99, "seq": 0},
+                "limit": 100
+            }
+        });
+
+        let resp = call_handler(Arc::clone(&state), request).await;
+        assert_eq!(
+            resp["result"]["resync_required"]["reason"],
+            "epoch_mismatch"
+        );
+        assert_eq!(resp["result"]["resync_required"]["current_epoch"], 1);
+    }
+
+    #[tokio::test]
+    async fn ui_changes_v2_handler_resyncs_on_trimmed_cursor() {
+        let mut state = make_managed_state();
+        state.daemon.trim_changes_before(1);
+        let state = Arc::new(Mutex::new(state));
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "ui.changes.v2",
+            "id": 94,
+            "params": {
+                "cursor": {"epoch": 1, "seq": 0},
+                "limit": 100
+            }
+        });
+
+        let resp = call_handler(Arc::clone(&state), request).await;
+        assert_eq!(
+            resp["result"]["resync_required"]["reason"],
+            "trimmed_cursor"
+        );
+        assert_eq!(resp["result"]["resync_required"]["latest_snapshot_seq"], 2);
+    }
+
+    #[tokio::test]
+    async fn ui_changes_v2_handler_resyncs_on_invalid_cursor() {
+        let state = Arc::new(Mutex::new(make_managed_state()));
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "ui.changes.v2",
+            "id": 95,
+            "params": {
+                "cursor": {"epoch": 1},
+                "limit": 100
+            }
+        });
+
+        let resp = call_handler(Arc::clone(&state), request).await;
+        assert_eq!(
+            resp["result"]["resync_required"]["reason"],
+            "invalid_cursor"
+        );
+        assert_eq!(resp["result"]["resync_required"]["current_epoch"], 1);
     }
 
     // ── source.ingest tests (via UDS handler) ──────────────────────────

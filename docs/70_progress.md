@@ -2323,3 +2323,49 @@ JSONL スキャナーなし) を発見 → デーモンが stale binary で起�
 ### Next
 - daemon/runtime: cached snapshot即時返却 + non-destructive metadata failure semantics 実装
 - term: inventory/metadata lane分離（A0）を実装
+
+## 2026-03-05 — agtmux-term V2 A0 closeout + daemon A1 handover同期
+
+### 状態同期
+- cross-repo A0 は完了として閉じる。
+  - daemon baseline: `09722b7` (`feat: add A0 inventory-first cached snapshot and metadata backoff`)
+  - term baseline: `5c5ea10` (`feat: implement A0 inventory-first local fetch and snapshot compatibility`)
+- `docs/60_tasks.md` の `T-XTERM-A0` を DONE 扱いに更新。
+
+### docs反映
+- `docs/20_spec.md`
+  - FR-061 / FR-062 を追加し、A1 の `ui.bootstrap.v2` / `ui.changes.v2` 契約と explicit resync を固定。
+- `docs/40_design.md`
+  - Appendix A9 を追加し、epoch/seq ownership、`resync_required`、A1/A2 の責務分界を明文化。
+- `docs/60_tasks.md`
+  - `T-XTERM-A1` を追加。daemon 側の次作業を protocol contract 固定に限定した。
+- `docs/90_index.md`
+  - Cross-repo V2 A1 handover 導線を追加。
+
+### scratch handover
+- `/tmp/agtmux-v2-daemon-a1-handover-20260305.md` を parallel implementation 用に作成。
+- ただし source of truth は引き続き `docs/20_spec.md` / `docs/40_design.md` / `docs/60_tasks.md`。
+
+### Next
+- daemon 側は `T-XTERM-A1` として `ui.bootstrap.v2` / `ui.changes.v2` の wire contract を固定する。
+- A2（ack compaction / true stream / observability）は A1 完了後に着手する。
+
+## 2026-03-06 — agtmux-term V2 A1 daemon contract complete
+
+### 実装
+- `crates/agtmux-daemon-v5/src/projection.rs`
+  - replay cursor (`epoch`, `seq`) と strict replay validator を追加。
+  - `resync_required { current_epoch, latest_snapshot_seq, reason }` を projection レベルで返すようにした。
+  - change log は mutable current-state 参照ではなく、その seq 時点の pane/session snapshot を保持するようにした。
+  - `tick_freshness()` 由来の pane/session evidence-mode 変更も change log に記録するよう修正した。
+- `crates/agtmux-runtime/src/server.rs`
+  - `ui.bootstrap.v2` を追加し、`epoch`, `snapshot_seq`, `panes`, `sessions`, `generated_at`, `replay_cursor` を返すようにした。
+  - `ui.changes.v2` を追加し、normal replay と `resync_required` を分岐返却するようにした。
+
+### 検証
+- `cargo test -p agtmux-daemon-v5` → 151 passed
+- `cargo test -p agtmux` → 160 passed
+
+### 状態
+- `docs/60_tasks.md` の `T-XTERM-A1` を DONE 扱いに更新。
+- A2（ack compaction / true stream / observability）は未着手のまま維持。

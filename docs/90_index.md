@@ -11,6 +11,10 @@
 - Final plan (term-side output): `/tmp/agtmux-v2-final-plan-20260305-v3.md`
 - Orchestrator handover: `docs/85_reviews/RP-20260305-agtmux-term-v2-a0-handover.md`
 
+## Cross-Repo V2 A1
+- Source of truth: `docs/20_spec.md` (FR-061 / FR-062), `docs/40_design.md` (Appendix A9), `docs/60_tasks.md` (`T-XTERM-A1`)
+- Scratch handover for parallel daemon work: `/tmp/agtmux-v2-daemon-a1-handover-20260305.md`
+
 ## Phase 3 Hardening (COMPLETE — 585 tests)
 - `docs/50_plan.md` (Phase 3 section)
 - `docs/60_tasks.md` (T-115〜T-118 DONE)

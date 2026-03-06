@@ -485,7 +485,21 @@ Phase 7 (Distribution) と独立して実施可能。
 - [x] T-000 docs skeleton imported from template
   - Evidence: `~/Downloads/docs-first-template/docs` を基に初期構造作成済み
 
-- [ ] T-XTERM-A0 (P1) Cross-repo: agtmux-term V2 A0 support (inventory-first UX)
+- [x] T-XTERM-A0 (P1) Cross-repo: agtmux-term V2 A0 support (inventory-first UX)
   - 目的: term側のinventory-first renderingを成立させるため、daemon `json` の cached snapshot即時返却と metadata failure non-destructive semantics を固定する
+  - Evidence: daemon A0 baseline `09722b7` で cached snapshot即時返却 + metadata failure non-destructive semantics を実装し、agtmux-term A0 baseline `5c5ea10` と cross-repo smoke / compatibility 受け入れを完了
   - Handover: `docs/85_reviews/RP-20260305-agtmux-term-v2-a0-handover.md`
   - blocked_by: なし
+- [x] T-XTERM-A1 (P0) Cross-repo: agtmux-term V2 A1 protocol contract (epoch/seq/resync)
+  - 目的: daemon -> term の UI 同期を `ui.bootstrap.v2` / `ui.changes.v2` へ固定し、epoch/seq/cursor の曖昧さを排除する
+  - Evidence: `crates/agtmux-daemon-v5/src/projection.rs` に strict replay / explicit resync を実装し、`crates/agtmux-runtime/src/server.rs` に `ui.bootstrap.v2` / `ui.changes.v2` を追加。`cargo test -p agtmux-daemon-v5` 151 passed、`cargo test -p agtmux` 160 passed
+  - Deliverables:
+    - `ui.bootstrap.v2` の bootstrap payload（`epoch`, `snapshot_seq`, `replay_cursor`）を固定
+    - `ui.changes.v2` の ordered change feed と `next_cursor` 契約を固定
+    - replay miss / epoch mismatch / trimmed cursor で `resync_required` を明示返却
+  - Acceptance:
+    - silent rewind なしで resync 条件が判定できる
+    - same epoch 内で seq continuity が崩れない
+    - A2（ack compaction / true stream / observability）を前提にしない
+  - Scratch handover: `/tmp/agtmux-v2-daemon-a1-handover-20260305.md`
+  - blocked_by: T-XTERM-A0

@@ -250,6 +250,7 @@ async fn run_poll_loop<R: TmuxCommandRunner + 'static>(
     }
 }
 
+#[cfg(test)]
 async fn poll_tick<R: TmuxCommandRunner + 'static>(
     executor: &Arc<R>,
     state: &Arc<Mutex<DaemonState>>,

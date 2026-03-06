@@ -758,3 +758,24 @@ poller (rank 3)   heuristic — capture-based fallback
   - source registry lifecycle
   - supervisor hold-down
   - snapshot restore dry-run
+
+### A9) Cross-repo `ui.bootstrap.v2` / `ui.changes.v2` contract
+- Scope: agtmux-term V2 Phase A1 向けの daemon -> UI 同期契約。A0 の cached snapshot 即時返却は維持しつつ、cursor/replay の曖昧さを除去する。
+- `ui.bootstrap.v2`
+  - full snapshot を返す。
+  - required fields: `epoch`, `snapshot_seq`, `panes`, `sessions`, `generated_at`, `replay_cursor`
+  - `snapshot_seq` は bootstrap 時点で UI に可視な最新 change seq を指す。
+- `ui.changes.v2`
+  - request: `cursor { epoch, seq }`, `limit`
+  - response: `epoch`, `changes`, `from_seq`, `to_seq`, `next_cursor`
+  - `changes` は projection log の seq 昇順で返す。`next_cursor` は `to_seq` の直後を指す。
+- Resync contract
+  - cursor epoch mismatch、seq gap、trim 済み cursor、unknown cursor は `resync_required` を返す。
+  - daemon は silent rewind / best-effort partial replay を行わない。
+  - `resync_required` payload には `current_epoch`, `latest_snapshot_seq`, `reason` を含める。
+- Epoch/seq ownership
+  - daemon projection が change log continuity を失った時だけ epoch を bump する。
+  - change log compaction は同一 epoch 内で seq continuity を壊さない範囲に限定し、破る場合は explicit resync に切り替える。
+- Out of scope
+  - ack compaction / true streaming / delivery retry は A2 以降。
+  - cursor owner を term 側 XPC service に固定する責務は agtmux-term 側で持つ。daemon 側は epoch/seq/resync の wire contract を固定する。
