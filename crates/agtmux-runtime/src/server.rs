@@ -669,35 +669,41 @@ fn build_sync_v2_pane_list(state: &DaemonState) -> serde_json::Value {
 
     // Managed panes: full exact-identity payload.
     for pane in &managed_panes {
-        let tmux_info = state
+        let Some(tmux_info) = state
             .last_panes
             .iter()
-            .find(|p| p.pane_id == pane.pane_instance_id.pane_id);
+            .find(|p| p.pane_id == pane.pane_instance_id.pane_id)
+        else {
+            // FR-065: strict sync-v2 consumers require exact tmux location fields.
+            // If the live tmux inventory can no longer resolve this managed pane,
+            // exclude it from bootstrap instead of emitting null exact-location fields.
+            continue;
+        };
 
         let age_secs = (now - pane.updated_at).num_seconds().max(0) as u64;
 
         result.push(serde_json::json!({
             // Required identity fields (FR-065)
             "pane_id": pane.pane_instance_id.pane_id,
-            "session_name": tmux_info.map(|t| t.session_name.as_str()),
+            "session_name": tmux_info.session_name.as_str(),
             "session_key": pane.session_key,
-            "window_id": tmux_info.map(|t| t.window_id.as_str()),
+            "window_id": tmux_info.window_id.as_str(),
             "pane_instance_id": {
                 "pane_id": pane.pane_instance_id.pane_id,
                 "generation": pane.pane_instance_id.generation,
                 "birth_ts": pane.pane_instance_id.birth_ts,
             },
             // Allowed adjunct fields (FR-065)
-            "window_name": tmux_info.map(|t| t.window_name.as_str()),
+            "window_name": tmux_info.window_name.as_str(),
             "session_group": serde_json::Value::Null,
             "presence": "managed",
             "evidence_mode": pane.evidence_mode,
             "activity_state": format!("{:?}", pane.activity_state),
             "provider": pane.provider.map(|p| p.as_str()),
             "conversation_title": state.conversation_titles.get(&pane.session_key),
-            "current_path": tmux_info.map(|t| t.current_path.as_str()),
+            "current_path": tmux_info.current_path.as_str(),
             "git_branch": serde_json::Value::Null,
-            "current_cmd": tmux_info.map(|t| t.current_cmd.as_str()),
+            "current_cmd": tmux_info.current_cmd.as_str(),
             "updated_at": pane.updated_at,
             "age_secs": age_secs,
             // NOTE: `session_id` intentionally absent — legacy alias forbidden in sync-v2 (FR-066).
@@ -1443,7 +1449,12 @@ mod tests {
             managed.get("session_key").is_some() && !managed["session_key"].is_null(),
             "session_key required"
         );
+        assert!(
+            managed.get("session_name").is_some() && !managed["session_name"].is_null(),
+            "session_name required"
+        );
         assert!(managed.get("window_id").is_some(), "window_id required");
+        assert!(!managed["window_id"].is_null(), "window_id must not be null");
         assert!(
             managed.get("pane_instance_id").is_some() && managed["pane_instance_id"].is_object(),
             "pane_instance_id required and must be object"
@@ -1459,6 +1470,25 @@ mod tests {
         assert!(
             managed["pane_instance_id"].get("birth_ts").is_some(),
             "pane_instance_id.birth_ts required"
+        );
+    }
+
+    // FR-065 regression: unresolved exact location must exclude the managed pane from sync-v2.
+    #[test]
+    fn ui_bootstrap_v2_excludes_managed_pane_when_exact_location_is_unresolved() {
+        let mut state = make_managed_state();
+        state.last_panes.clear();
+
+        let result = build_ui_bootstrap_v2(&state);
+        let panes = result["panes"].as_array().expect("panes array");
+
+        assert!(
+            panes.iter().all(|pane| pane["pane_id"] != "%0"),
+            "managed pane with unresolved exact location must be excluded from sync-v2 bootstrap"
+        );
+        assert!(
+            panes.iter().all(|pane| !pane["session_name"].is_null() && !pane["window_id"].is_null()),
+            "sync-v2 bootstrap must not emit null exact-location fields"
         );
     }
 

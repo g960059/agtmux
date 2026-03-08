@@ -247,15 +247,26 @@ Phase 7 (Distribution) と独立して実施可能。
 
 - [ ] T-XTERM-A3 (P0) Cross-repo: sync-v2 exact-identity handback
   - 目的: `AGTMUX_BIN=... swift run AgtmuxTerm` で `Local daemon incompatible` が出ない bootstrap/changes contract に戻し、strict consumer と live daemon を再接続する
-  - Root cause: `crates/agtmux-runtime/src/server.rs` の `build_ui_bootstrap_v2()` が legacy `build_pane_list()` を再利用して `ui.bootstrap.v2.panes[]` に `session_id` を混入させている
-  - Phase 1: sync-v2 専用 DTO / builder を追加し、`pane_id`, `session_name`, `session_key`, `window_id`, `pane_instance_id` と許可済み adjunct fields のみを emit する
-  - Phase 2: producer-side regression tests を追加し、`ui.bootstrap.v2` / `ui.changes.v2` に legacy identity alias が混入したら fail-closed で落ちるようにする
-  - Phase 3: cross-repo live smoke (`AGTMUX_BIN=/Users/virtualmachine/ghq/github.com/g960059/agtmux/target/debug/agtmux swift run AgtmuxTerm`) で `legacy identity field` / `Local daemon incompatible` が消えることを確認する
+  - Current blocker after the earlier `session_id` fix:
+    - `build_sync_v2_pane_list()` still serializes managed rows whose tmux exact location can no longer be resolved from live inventory
+    - on a dirty persistent app-managed daemon, this yields managed panes with `session_name: null` / `window_id: null`
+    - strict agtmux-term consumer rejects the whole bootstrap epoch, so all provider/activity overlays disappear
+  - Why current online E2E missed it:
+    - existing online/e2e suites start a fresh daemon on a temporary socket with fresh tmux state
+    - they do not exercise dirty persistent daemon state with orphan managed rows
+  - Phase 1: add failing producer-side regression coverage for dirty-state bootstrap rows with unresolved exact location (`session_name` / `window_id` null)
+  - Phase 2: make sync-v2 bootstrap exclude or otherwise prevent orphan managed panes whose exact location cannot be resolved; emitting null exact fields is forbidden
+  - Progress (2026-03-08, producer-side landed):
+    - `build_sync_v2_pane_list()` now excludes managed panes whose exact location can no longer be resolved from `last_panes`
+    - regression `ui_bootstrap_v2_excludes_managed_pane_when_exact_location_is_unresolved` added, and required-field assertions now check non-null `session_name` / `window_id`
+    - verification: `cargo test -p agtmux ui_bootstrap_v2_`, `cargo test -p agtmux`
+  - Phase 3: rerun both clean online/e2e and cross-repo live smoke (`AGTMUX_BIN=/Users/virtualmachine/ghq/github.com/g960059/agtmux/target/debug/agtmux swift run AgtmuxTerm`) until the persistent app-managed socket also accepts strict consumer decode
   - Gate:
-    - failing regression test を先に追加してから builder split を行うこと
+    - failing dirty-state regression test を先に追加すること
     - `just verify` PASS
+    - producer-side online/e2e includes the dirty-state exact-location scenario
     - strict agtmux-term consumer で live smoke PASS
-  - Scratch handover: `/tmp/agtmux-v2-a3-exact-identity-handover-20260307.md`
+  - Scratch handover: `/tmp/agtmux-bootstrap-null-exact-location-handover-20260308.md`
 
 - [ ] T-XTERM-A4 (P1) Cross-repo: semantic truth handback for agtmux-term live canaries
   - 目的: real-CLI semantic source-of-truth suite を agtmux repo 側で維持しつつ、agtmux-term が薄い daemon-to-sidebar canary を追加できるよう prompt/preflight/oracle 境界を固定する

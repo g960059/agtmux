@@ -2455,3 +2455,50 @@ JSONL スキャナーなし) を発見 → デーモンが stale binary で起�
 ### 状態
 - `T-XTERM-A4` の docs-first deliverable は満たした。
 - cross-repo strict consumer smoke の最終閉塞は `T-XTERM-A3` 完了後に継続する。
+
+## 2026-03-08 — T-XTERM-A3 reopened on dirty persistent-state bootstrap drift
+
+### 発見
+- fresh live app evidence from `agtmux-term` shows the earlier `session_id` fix was not sufficient on the shipped app-managed daemon path:
+  - `ui.bootstrap.v2` still fails strict consumer decode in the normal app path
+  - direct socket inspection of `/Users/virtualmachine/Library/Application Support/AGTMUXDesktop/agtmuxd.sock` shows 94 panes total, with 88 managed panes carrying `session_name: null` and `window_id: null`
+- the failure is producer-side:
+  - `build_sync_v2_pane_list()` is emitting managed rows even when live tmux inventory can no longer resolve exact location for those rows
+  - strict agtmux-term consumer correctly rejects the whole bootstrap epoch once any such row appears
+
+### なぜ online E2E が素通りしたか
+- existing daemon online/e2e scenarios create a fresh daemon on a temporary socket with fresh tmux state
+- they verify semantic truth for live provider activity, but they do not simulate dirty persistent daemon state with orphan managed rows left over from prior sessions
+- therefore the producer remained green in clean-socket tests while the persistent app-managed socket still served invalid strict-consumer bootstrap rows
+
+### docs反映
+- `docs/20_spec.md`
+  - FR-065 now explicitly forbids emitting managed sync-v2 panes with null exact-location fields; unresolved rows must be excluded or repaired before bootstrap emission
+- `docs/60_tasks.md`
+  - `T-XTERM-A3` now tracks the reopened root cause and the dirty-state regression gap
+  - the scratch handover for this reopened slice is `/tmp/agtmux-bootstrap-null-exact-location-handover-20260308.md`
+
+### Next
+- add failing producer-side regression coverage for orphan managed rows with unresolved exact location
+- change sync-v2 bootstrap emission so such rows are not emitted as managed panes with null required fields
+- rerun:
+  - clean online/e2e suite
+  - cross-repo live smoke against the persistent app-managed socket used by agtmux-term
+
+## 2026-03-08 — T-XTERM-A3 producer-side null exact-location fix landed
+
+### 実装
+- `crates/agtmux-runtime/src/server.rs`
+  - `build_sync_v2_pane_list()` now excludes managed panes when live tmux inventory cannot resolve the pane's exact location
+  - the serializer no longer emits sync-v2 managed rows with `session_name: null` / `window_id: null`
+- added producer-side regression coverage:
+  - `ui_bootstrap_v2_excludes_managed_pane_when_exact_location_is_unresolved`
+  - tightened required-field regression to assert non-null `session_name` / `window_id`
+
+### 検証
+- `cargo test -p agtmux ui_bootstrap_v2_`
+- `cargo test -p agtmux`
+
+### 残り
+- dirty persistent app-managed socket での cross-repo live smoke
+- 必要なら online/e2e に dirty-state bootstrap exact-location scenario を追加
