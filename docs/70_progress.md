@@ -2439,3 +2439,19 @@ JSONL スキャナーなし) を発見 → デーモンが stale binary で起�
 ### 状態
 - agtmux-term 側は daemon payload truth を primary oracle にする thin live canary を実装開始できる状態になった。
 - daemon 側の semantic truth suite は引き続き agtmux repo が owner。
+
+## 2026-03-08 — T-XTERM-A4 docs-first handover published
+
+### docs反映
+- `docs/85_reviews/RP-20260308-agtmux-term-semantic-truth-handover.md`
+  - semantic truth ownership split を handover 文書として恒久化した。
+  - daemon-owned scenario matrix (`provider`, `presence`, `running`, completion, `waiting_input`, `waiting_approval`, `conversation_title`, no-bleed) を scenario script と紐付けた。
+  - provider-specific live prompt guidance を Claude Sonnet 4.6 / Codex 5.4 medium で固定した。
+  - `just preflight-online` の explicit gate（tmux/CLI/auth/network）を明記した。
+  - agtmux-term は boundary assertions のみを mirror する方針を明文化した。
+- `docs/60_tasks.md`
+  - `T-XTERM-A4` に handover doc 参照を追加した。
+
+### 状態
+- `T-XTERM-A4` の docs-first deliverable は満たした。
+- cross-repo strict consumer smoke の最終閉塞は `T-XTERM-A3` 完了後に継続する。

@@ -28,7 +28,7 @@ case "${WAIT_SECONDS}" in
 esac
 CODEX_WAIT_RUNNING_S="${CODEX_WAIT_RUNNING_S:-${DEFAULT_WAIT_RUNNING_S}}"
 CODEX_WAIT_IDLE_S="${CODEX_WAIT_IDLE_S:-${DEFAULT_WAIT_IDLE_S}}"
-CODEX_MODEL_VALUE="${CODEX_MODEL:-gpt-5.3-codex}"
+CODEX_MODEL_VALUE="${CODEX_MODEL:-gpt-5.4}"
 CODEX_EFFORT_VALUE="${CODEX_EFFORT:-medium}"
 CODEX_EXEC_BASE_CMD="codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --json --model ${CODEX_MODEL_VALUE} -c model_reasoning_effort=\"${CODEX_EFFORT_VALUE}\""
 # v4 wait_prompt_template.rs equivalent for wait=60.

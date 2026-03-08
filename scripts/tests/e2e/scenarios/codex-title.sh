@@ -39,21 +39,20 @@ trap cleanup_codex_title EXIT
 daemon_start "$SOCKET" 500
 sleep 1
 
-# ── Phase 1: Launch Codex and wait for running + deterministic ────────────
+# ── Phase 1: Launch Codex and wait for provider + managed presence ────────
 #
-# sleep 10 ensures the session stays alive long enough to observe the running state.
+# This scenario's primary oracle is conversation_title after completion.
+# Running/deterministic coverage is owned by the lifecycle / multi-pane scenarios.
 
 TASK="Step 1: use bash to run 'sleep 10'. Step 2: use bash to count lines in /etc/hosts. Write the count to result.txt"
 log "launching codex in pane $PANE_ID (workdir=$WORKDIR)"
 launch_provider "$PANE_ID" "$WORKDIR" "$TASK"
 
-wait_until_provider_running "$PANE_ID" 10 || log "WARN: provider-side running check timed out"
-
+wait_for_agtmux_state "$SOCKET" "$PANE_ID" "provider"       "codex"         60
 wait_for_agtmux_state "$SOCKET" "$PANE_ID" "presence"       "managed"       60
-wait_for_agtmux_state "$SOCKET" "$PANE_ID" "activity_state" "running"       45
-wait_for_agtmux_state "$SOCKET" "$PANE_ID" "evidence_mode"  "deterministic" 30
+wait_for_agtmux_state_any "$SOCKET" "$PANE_ID" "activity_state" "running waiting_input" 45
 
-pass "Phase 1: Codex running and managed (deterministic)"
+pass "Phase 1: Codex pane managed (provider=codex)"
 
 # ── Phase 2: Wait for Codex to complete ──────────────────────────────────
 

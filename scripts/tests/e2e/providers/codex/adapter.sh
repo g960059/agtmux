@@ -6,18 +6,21 @@
 #   wait_until_provider_running  PANE_ID [TIMEOUT_S]
 #   wait_until_provider_idle     PANE_ID [TIMEOUT_S]
 #
-# Detection mechanism: Codex App Server → codex_poller (thread/list)
+# Detection mechanism: Codex live exec session → daemon Codex source stack
 
 PROVIDER_NAME="codex"
+CODEX_MODEL_VALUE="${CODEX_MODEL:-gpt-5.4}"
+CODEX_EFFORT_VALUE="${CODEX_EFFORT:-medium}"
 
 # launch_provider PANE_ID WORKDIR [TASK]
 # Sends Codex CLI command to the tmux pane via send-keys.
-# Default task: count lines in /etc/hosts and write result to WORKDIR/result.txt
+# Default task: keep the session alive long enough to observe `running`, then write results.
 launch_provider() {
     local pane_id="$1" workdir="$2"
-    local task="${3:-count lines in /etc/hosts and write the count to result.txt}"
+    local task="${3:-Step 1: use bash to run 'sleep 15'. Step 2: use bash to count lines in /etc/hosts. Step 3: use bash to count lines in /etc/shells. Write both counts to result.txt}"
+    local effort_config="model_reasoning_effort=\"${CODEX_EFFORT_VALUE}\""
     tmux send-keys -t "$pane_id" \
-        "cd $(printf '%q' "$workdir") && codex --full-auto $(printf '%q' "$task")" \
+        "cd $(printf '%q' "$workdir") && codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --json --model $(printf '%q' "$CODEX_MODEL_VALUE") -c $(printf '%q' "$effort_config") $(printf '%q' "$task")" \
         Enter
 }
 

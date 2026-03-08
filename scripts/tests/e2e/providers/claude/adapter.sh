@@ -10,6 +10,7 @@
 # Fallback: JSONL source (~/.claude/projects/<encoded-path>/)
 
 PROVIDER_NAME="claude"
+CLAUDE_MODEL_VALUE="${CLAUDE_MODEL:-claude-sonnet-4-6}"
 
 # launch_provider PANE_ID WORKDIR [TASK]
 # Sends Claude CLI command to the tmux pane via send-keys.
@@ -18,7 +19,7 @@ launch_provider() {
     local pane_id="$1" workdir="$2"
     local task="${3:-Step 1: use bash to run 'sleep 15'. Step 2: use bash to count lines in /etc/hosts. Step 3: use bash to count lines in /etc/shells. Write both counts to result.txt}"
     tmux send-keys -t "$pane_id" \
-        "cd $(printf '%q' "$workdir") && claude --dangerously-skip-permissions -p $(printf '%q' "$task")" \
+        "cd $(printf '%q' "$workdir") && claude --dangerously-skip-permissions --model $(printf '%q' "$CLAUDE_MODEL_VALUE") -p $(printf '%q' "$task")" \
         Enter
 }
 

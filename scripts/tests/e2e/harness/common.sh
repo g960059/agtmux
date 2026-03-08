@@ -10,8 +10,16 @@ set -euo pipefail
 
 # ── Binary resolution ──────────────────────────────────────────────────────
 
-# Allow tests to override the binary path (e.g. cargo run vs release build)
-AGTMUX_BIN="${AGTMUX_BIN:-agtmux}"
+# Allow tests to override the binary path. Otherwise prefer the freshly built local binary.
+if [ -n "${AGTMUX_BIN:-}" ]; then
+    AGTMUX_BIN="${AGTMUX_BIN}"
+elif [ -x "$(pwd)/target/debug/agtmux" ]; then
+    AGTMUX_BIN="$(pwd)/target/debug/agtmux"
+elif [ -x "$(pwd)/target/release/agtmux" ]; then
+    AGTMUX_BIN="$(pwd)/target/release/agtmux"
+else
+    AGTMUX_BIN="agtmux"
+fi
 
 # ── Logging / assertion helpers ────────────────────────────────────────────
 

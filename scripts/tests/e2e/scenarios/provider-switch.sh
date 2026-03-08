@@ -19,6 +19,9 @@ WORKDIR="/tmp/e2e-switch-workdir-$$"
 
 echo "=== provider-switch.sh (${PROVIDER_A} → ${PROVIDER_B}) ==="
 
+PHASE1_TASK="Run exactly one bash command and do not run any additional commands. Wait 30 seconds by using sleep 30. bash -lc 'sleep 30; printf \"wait_result=phase1\\n\"'. Do not simulate, infer, or guess. Output only one non-empty line. Required output format: wait_result=phase1"
+PHASE2_TASK="Run exactly one bash command and do not run any additional commands. Wait 30 seconds by using sleep 30. bash -lc 'sleep 30; printf \"wait_result=phase2\\n\"'. Do not simulate, infer, or guess. Output only one non-empty line. Required output format: wait_result=phase2"
+
 # ── Setup ──────────────────────────────────────────────────────────────────
 
 mkdir -p "$WORKDIR"
@@ -42,11 +45,11 @@ sleep 1
 
 source "$SCRIPT_DIR/../providers/${PROVIDER_A}/adapter.sh"
 log "Phase 1: launching $PROVIDER_A"
-launch_provider "$PANE_ID" "$WORKDIR" "Step 1: use bash to run 'sleep 15'. Step 2: use bash to count lines in /etc/hosts. Step 3: use bash to count lines in /etc/shells. Write all results to phase1.txt"
+launch_provider "$PANE_ID" "$WORKDIR" "$PHASE1_TASK"
 
-wait_until_provider_running "$PANE_ID" 10 || log "WARN: provider_a running check timed out"
-wait_for_agtmux_state "$SOCKET" "$PANE_ID" "presence"       "managed"       60
 wait_for_agtmux_state "$SOCKET" "$PANE_ID" "activity_state" "running"       45
+wait_for_agtmux_state "$SOCKET" "$PANE_ID" "provider"       "$PROVIDER_A"    60
+wait_for_agtmux_state "$SOCKET" "$PANE_ID" "presence"       "managed"       60
 wait_for_agtmux_state "$SOCKET" "$PANE_ID" "evidence_mode"  "deterministic" 30
 
 pass "Phase 1: $PROVIDER_A running (deterministic)"
@@ -63,10 +66,10 @@ unset -f launch_provider wait_until_provider_running wait_until_provider_idle 2>
 
 source "$SCRIPT_DIR/../providers/${PROVIDER_B}/adapter.sh"
 log "Phase 2: launching $PROVIDER_B in same pane"
-launch_provider "$PANE_ID" "$WORKDIR" "Step 1: use bash to run 'sleep 15'. Step 2: use bash to count lines in /etc/hosts. Step 3: use bash to count lines in /etc/shells. Write all results to phase2.txt"
+launch_provider "$PANE_ID" "$WORKDIR" "$PHASE2_TASK"
 
-wait_until_provider_running "$PANE_ID" 10 || log "WARN: provider_b running check timed out"
 wait_for_agtmux_state "$SOCKET" "$PANE_ID" "activity_state" "running"       60
+wait_for_agtmux_state "$SOCKET" "$PANE_ID" "provider"       "$PROVIDER_B"    60
 wait_for_agtmux_state "$SOCKET" "$PANE_ID" "evidence_mode"  "deterministic" 30
 
 pass "Phase 3: $PROVIDER_B running (provider switched in same pane, deterministic)"

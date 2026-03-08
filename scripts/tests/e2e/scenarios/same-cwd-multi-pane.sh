@@ -2,7 +2,7 @@
 # scenarios/same-cwd-multi-pane.sh — T-124 regression: two panes sharing the same CWD
 #
 # PROVIDER (env): codex (default; this scenario targets Codex thread-to-pane binding)
-# Verifies: Both panes managed even when they share the same CWD.
+# Verifies: Both panes keep the correct provider/state even when they share the same CWD.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../harness/common.sh"
@@ -18,6 +18,9 @@ SOCKET="/tmp/agtmux-e2e-samecwd-${PROVIDER}-$$/agtmuxd.sock"
 SHARED_CWD="/tmp/e2e-samecwd-$$"
 
 echo "=== same-cwd-multi-pane.sh (PROVIDER=${PROVIDER}) [T-124 regression] ==="
+
+TASK1="Run exactly one bash command and do not run any additional commands. Wait 30 seconds by using sleep 30. bash -lc 'sleep 30; printf \"wait_result=samecwd1\\n\"'. Do not simulate, infer, or guess. Output only one non-empty line. Required output format: wait_result=samecwd1"
+TASK2="Run exactly one bash command and do not run any additional commands. Wait 30 seconds by using sleep 30. bash -lc 'sleep 30; printf \"wait_result=samecwd2\\n\"'. Do not simulate, infer, or guess. Output only one non-empty line. Required output format: wait_result=samecwd2"
 
 # ── Setup ──────────────────────────────────────────────────────────────────
 
@@ -44,24 +47,22 @@ sleep 1
 # ── Scenario: Two panes, SAME CWD, both Running ───────────────────────────
 
 log "launching $PROVIDER in pane1=$PANE1 (shared_cwd=$SHARED_CWD)"
-launch_provider "$PANE1" "$SHARED_CWD" "Step 1: use bash to run 'sleep 15'. Step 2: use bash to count lines in /etc/hosts. Write both results to result1.txt"
+launch_provider "$PANE1" "$SHARED_CWD" "$TASK1"
 sleep 2
 
 log "launching $PROVIDER in pane2=$PANE2 (same shared_cwd=$SHARED_CWD)"
-launch_provider "$PANE2" "$SHARED_CWD" "Step 1: use bash to run 'sleep 15'. Step 2: use bash to count lines in /etc/hosts. Write both results to result2.txt"
+launch_provider "$PANE2" "$SHARED_CWD" "$TASK2"
 
-# Provider-side
-wait_until_provider_running "$PANE1" 10 || log "WARN: pane1 provider-side running check timed out"
-wait_until_provider_running "$PANE2" 10 || log "WARN: pane2 provider-side running check timed out"
-
-# agtmux-side: BOTH panes must be managed (T-124 regression)
+# agtmux-side oracle: observe running before short tasks complete.
+wait_for_agtmux_state "$SOCKET" "$PANE1" "activity_state" "running" 45
+wait_for_agtmux_state "$SOCKET" "$PANE2" "activity_state" "running" 45
+wait_for_agtmux_state "$SOCKET" "$PANE1" "provider" "codex" 60
+wait_for_agtmux_state "$SOCKET" "$PANE2" "provider" "codex" 60
 wait_for_agtmux_state "$SOCKET" "$PANE1" "presence" "managed" 60
 wait_for_agtmux_state "$SOCKET" "$PANE2" "presence" "managed" 60
 
 pass "Scenario 1 (T-124 regression): Both panes managed even with shared CWD"
 
-wait_for_agtmux_state "$SOCKET" "$PANE1" "activity_state" "running"       45
-wait_for_agtmux_state "$SOCKET" "$PANE2" "activity_state" "running"       45
 wait_for_agtmux_state "$SOCKET" "$PANE1" "evidence_mode"  "deterministic" 30
 wait_for_agtmux_state "$SOCKET" "$PANE2" "evidence_mode"  "deterministic" 30
 

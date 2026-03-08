@@ -267,6 +267,7 @@ Phase 7 (Distribution) と独立して実施可能。
     - docs-first handover exists for agtmux-term
     - online/e2e source tests remain the producer-side source of truth
     - mirrored agtmux-term canaries use daemon payload truth as their primary oracle
+  - Handover doc: `docs/85_reviews/RP-20260308-agtmux-term-semantic-truth-handover.md`
   - blocked_by: T-XTERM-A3
 
 ### Phase 9 — Waiting State Detection Improvements

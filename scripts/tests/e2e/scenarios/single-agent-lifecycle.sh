@@ -2,7 +2,7 @@
 # scenarios/single-agent-lifecycle.sh — Running → completed lifecycle for a single agent
 #
 # PROVIDER (env): claude | codex  (default: claude)
-# Verifies: managed presence, Running detection, evidence_mode, Idle after completion.
+# Verifies: provider, managed presence, Running detection, evidence_mode, completion state.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../harness/common.sh"
@@ -18,6 +18,8 @@ SOCKET="/tmp/agtmux-e2e-${PROVIDER}-$$/agtmuxd.sock"
 WORKDIR="/tmp/e2e-workdir-$$"
 
 echo "=== single-agent-lifecycle.sh (PROVIDER=${PROVIDER}) ==="
+
+TASK="Run exactly one bash command and do not run any additional commands. Wait 30 seconds by using sleep 30. bash -lc 'sleep 30; printf \"wait_result=idle\\n\"'. Do not simulate, infer, or guess. Output only one non-empty line. Required output format: wait_result=idle"
 
 # ── Setup ──────────────────────────────────────────────────────────────────
 
@@ -41,14 +43,12 @@ sleep 1
 # ── Scenario: launch → Running → Idle ─────────────────────────────────────
 
 log "launching $PROVIDER in pane $PANE_ID (workdir=$WORKDIR)"
-launch_provider "$PANE_ID" "$WORKDIR"
+launch_provider "$PANE_ID" "$WORKDIR" "$TASK"
 
-# Provider-side: wait until provider has started outputting (adapter-specific)
-wait_until_provider_running "$PANE_ID" 10 || log "WARN: provider-side running check timed out (non-fatal)"
-
-# agtmux-side: presence → running → evidence_mode
-wait_for_agtmux_state "$SOCKET" "$PANE_ID" "presence"       "managed"       60
+# agtmux-side oracle: capture the running edge before short tasks complete.
 wait_for_agtmux_state "$SOCKET" "$PANE_ID" "activity_state" "running"       45
+wait_for_agtmux_state "$SOCKET" "$PANE_ID" "provider"       "$PROVIDER"      60
+wait_for_agtmux_state "$SOCKET" "$PANE_ID" "presence"       "managed"       60
 wait_for_agtmux_state "$SOCKET" "$PANE_ID" "evidence_mode"  "deterministic" 30
 
 pass "Scenario 1: $PROVIDER detected as running (deterministic)"

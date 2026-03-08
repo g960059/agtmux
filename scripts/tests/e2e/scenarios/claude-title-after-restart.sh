@@ -61,6 +61,7 @@ launch_provider "$PANE_ID" "$WORKDIR" "$TASK"
 
 wait_until_provider_running "$PANE_ID" 10 || log "WARN: provider-side running check timed out (non-fatal)"
 
+wait_for_agtmux_state "$SOCKET" "$PANE_ID" "provider"      "claude"        60
 wait_for_agtmux_state "$SOCKET" "$PANE_ID" "presence"      "managed"       60
 wait_for_agtmux_state "$SOCKET" "$PANE_ID" "evidence_mode" "deterministic" 30
 
@@ -127,6 +128,7 @@ sleep 1
 
 wait_for_agtmux_state "$SOCKET" "$PANE_ID" "presence"      "managed"       60
 wait_for_agtmux_state "$SOCKET" "$PANE_ID" "evidence_mode" "deterministic" 30
+wait_for_agtmux_state "$SOCKET" "$PANE_ID" "provider"      "claude"        30
 
 pass "Phase 5: pane re-discovered as managed with fresh daemon"
 

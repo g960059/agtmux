@@ -2,7 +2,7 @@
 # scenarios/multi-agent-same-session.sh — Two agents in the same tmux session, different CWDs
 #
 # PROVIDER (env): claude | codex  (default: claude)
-# Verifies: Both panes managed independently in the same session.
+# Verifies: Both panes keep correct provider/state independently in the same session.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../harness/common.sh"
@@ -19,6 +19,9 @@ WORKDIR1="/tmp/e2e-workdir1-$$"
 WORKDIR2="/tmp/e2e-workdir2-$$"
 
 echo "=== multi-agent-same-session.sh (PROVIDER=${PROVIDER}) ==="
+
+TASK1="Run exactly one bash command and do not run any additional commands. Wait 30 seconds by using sleep 30. bash -lc 'sleep 30; printf \"wait_result=pane1\\n\"'. Do not simulate, infer, or guess. Output only one non-empty line. Required output format: wait_result=pane1"
+TASK2="Run exactly one bash command and do not run any additional commands. Wait 30 seconds by using sleep 30. bash -lc 'sleep 30; printf \"wait_result=pane2\\n\"'. Do not simulate, infer, or guess. Output only one non-empty line. Required output format: wait_result=pane2"
 
 # ── Setup ──────────────────────────────────────────────────────────────────
 
@@ -45,22 +48,21 @@ sleep 1
 # ── Scenario: launch two agents → both Running ────────────────────────────
 
 log "launching $PROVIDER in pane1=$PANE1 (workdir1=$WORKDIR1)"
-launch_provider "$PANE1" "$WORKDIR1"
-sleep 2  # stagger slightly
+launch_provider "$PANE1" "$WORKDIR1" "$TASK1"
+
+# Observe pane1 first so short-lived runs do not complete before pane2 starts.
+wait_for_agtmux_state "$SOCKET" "$PANE1" "activity_state" "running"       45
+wait_for_agtmux_state "$SOCKET" "$PANE1" "provider"       "$PROVIDER"      60
+wait_for_agtmux_state "$SOCKET" "$PANE1" "presence"       "managed"       60
+wait_for_agtmux_state "$SOCKET" "$PANE1" "evidence_mode"  "deterministic" 30
 
 log "launching $PROVIDER in pane2=$PANE2 (workdir2=$WORKDIR2)"
-launch_provider "$PANE2" "$WORKDIR2"
+launch_provider "$PANE2" "$WORKDIR2" "$TASK2"
 
-# Provider-side signals (best-effort)
-wait_until_provider_running "$PANE1" 10 || log "WARN: pane1 provider-side running check timed out"
-wait_until_provider_running "$PANE2" 10 || log "WARN: pane2 provider-side running check timed out"
-
-# agtmux-side: both panes managed, running, and deterministic
-wait_for_agtmux_state "$SOCKET" "$PANE1" "presence"       "managed"       60
-wait_for_agtmux_state "$SOCKET" "$PANE2" "presence"       "managed"       60
-wait_for_agtmux_state "$SOCKET" "$PANE1" "activity_state" "running"       45
+# agtmux-side oracle: ensure pane2 also reaches deterministic running.
 wait_for_agtmux_state "$SOCKET" "$PANE2" "activity_state" "running"       45
-wait_for_agtmux_state "$SOCKET" "$PANE1" "evidence_mode"  "deterministic" 30
+wait_for_agtmux_state "$SOCKET" "$PANE2" "provider"       "$PROVIDER"      60
+wait_for_agtmux_state "$SOCKET" "$PANE2" "presence"       "managed"       60
 wait_for_agtmux_state "$SOCKET" "$PANE2" "evidence_mode"  "deterministic" 30
 
 pass "Scenario 1: Both $PROVIDER agents managed independently in same session (deterministic)"
