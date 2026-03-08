@@ -1454,7 +1454,10 @@ mod tests {
             "session_name required"
         );
         assert!(managed.get("window_id").is_some(), "window_id required");
-        assert!(!managed["window_id"].is_null(), "window_id must not be null");
+        assert!(
+            !managed["window_id"].is_null(),
+            "window_id must not be null"
+        );
         assert!(
             managed.get("pane_instance_id").is_some() && managed["pane_instance_id"].is_object(),
             "pane_instance_id required and must be object"
@@ -1487,7 +1490,9 @@ mod tests {
             "managed pane with unresolved exact location must be excluded from sync-v2 bootstrap"
         );
         assert!(
-            panes.iter().all(|pane| !pane["session_name"].is_null() && !pane["window_id"].is_null()),
+            panes
+                .iter()
+                .all(|pane| !pane["session_name"].is_null() && !pane["window_id"].is_null()),
             "sync-v2 bootstrap must not emit null exact-location fields"
         );
     }
