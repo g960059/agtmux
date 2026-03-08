@@ -141,6 +141,11 @@
 - FR-060 `[Post-MVP]`: OSC Tap source（C-017）は tmux `pipe-pane` 経由で PTY バイトを取得し、Claude Code が emit する `OSC 9;4` (progress bar) シーケンスを semi-deterministic source として提供する。source rank は `hooks (0) > jsonl (1) > osc_tap (2) > poller (3)`。capability-gated（tmux 3.3+、pipe-pane 先占確認）。OSC 不在は negative evidence として使用しない。**OSC 133 は Claude Code が現時点で emit しないため採用しない**（GitHub issue #26235: open feature request）。
 - FR-061 `[Post-MVP]`: agtmux-term V2 A1 向け UI 同期 API は `ui.bootstrap.v2` と `ui.changes.v2` を提供し、bootstrap は `epoch` と `snapshot_seq` を含む完全スナップショット、changes は `epoch + seq` 単位の順序付き差分列を返す。`seq` は daemon projection change log の単調増加値を基準とし、epoch をまたいだ差分混在を禁止する。
 - FR-062 `[Post-MVP]`: `ui.changes.v2` は client cursor の epoch 不一致・trim 済み seq・不正 cursor を検出した場合、暗黙 rewind や部分 replay を行わず `resync_required` を明示返却しなければならない。client はその応答を受けて `ui.bootstrap.v2` を再取得する。
+- FR-063 `[Post-MVP]`: agtmux-term V2 A2 向け observability API として additive JSON-RPC `ui.health.v1` を提供し、`runtime` / `replay` / `overlay` / `focus` の health snapshot を返さなければならない。health は pane inventory の existence semantics を変更せず annotation のみを担う。
+- FR-064 `[Post-MVP]`: sync-v2 replay の ack compaction は `ui.changes.v2` client cursor を implicit ack として扱ってよいが、compaction 対象は sync-v2 専用 replay retention に限定し、`state_changed` / `summary_changed` が参照する legacy change log を破壊してはならない。compaction により continuity が失われる client には silent rewind ではなく explicit `resync_required` を返す。
+- FR-065 `[Post-MVP]`: `ui.bootstrap.v2.panes[]` は agtmux-term strict consumer 向けの exact-location snapshot とし、required fields `pane_id`, `session_name`, `session_key`, `window_id`, `pane_instance_id` を必須とする。`window_index`, `window_name`, `session_group`, `presence`, `evidence_mode`, `activity_state`, `provider`, `conversation_title`, `current_path`, `git_branch`, `current_cmd`, `updated_at`, `age_secs` は additive adjunct fields としてのみ許可する。
+- FR-066 `[Post-MVP]`: `ui.bootstrap.v2` / `ui.changes.v2` の sync-v2 payload は legacy inventory alias を含んではならない。特に `session_id` のような legacy identity field の混入は protocol drift とみなし、consumer は fail-closed で reject してよい。
+- FR-067 `[Post-MVP]`: real-CLI semantic live E2E (`provider`, `presence`, `activity_state`, `conversation_title`, no-bleed) の source of truth は agtmux repo が持つ。agtmux-term repo は daemon payload truth を consumer/render path へ運ぶ thin canary を持つが、producer-side semantic suite の代替にはならない。
 
 ## Non-functional Requirements
 - Phase gate:
@@ -158,6 +163,8 @@
   - `[Post-MVP]` `invalid_cursor` 連鎖時でも rewind/full-resync のどちらかで最終的に再同期可能であること
   - `[Post-MVP]` snapshot/restore 手順を runbook 化し、canary 前 dry-run 証跡を残すこと
   - `[Post-MVP]` supervisor hold-down 中でも他 healthy source の監視は継続すること
+  - `[Post-MVP]` sync-v2 wire contract drift は producer-side regression tests で検出できなければならない。minimum gate は `ui.bootstrap.v2` / `ui.changes.v2` に required exact fields が揃い、legacy identity alias が absent であること、および strict agtmux-term consumer で live smoke 受け入れできることである
+  - `[Post-MVP]` cross-repo validation は二重実装ではなく責務分離で行う。agtmux は semantic truth を、agtmux-term は exact-row consumer truth を検証する。
 - NFR-Security:
   - ローカル UDS 前提、明示的に許可された bridge/source のみ受理
   - `[Post-MVP]` UDS socket path は runtime 専用ディレクトリ（`0700`）配下、socket file は `0600` を必須とする

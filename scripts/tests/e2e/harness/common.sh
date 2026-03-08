@@ -93,6 +93,30 @@ wait_for_agtmux_state() {
     return 1
 }
 
+# wait_for_agtmux_state_any SOCKET PANE_ID FIELD "EXPECTED1 EXPECTED2 ..." [MAX_WAIT_S]
+# Polls list-panes --json every second until FIELD matches any expected value.
+wait_for_agtmux_state_any() {
+    local socket="$1" pane_id="$2" field="$3" expected_values="$4"
+    local max_wait="${5:-60}"
+    local elapsed=0 actual="" expected=""
+
+    while [ "$elapsed" -lt "$max_wait" ]; do
+        actual=$(jq_get "$socket" "$pane_id" "$field")
+        for expected in $expected_values; do
+            if [ "$actual" = "$expected" ]; then
+                log "wait_for_agtmux_state_any OK: pane=$pane_id $field='$actual' (${elapsed}s)"
+                return 0
+            fi
+        done
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+
+    echo "[FAIL] timeout(${max_wait}s): pane=$pane_id field=$field expected_any='$expected_values' actual='$actual'" >&2
+    "$AGTMUX_BIN" --socket-path "$socket" json 2>/dev/null | jq '.panes' >&2 || true
+    return 1
+}
+
 # wait_for_socket SOCKET [MAX_WAIT_S]
 # Waits until the UDS socket file exists (daemon ready).
 wait_for_socket() {

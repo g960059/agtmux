@@ -132,7 +132,7 @@ impl CodexJsonlSourceState {
                 .pane_fsm
                 .entry(discovery.pane_id.clone())
                 .or_insert_with(|| PaneFsmState {
-                    fsm: CodexSessionState::Init,
+                    fsm: watcher.historical_state(),
                     session_key: discovery.session_key.clone(),
                     pane_generation: discovery.pane_generation,
                     pane_birth_ts: discovery.pane_birth_ts,
@@ -145,6 +145,7 @@ impl CodexJsonlSourceState {
             let mut emitted_real_event = false;
 
             for line_str in &new_lines {
+                watcher.observe_prompt_line(line_str);
                 let Ok(codex_event) = serde_json::from_str::<CodexJsonlEvent>(line_str) else {
                     continue;
                 };
@@ -173,16 +174,29 @@ impl CodexJsonlSourceState {
 
             // Bootstrap or heartbeat
             if !watcher.is_bootstrapped() {
-                watcher.mark_bootstrapped();
                 if !emitted_real_event {
-                    events.push(translate::idle_heartbeat(
+                    if let Some(event) = translate::bootstrap_event(
+                        watcher.historical_state(),
                         &discovery.session_key,
                         &discovery.pane_id,
                         discovery.pane_generation,
                         discovery.pane_birth_ts,
                         now,
-                    ));
+                        watcher.last_event_ts(),
+                    ) {
+                        events.push(event);
+                    } else {
+                        events.push(translate::idle_heartbeat(
+                            &discovery.session_key,
+                            &discovery.pane_id,
+                            discovery.pane_generation,
+                            discovery.pane_birth_ts,
+                            now,
+                        ));
+                    }
                 }
+                watcher.mark_bootstrapped();
+                fsm_state.bootstrapped = true;
             } else if !emitted_real_event {
                 events.push(translate::idle_heartbeat(
                     &discovery.session_key,
@@ -369,6 +383,78 @@ mod tests {
         assert!(
             !approval_events.is_empty(),
             "entered_review_mode should produce activity.waiting_approval"
+        );
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn poll_files_bootstraps_from_historical_running_state() {
+        let tmp = tmp_dir("poll-bootstrap-running");
+        let path = tmp.join("session.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                r#"{"timestamp":"2026-03-06T04:48:31.769Z","type":"session_meta","payload":{"type":"session_meta","cwd":"/tmp/test"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-03-06T04:48:31.770Z","type":"event_msg","payload":{"type":"task_started"}}"#,
+                "\n"
+            ),
+        )
+        .expect("test");
+
+        let discoveries = vec![make_discovery("%30", "session", path.clone())];
+        let mut watchers = HashMap::new();
+        watchers.insert("%30".to_owned(), CodexSessionFileWatcher::new(path));
+
+        let mut source = CodexJsonlSourceState::new();
+        let events = source.poll_files(&mut watchers, &discoveries, now());
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "activity.running");
+        assert!(!events[0].is_heartbeat);
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn poll_files_resumes_from_historical_state_before_new_delta() {
+        let tmp = tmp_dir("poll-bootstrap-delta");
+        let path = tmp.join("session.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                r#"{"timestamp":"2026-03-06T04:48:31.769Z","type":"event_msg","payload":{"type":"task_started"}}"#,
+                "\n"
+            ),
+        )
+        .expect("test");
+
+        let discoveries = vec![make_discovery("%31", "session", path.clone())];
+        let mut watchers = HashMap::new();
+        watchers.insert("%31".to_owned(), CodexSessionFileWatcher::new(path.clone()));
+
+        let mut source = CodexJsonlSourceState::new();
+        let first = source.poll_files(&mut watchers, &discoveries, now());
+        assert_eq!(first[0].event_type, "activity.running");
+
+        let mut f = fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("test");
+        writeln!(
+            f,
+            r#"{{"timestamp":"2026-03-06T04:48:49.314Z","type":"event_msg","payload":{{"type":"task_complete"}}}}"#
+        )
+        .expect("test");
+        drop(f);
+
+        let second = source.poll_files(&mut watchers, &discoveries, now());
+        assert!(
+            second
+                .iter()
+                .any(|e| e.event_type == "activity.waiting_input" && !e.is_heartbeat),
+            "task_complete after historical running state should still transition"
         );
 
         let _ = fs::remove_dir_all(&tmp);

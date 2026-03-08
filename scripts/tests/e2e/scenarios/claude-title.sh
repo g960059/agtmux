@@ -104,7 +104,7 @@ pass "Phase 3: conversation_title='$TITLE2' (back-to-back injection, last wins)"
 # ── Phase 4: Wait for idle + verify title persists ────────────────────────
 
 wait_until_provider_idle "$PANE_ID" 90 || log "WARN: provider-side idle check timed out (non-fatal)"
-wait_for_agtmux_state "$SOCKET" "$PANE_ID" "activity_state" "idle" 90
+wait_for_agtmux_state_any "$SOCKET" "$PANE_ID" "activity_state" "waiting_input idle" 90
 
 actual_title=$(jq_get "$SOCKET" "$PANE_ID" "conversation_title")
 assert_eq "Phase 4: conversation_title persists after idle" "$TITLE2" "$actual_title"

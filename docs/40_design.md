@@ -765,10 +765,15 @@ poller (rank 3)   heuristic — capture-based fallback
   - full snapshot を返す。
   - required fields: `epoch`, `snapshot_seq`, `panes`, `sessions`, `generated_at`, `replay_cursor`
   - `snapshot_seq` は bootstrap 時点で UI に可視な最新 change seq を指す。
+  - `panes[]` は sync-v2 専用 DTO とし、legacy `json` / `ls` inventory row の再利用を禁止する。
+  - required pane identity fields: `pane_id`, `session_name`, `session_key`, `window_id`, `pane_instance_id`
+  - allowed adjunct fields: `window_index`, `window_name`, `session_group`, `presence`, `evidence_mode`, `activity_state`, `provider`, `conversation_title`, `current_path`, `git_branch`, `current_cmd`, `updated_at`, `age_secs`
+  - forbidden fields: legacy identity aliases (`session_id` など exact identity を別名で表すもの)
 - `ui.changes.v2`
   - request: `cursor { epoch, seq }`, `limit`
   - response: `epoch`, `changes`, `from_seq`, `to_seq`, `next_cursor`
   - `changes` は projection log の seq 昇順で返す。`next_cursor` は `to_seq` の直後を指す。
+  - `changes[].pane` / `changes[].session` は projection state DTO をそのまま serialize し、field naming は sync-v2 contract 側で固定する。legacy inventory alias を追加してはならない。
 - Resync contract
   - cursor epoch mismatch、seq gap、trim 済み cursor、unknown cursor は `resync_required` を返す。
   - daemon は silent rewind / best-effort partial replay を行わない。
@@ -776,6 +781,35 @@ poller (rank 3)   heuristic — capture-based fallback
 - Epoch/seq ownership
   - daemon projection が change log continuity を失った時だけ epoch を bump する。
   - change log compaction は同一 epoch 内で seq continuity を壊さない範囲に限定し、破る場合は explicit resync に切り替える。
+- Producer boundary
+  - human-facing inventory JSON (`agtmux json`, `agtmux ls`) と sync-v2 wire contract は builder を分離する。
+  - sync-v2 wire は strict consumer を前提にし、legacy compatibility shim で payload を膨らませない。
+  - producer-side real-CLI live E2E は daemon payload truth を証明する責務を持つ。
+  - agtmux-term 側には同じ scenario を thin canary として hand back してよいが、pass/fail oracle は「payload truth が exact visible row に届くか」に限定し、producer-side semantic suite の代替にしてはならない。
 - Out of scope
   - ack compaction / true streaming / delivery retry は A2 以降。
   - cursor owner を term 側 XPC service に固定する責務は agtmux-term 側で持つ。daemon 側は epoch/seq/resync の wire contract を固定する。
+
+### A10) Cross-repo `ui.health.v1` + replay ack compaction
+- Scope: agtmux-term V2 Phase A2 向けの daemon observability 契約。inventory-first / metadata overlay / sync-v2 wire contract は維持したまま、replay / overlay / focus / runtime の状態を additive に可視化する。
+- `ui.health.v1`
+  - response fields: `generated_at`, `runtime`, `replay`, `overlay`, `focus`
+  - status vocabulary は `ok | degraded | unavailable`
+  - `runtime`
+    - daemon 起動後の poll/runtime 成否を反映する
+    - `detail` には socket / inventory / probe failure の具体的な文言を入れてよい
+  - `replay`
+    - fields: `current_epoch`, `cursor_seq`, `head_seq`, `lag`, `last_resync_reason`, `last_resync_at`, `detail`
+    - `cursor_seq` は sync-v2 client が最後に ack した seq を指す
+    - `lag = head_seq - cursor_seq`
+  - `overlay`
+    - metadata stale / last success / failure detail を反映する
+  - `focus`
+    - fields: `focused_pane_id`, `mismatch_count`, `last_sync_at`, `detail`
+    - `mismatch_count` は tmux inventory 内で active-pane invariant が壊れている window 数を指す
+- Replay ack compaction
+  - `ui.bootstrap.v2` の snapshot cursor と `ui.changes.v2` request cursor は implicit ack として扱ってよい
+  - daemon は sync-v2 専用 replay log を別保持し、acked seq まで compact してよい
+  - `state_changed` / `summary_changed` の legacy change log は別保持し、A2 compaction の影響を受けない
+  - compact 済み seq へ戻る request は best-effort rewind せず `trimmed_cursor` を返す
+  - last emitted `resync_required` reason / timestamp は `ui.health.v1.replay` から観測できる

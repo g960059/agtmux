@@ -38,6 +38,38 @@ pub fn translate_state_change(
     })
 }
 
+/// Build a one-shot bootstrap event from the historical FSM state discovered at watcher
+/// creation time.
+pub fn bootstrap_event(
+    state: CodexSessionState,
+    session_key: &str,
+    pane_id: &str,
+    pane_generation: Option<u64>,
+    pane_birth_ts: Option<DateTime<Utc>>,
+    observed_at: DateTime<Utc>,
+    actual_activity_at: Option<DateTime<Utc>>,
+) -> Option<SourceEventV2> {
+    let event_type = state_to_event_type(state)?;
+
+    Some(SourceEventV2 {
+        event_id: format!("codex-jsonl-boot-{pane_id}"),
+        provider: Provider::Codex,
+        source_kind: SourceKind::CodexJsonl,
+        tier: EvidenceTier::Deterministic,
+        observed_at,
+        session_key: session_key.to_owned(),
+        pane_id: Some(pane_id.to_owned()),
+        pane_generation,
+        pane_birth_ts,
+        source_event_id: None,
+        event_type: event_type.to_owned(),
+        payload: serde_json::json!({"fsm_state": format!("{state:?}"), "bootstrap": true}),
+        confidence: 1.0,
+        is_heartbeat: false,
+        actual_activity_at,
+    })
+}
+
 /// Build a deterministic idle heartbeat for a discovered Codex JSONL session.
 ///
 /// Emitted when the JSONL file exists but no new state transitions occurred.
@@ -130,6 +162,22 @@ mod tests {
         );
         assert!(ev.is_some());
         assert_eq!(ev.expect("event").event_type, "activity.running");
+    }
+
+    #[test]
+    fn bootstrap_waiting_input_produces_real_event() {
+        let ev = bootstrap_event(
+            CodexSessionState::WaitingInput,
+            "sess-1",
+            "%3",
+            None,
+            None,
+            now(),
+            None,
+        );
+        let ev = ev.expect("event");
+        assert_eq!(ev.event_type, "activity.waiting_input");
+        assert!(!ev.is_heartbeat);
     }
 
     #[test]

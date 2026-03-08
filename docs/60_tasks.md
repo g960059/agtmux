@@ -243,6 +243,32 @@ Phase 7 (Distribution) と独立して実施可能。
 
 ## DOING
 
+### Cross-repo agtmux-term compatibility recovery
+
+- [ ] T-XTERM-A3 (P0) Cross-repo: sync-v2 exact-identity handback
+  - 目的: `AGTMUX_BIN=... swift run AgtmuxTerm` で `Local daemon incompatible` が出ない bootstrap/changes contract に戻し、strict consumer と live daemon を再接続する
+  - Root cause: `crates/agtmux-runtime/src/server.rs` の `build_ui_bootstrap_v2()` が legacy `build_pane_list()` を再利用して `ui.bootstrap.v2.panes[]` に `session_id` を混入させている
+  - Phase 1: sync-v2 専用 DTO / builder を追加し、`pane_id`, `session_name`, `session_key`, `window_id`, `pane_instance_id` と許可済み adjunct fields のみを emit する
+  - Phase 2: producer-side regression tests を追加し、`ui.bootstrap.v2` / `ui.changes.v2` に legacy identity alias が混入したら fail-closed で落ちるようにする
+  - Phase 3: cross-repo live smoke (`AGTMUX_BIN=/Users/virtualmachine/ghq/github.com/g960059/agtmux/target/debug/agtmux swift run AgtmuxTerm`) で `legacy identity field` / `Local daemon incompatible` が消えることを確認する
+  - Gate:
+    - failing regression test を先に追加してから builder split を行うこと
+    - `just verify` PASS
+    - strict agtmux-term consumer で live smoke PASS
+  - Scratch handover: `/tmp/agtmux-v2-a3-exact-identity-handover-20260307.md`
+
+- [ ] T-XTERM-A4 (P1) Cross-repo: semantic truth handback for agtmux-term live canaries
+  - 目的: real-CLI semantic source-of-truth suite を agtmux repo 側で維持しつつ、agtmux-term が薄い daemon-to-sidebar canary を追加できるよう prompt/preflight/oracle 境界を固定する
+  - Deliverables:
+    - daemon-owned scenario matrix for `provider`, `presence`, `running`, completion state, `waiting_input`, `waiting_approval`, conversation title, and no-bleed
+    - provider-specific live prompt guidance for Claude Sonnet 4.6 and Codex 5.4 medium
+    - explicit statement that agtmux-term mirrors only boundary assertions, not the full producer semantic matrix
+  - Gate:
+    - docs-first handover exists for agtmux-term
+    - online/e2e source tests remain the producer-side source of truth
+    - mirrored agtmux-term canaries use daemon payload truth as their primary oracle
+  - blocked_by: T-XTERM-A3
+
 ### Phase 9 — Waiting State Detection Improvements
 
 - [ ] T-codex03a (P3) test-claude-approval.sh Phase 3 に明示的 sleep 追加 — follow-up from RP review
@@ -503,3 +529,15 @@ Phase 7 (Distribution) と独立して実施可能。
     - A2（ack compaction / true stream / observability）を前提にしない
   - Scratch handover: `/tmp/agtmux-v2-daemon-a1-handover-20260305.md`
   - blocked_by: T-XTERM-A0
+- [ ] T-XTERM-A2 (P0) Cross-repo: agtmux-term V2 A2 observability + replay ack compaction
+  - 目的: replay / overlay / focus / runtime の health を additive に surfacing しつつ、sync-v2 replay を implicit ack で compact できるようにする
+  - Evidence: `crates/agtmux-daemon-v5/src/projection.rs` に sync-v2 専用 replay log + ack compaction + replay observability snapshot を追加し、`crates/agtmux-runtime/src/poll_loop.rs` に runtime/focus health state を追加、`crates/agtmux-runtime/src/server.rs` に `ui.health.v1` を追加。`cargo test -p agtmux-daemon-v5` 153 passed、`cargo test -p agtmux` 165 passed
+  - Deliverables:
+    - sync-v2 専用 replay retention と implicit ack compaction
+    - additive `ui.health.v1` (`runtime`, `replay`, `overlay`, `focus`)
+    - legacy `state_changed` / `summary_changed` を壊さない change-log 分離
+  - Remaining acceptance:
+    - agtmux-term A1 consumer が `ui.bootstrap.v2` / `ui.changes.v2` で unchanged pass することを cross-repo で確認（T-XTERM-A3 で compatibility handback 回収後）
+    - agtmux-term 側 `ui.health.v1` consumer と接続して UI surfacing を確認
+  - Scratch handover: `/tmp/agtmux-v2-a2-cross-repo-handover-20260306.md`
+  - blocked_by: T-XTERM-A1, T-XTERM-A3

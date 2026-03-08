@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scenarios/single-agent-lifecycle.sh — Running → Idle lifecycle for a single agent
+# scenarios/single-agent-lifecycle.sh — Running → completed lifecycle for a single agent
 #
 # PROVIDER (env): claude | codex  (default: claude)
 # Verifies: managed presence, Running detection, evidence_mode, Idle after completion.
@@ -56,9 +56,9 @@ pass "Scenario 1: $PROVIDER detected as running (deterministic)"
 # Provider-side: wait until provider has finished (adapter-specific)
 wait_until_provider_idle "$PANE_ID" 30 || log "WARN: provider-side idle check timed out (non-fatal)"
 
-# agtmux-side: idle after completion
-wait_for_agtmux_state "$SOCKET" "$PANE_ID" "activity_state" "idle" 60
+# agtmux-side: provider finished and is no longer running
+wait_for_agtmux_state_any "$SOCKET" "$PANE_ID" "activity_state" "waiting_input idle" 60
 
-pass "Scenario 2: $PROVIDER detected as idle after completion"
+pass "Scenario 2: $PROVIDER detected as completed after completion"
 
 echo "=== single-agent-lifecycle.sh PASS (PROVIDER=${PROVIDER}) ==="

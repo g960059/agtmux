@@ -75,10 +75,23 @@ pub struct DaemonState {
     pub metadata_failure_streak: u32,
     /// Next allowed metadata refresh time under backoff.
     pub metadata_backoff_until: Option<chrono::DateTime<Utc>>,
+    /// Runtime start timestamp for daemon health observability.
+    pub runtime_started_at: chrono::DateTime<Utc>,
+    /// Last successful poll-loop tick completion.
+    pub runtime_last_ok_at: Option<chrono::DateTime<Utc>>,
+    /// Last runtime failure detail for inventory/probe path.
+    pub runtime_last_error: Option<String>,
+    /// Best current focus candidate derived from tmux active panes.
+    pub focused_pane_id: Option<String>,
+    /// Number of tmux windows whose active-pane invariant is currently broken.
+    pub focus_mismatch_count: u64,
+    /// Last time focus reflection was internally consistent.
+    pub focus_last_sync_at: Option<chrono::DateTime<Utc>>,
 }
 
 impl DaemonState {
     pub fn new() -> Self {
+        let now = Utc::now();
         // Generate a runtime nonce: PID + monotonic nanoseconds
         let nonce = format!(
             "{}-{}",
@@ -139,6 +152,12 @@ impl DaemonState {
             metadata_last_error: None,
             metadata_failure_streak: 0,
             metadata_backoff_until: None,
+            runtime_started_at: now,
+            runtime_last_ok_at: None,
+            runtime_last_error: None,
+            focused_pane_id: None,
+            focus_mismatch_count: 0,
+            focus_last_sync_at: None,
         }
     }
 }
@@ -268,6 +287,56 @@ fn metadata_backoff_delay_ms(streak: u32) -> i64 {
     delay.min(MAX_MS)
 }
 
+fn record_runtime_error(st: &mut DaemonState, detail: impl Into<String>) {
+    st.runtime_last_error = Some(detail.into());
+}
+
+fn record_runtime_ok(st: &mut DaemonState, now: chrono::DateTime<Utc>) {
+    st.runtime_last_ok_at = Some(now);
+    st.runtime_last_error = None;
+}
+
+fn update_focus_state(st: &mut DaemonState, now: chrono::DateTime<Utc>) {
+    use std::collections::BTreeMap;
+
+    let mut active_by_window: BTreeMap<(String, String), usize> = BTreeMap::new();
+    let mut active_attached = Vec::new();
+    let mut active_any = Vec::new();
+
+    for pane in &st.last_panes {
+        let active_count = active_by_window
+            .entry((pane.session_id.clone(), pane.window_id.clone()))
+            .or_insert(0);
+        if pane.active {
+            *active_count += 1;
+            if pane.session_attached {
+                active_attached.push(pane);
+            }
+            active_any.push(pane);
+        }
+    }
+
+    active_attached.sort_by(|a, b| {
+        (&a.session_id, &a.window_id, &a.pane_id).cmp(&(&b.session_id, &b.window_id, &b.pane_id))
+    });
+    active_any.sort_by(|a, b| {
+        (&a.session_id, &a.window_id, &a.pane_id).cmp(&(&b.session_id, &b.window_id, &b.pane_id))
+    });
+
+    st.focus_mismatch_count = active_by_window
+        .values()
+        .filter(|count| **count != 1)
+        .count() as u64;
+    st.focused_pane_id = active_attached
+        .first()
+        .or_else(|| active_any.first())
+        .map(|pane| pane.pane_id.clone());
+
+    if st.focus_mismatch_count == 0 && st.focused_pane_id.is_some() {
+        st.focus_last_sync_at = Some(now);
+    }
+}
+
 async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
     executor: &Arc<R>,
     state: &Arc<Mutex<DaemonState>>,
@@ -284,14 +353,18 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
             Ok(Err(e)) => {
                 let mut st = state.lock().await;
                 st.metadata_stale = true;
-                st.metadata_last_error = Some(format!("inventory fetch failed: {e}"));
+                let detail = format!("inventory fetch failed: {e}");
+                st.metadata_last_error = Some(detail.clone());
+                record_runtime_error(&mut st, detail);
                 server::refresh_pane_cache(pane_cache, &st, now);
                 return Ok(());
             }
             Err(e) => {
                 let mut st = state.lock().await;
                 st.metadata_stale = true;
-                st.metadata_last_error = Some(format!("inventory task failed: {e}"));
+                let detail = format!("inventory task failed: {e}");
+                st.metadata_last_error = Some(detail.clone());
+                record_runtime_error(&mut st, detail);
                 server::refresh_pane_cache(pane_cache, &st, now);
                 return Ok(());
             }
@@ -305,6 +378,7 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
         let pane_ids: Vec<&str> = panes.iter().map(|p| p.pane_id.as_str()).collect();
         st.generation_tracker.update(&pane_ids, now);
         st.last_panes = panes.clone();
+        update_focus_state(&mut st, now);
         server::refresh_pane_cache(pane_cache, &st, now);
         st.generation_tracker.clone()
     };
@@ -459,6 +533,18 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
                 .codex_jsonl_source
                 .poll_files(&mut watchers, &discoveries, now);
             st.codex_jsonl_watchers = watchers;
+            let codex_titles: Vec<(String, String)> = discoveries
+                .iter()
+                .filter_map(|disc| {
+                    st.codex_jsonl_watchers
+                        .get(&disc.pane_id)
+                        .and_then(|w| w.last_first_prompt())
+                        .map(|title| (disc.session_key.clone(), title.to_string()))
+                })
+                .collect();
+            for (session_key, title) in codex_titles {
+                st.conversation_titles.entry(session_key).or_insert(title);
+            }
             if !events.is_empty() {
                 tracing::debug!("codex jsonl: {} events", events.len());
             }
@@ -873,6 +959,8 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
         st.metadata_failure_streak = 0;
         st.metadata_backoff_until = None;
     }
+
+    record_runtime_ok(&mut st, now);
 
     server::refresh_pane_cache(pane_cache, &st, now);
 

@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use serde::Serialize;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::Mutex;
@@ -12,6 +13,53 @@ use agtmux_core_v5::types::{EvidenceMode, PanePresence};
 use agtmux_daemon_v5::projection::ReplayCursor;
 
 use crate::poll_loop::DaemonState;
+
+const REPLAY_HEALTHY_LAG_WINDOW: u64 = 10;
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum UiHealthStatus {
+    Ok,
+    Degraded,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct UiComponentHealth {
+    status: UiHealthStatus,
+    detail: Option<String>,
+    last_updated_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct UiReplayHealth {
+    status: UiHealthStatus,
+    current_epoch: Option<u64>,
+    cursor_seq: Option<u64>,
+    head_seq: Option<u64>,
+    lag: Option<u64>,
+    last_resync_reason: Option<String>,
+    last_resync_at: Option<chrono::DateTime<chrono::Utc>>,
+    detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct UiFocusHealth {
+    status: UiHealthStatus,
+    focused_pane_id: Option<String>,
+    mismatch_count: Option<u64>,
+    last_sync_at: Option<chrono::DateTime<chrono::Utc>>,
+    detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct UiHealthV1 {
+    generated_at: chrono::DateTime<chrono::Utc>,
+    runtime: UiComponentHealth,
+    replay: UiReplayHealth,
+    overlay: UiComponentHealth,
+    focus: UiFocusHealth,
+}
 
 /// Cached pane snapshot shared between poll loop (writer) and UDS server (reader).
 #[derive(Debug, Clone)]
@@ -221,7 +269,9 @@ async fn handle_connection(
             serde_json::to_value(health)?
         }
         "ui.bootstrap.v2" => {
-            let st = state.lock().await;
+            let mut st = state.lock().await;
+            let replay_cursor = st.daemon.replay_cursor();
+            st.daemon.acknowledge_replay_cursor(replay_cursor);
             build_ui_bootstrap_v2(&st)
         }
         "ui.changes.v2" => {
@@ -232,8 +282,12 @@ async fn handle_connection(
                 .and_then(|n| usize::try_from(n).ok())
                 .unwrap_or(100)
                 .clamp(1, 1000);
+            let mut st = state.lock().await;
+            build_ui_changes_v2(&mut st, cursor, limit)
+        }
+        "ui.health.v1" => {
             let st = state.lock().await;
-            build_ui_changes_v2(&st, cursor, limit)
+            build_ui_health_v1(&st)
         }
         "state_changed" => {
             let params = &request["params"];
@@ -603,12 +657,66 @@ fn build_change_entry(change: &agtmux_daemon_v5::projection::StateChange) -> ser
     entry
 }
 
+/// Build sync-v2 pane list with exact-identity contract (FR-065 / FR-066).
+///
+/// Does NOT reuse `build_pane_list()` — the human-facing inventory serializer emits
+/// legacy aliases such as `session_id` that are forbidden in sync-v2 payloads.
+/// Only fields required or explicitly allowed by FR-065 are emitted here.
+fn build_sync_v2_pane_list(state: &DaemonState) -> serde_json::Value {
+    let managed_panes = state.daemon.list_panes();
+    let now = chrono::Utc::now();
+    let mut result: Vec<serde_json::Value> = Vec::new();
+
+    // Managed panes: full exact-identity payload.
+    for pane in &managed_panes {
+        let tmux_info = state
+            .last_panes
+            .iter()
+            .find(|p| p.pane_id == pane.pane_instance_id.pane_id);
+
+        let age_secs = (now - pane.updated_at).num_seconds().max(0) as u64;
+
+        result.push(serde_json::json!({
+            // Required identity fields (FR-065)
+            "pane_id": pane.pane_instance_id.pane_id,
+            "session_name": tmux_info.map(|t| t.session_name.as_str()),
+            "session_key": pane.session_key,
+            "window_id": tmux_info.map(|t| t.window_id.as_str()),
+            "pane_instance_id": {
+                "pane_id": pane.pane_instance_id.pane_id,
+                "generation": pane.pane_instance_id.generation,
+                "birth_ts": pane.pane_instance_id.birth_ts,
+            },
+            // Allowed adjunct fields (FR-065)
+            "window_name": tmux_info.map(|t| t.window_name.as_str()),
+            "session_group": serde_json::Value::Null,
+            "presence": "managed",
+            "evidence_mode": pane.evidence_mode,
+            "activity_state": format!("{:?}", pane.activity_state),
+            "provider": pane.provider.map(|p| p.as_str()),
+            "conversation_title": state.conversation_titles.get(&pane.session_key),
+            "current_path": tmux_info.map(|t| t.current_path.as_str()),
+            "git_branch": serde_json::Value::Null,
+            "current_cmd": tmux_info.map(|t| t.current_cmd.as_str()),
+            "updated_at": pane.updated_at,
+            "age_secs": age_secs,
+            // NOTE: `session_id` intentionally absent — legacy alias forbidden in sync-v2 (FR-066).
+        }));
+    }
+
+    // Unmanaged panes are excluded from sync-v2: they lack `session_key` and `pane_instance_id`,
+    // which are required non-null fields per the strict AgtmuxSyncV2RawPane consumer contract.
+    // The human-facing `build_pane_list()` continues to include unmanaged panes for CLI surfaces.
+
+    serde_json::Value::Array(result)
+}
+
 pub(crate) fn build_ui_bootstrap_v2(state: &DaemonState) -> serde_json::Value {
     let replay_cursor = state.daemon.replay_cursor();
     serde_json::json!({
         "epoch": replay_cursor.epoch,
         "snapshot_seq": replay_cursor.seq,
-        "panes": build_pane_list(state),
+        "panes": build_sync_v2_pane_list(state),
         "sessions": build_session_list(state),
         "generated_at": chrono::Utc::now(),
         "replay_cursor": {
@@ -619,36 +727,174 @@ pub(crate) fn build_ui_bootstrap_v2(state: &DaemonState) -> serde_json::Value {
 }
 
 pub(crate) fn build_ui_changes_v2(
-    state: &DaemonState,
+    state: &mut DaemonState,
     cursor: Option<ReplayCursor>,
     limit: usize,
 ) -> serde_json::Value {
+    let now = chrono::Utc::now();
     let Some(cursor) = cursor else {
         let replay_cursor = state.daemon.replay_cursor();
+        state.daemon.record_replay_resync("invalid_cursor", now);
         return build_resync_required(replay_cursor.epoch, replay_cursor.seq, "invalid_cursor");
     };
 
     match state.daemon.replay_changes(cursor, limit) {
-        Ok(batch) => serde_json::json!({
-            "epoch": batch.epoch,
-            "changes": batch
+        Ok(batch) => {
+            let changes = batch
                 .changes
                 .iter()
                 .map(|change| build_change_entry(change))
-                .collect::<Vec<_>>(),
-            "from_seq": batch.from_seq,
-            "to_seq": batch.to_seq,
-            "next_cursor": {
-                "epoch": batch.next_cursor.epoch,
-                "seq": batch.next_cursor.seq,
-            },
-        }),
-        Err(resync) => build_resync_required(
-            resync.current_epoch,
-            resync.latest_snapshot_seq,
-            resync.reason,
-        ),
+                .collect::<Vec<_>>();
+            let epoch = batch.epoch;
+            let from_seq = batch.from_seq;
+            let to_seq = batch.to_seq;
+            let next_epoch = batch.next_cursor.epoch;
+            let next_seq = batch.next_cursor.seq;
+            state.daemon.acknowledge_replay_cursor(cursor);
+            serde_json::json!({
+                "epoch": epoch,
+                "changes": changes,
+                "from_seq": from_seq,
+                "to_seq": to_seq,
+                "next_cursor": {
+                    "epoch": next_epoch,
+                    "seq": next_seq,
+                },
+            })
+        }
+        Err(resync) => {
+            state.daemon.record_replay_resync(resync.reason, now);
+            build_resync_required(
+                resync.current_epoch,
+                resync.latest_snapshot_seq,
+                resync.reason,
+            )
+        }
     }
+}
+
+pub(crate) fn build_ui_health_v1(state: &DaemonState) -> serde_json::Value {
+    let replay = state.daemon.replay_health_snapshot();
+    let runtime_status = if state.runtime_last_error.is_some() && state.runtime_last_ok_at.is_none()
+    {
+        UiHealthStatus::Unavailable
+    } else if state.runtime_last_error.is_some() {
+        UiHealthStatus::Degraded
+    } else {
+        UiHealthStatus::Ok
+    };
+    let overlay_status = if !state.metadata_stale {
+        UiHealthStatus::Ok
+    } else if state.metadata_last_success_at.is_some() {
+        UiHealthStatus::Degraded
+    } else {
+        UiHealthStatus::Unavailable
+    };
+    let replay_status =
+        if replay.last_resync_reason.is_some() || replay.lag > REPLAY_HEALTHY_LAG_WINDOW {
+            UiHealthStatus::Degraded
+        } else {
+            UiHealthStatus::Ok
+        };
+    let focus_status = if state.last_panes.is_empty() {
+        UiHealthStatus::Unavailable
+    } else if state.focus_mismatch_count > 0 {
+        UiHealthStatus::Degraded
+    } else if state.focused_pane_id.is_some() {
+        UiHealthStatus::Ok
+    } else {
+        UiHealthStatus::Unavailable
+    };
+
+    let replay_detail = if let Some(reason) = replay.last_resync_reason {
+        Some(format!("resync required: {reason}"))
+    } else if replay.lag > REPLAY_HEALTHY_LAG_WINDOW {
+        Some("replay lag above healthy window".to_string())
+    } else {
+        None
+    };
+    let focus_detail = match focus_status {
+        UiHealthStatus::Degraded => Some(format!(
+            "focus mismatch across {} window(s)",
+            state.focus_mismatch_count
+        )),
+        UiHealthStatus::Unavailable if state.last_panes.is_empty() => {
+            Some("no panes in inventory".to_string())
+        }
+        UiHealthStatus::Unavailable => Some("no active pane detected".to_string()),
+        UiHealthStatus::Ok => None,
+    };
+
+    let payload = UiHealthV1 {
+        generated_at: chrono::Utc::now(),
+        runtime: UiComponentHealth {
+            status: runtime_status,
+            detail: state.runtime_last_error.clone(),
+            last_updated_at: state.runtime_last_ok_at.or(Some(state.runtime_started_at)),
+        },
+        replay: UiReplayHealth {
+            status: replay_status,
+            current_epoch: Some(replay.current_epoch),
+            cursor_seq: Some(replay.cursor_seq),
+            head_seq: Some(replay.head_seq),
+            lag: Some(replay.lag),
+            last_resync_reason: replay.last_resync_reason.map(str::to_string),
+            last_resync_at: replay.last_resync_at,
+            detail: replay_detail,
+        },
+        overlay: UiComponentHealth {
+            status: overlay_status,
+            detail: if state.metadata_stale {
+                state
+                    .metadata_last_error
+                    .clone()
+                    .or_else(|| Some("metadata overlay stale".to_string()))
+            } else {
+                None
+            },
+            last_updated_at: state.metadata_last_success_at,
+        },
+        focus: UiFocusHealth {
+            status: focus_status,
+            focused_pane_id: state.focused_pane_id.clone(),
+            mismatch_count: Some(state.focus_mismatch_count),
+            last_sync_at: state.focus_last_sync_at,
+            detail: focus_detail,
+        },
+    };
+
+    serde_json::to_value(payload).unwrap_or_else(|_| {
+        serde_json::json!({
+            "generated_at": chrono::Utc::now(),
+            "runtime": {
+                "status": "unavailable",
+                "detail": "health serialization failed",
+                "last_updated_at": null,
+            },
+            "replay": {
+                "status": "unavailable",
+                "current_epoch": null,
+                "cursor_seq": null,
+                "head_seq": null,
+                "lag": null,
+                "last_resync_reason": null,
+                "last_resync_at": null,
+                "detail": "health serialization failed",
+            },
+            "overlay": {
+                "status": "unavailable",
+                "detail": "health serialization failed",
+                "last_updated_at": null,
+            },
+            "focus": {
+                "status": "unavailable",
+                "focused_pane_id": null,
+                "mismatch_count": null,
+                "last_sync_at": null,
+                "detail": "health serialization failed",
+            },
+        })
+    })
 }
 
 /// Build a `state_changed` response: changes since a given version with full state.
@@ -1141,11 +1387,103 @@ mod tests {
         assert_eq!(result["replay_cursor"]["seq"], state.daemon.version());
     }
 
+    // FR-066 regression: sync-v2 bootstrap panes must not contain legacy identity aliases.
     #[test]
-    fn ui_changes_v2_returns_ordered_changes() {
+    fn ui_bootstrap_v2_pane_no_legacy_session_id() {
+        let mut state = make_managed_state();
+        // Add an unmanaged pane to cover both branches.
+        state.last_panes.push(TmuxPaneInfo {
+            pane_id: "%99".to_string(),
+            session_id: "$99".to_string(),
+            session_name: "other".to_string(),
+            window_id: "@99".to_string(),
+            window_name: "misc".to_string(),
+            current_cmd: "zsh".to_string(),
+            ..Default::default()
+        });
+
+        let result = build_ui_bootstrap_v2(&state);
+        let panes = result["panes"].as_array().expect("panes array");
+        assert!(!panes.is_empty(), "must have managed panes");
+
+        // No legacy session_id in any pane.
+        for pane in panes {
+            assert!(
+                pane.get("session_id").is_none(),
+                "sync-v2 pane must not contain legacy 'session_id' field (FR-066): pane_id={}",
+                pane["pane_id"]
+            );
+        }
+
+        // Unmanaged pane (%99) must be excluded: lacks required session_key/pane_instance_id.
+        let unmanaged_in_v2 = panes.iter().any(|p| p["pane_id"] == "%99");
+        assert!(
+            !unmanaged_in_v2,
+            "sync-v2 must not include unmanaged panes that lack required identity fields"
+        );
+    }
+
+    // FR-065 regression: managed pane in sync-v2 bootstrap must carry all required identity fields.
+    #[test]
+    fn ui_bootstrap_v2_managed_pane_required_identity_fields_present() {
         let state = make_managed_state();
 
-        let result = build_ui_changes_v2(&state, Some(ReplayCursor { epoch: 1, seq: 0 }), 10);
+        let result = build_ui_bootstrap_v2(&state);
+        let panes = result["panes"].as_array().expect("panes array");
+        let managed = panes
+            .iter()
+            .find(|p| p["presence"] == "managed")
+            .expect("managed pane");
+
+        assert!(
+            managed.get("pane_id").is_some() && !managed["pane_id"].is_null(),
+            "pane_id required"
+        );
+        assert!(
+            managed.get("session_key").is_some() && !managed["session_key"].is_null(),
+            "session_key required"
+        );
+        assert!(managed.get("window_id").is_some(), "window_id required");
+        assert!(
+            managed.get("pane_instance_id").is_some() && managed["pane_instance_id"].is_object(),
+            "pane_instance_id required and must be object"
+        );
+        assert!(
+            managed["pane_instance_id"].get("pane_id").is_some(),
+            "pane_instance_id.pane_id required"
+        );
+        assert!(
+            managed["pane_instance_id"].get("generation").is_some(),
+            "pane_instance_id.generation required"
+        );
+        assert!(
+            managed["pane_instance_id"].get("birth_ts").is_some(),
+            "pane_instance_id.birth_ts required"
+        );
+    }
+
+    // FR-066 regression: ui.changes.v2 change entries must not contain legacy session_id.
+    #[test]
+    fn ui_changes_v2_no_legacy_session_id() {
+        let mut state = make_managed_state();
+
+        let result = build_ui_changes_v2(&mut state, Some(ReplayCursor { epoch: 1, seq: 0 }), 10);
+        let changes = result["changes"].as_array().expect("changes array");
+        assert!(!changes.is_empty(), "must have changes");
+
+        for change in changes {
+            assert!(
+                change.get("session_id").is_none(),
+                "sync-v2 change entry must not contain legacy 'session_id' field (FR-066)"
+            );
+        }
+    }
+
+    #[test]
+    fn ui_changes_v2_returns_ordered_changes() {
+        let mut state = make_managed_state();
+
+        let result = build_ui_changes_v2(&mut state, Some(ReplayCursor { epoch: 1, seq: 0 }), 10);
         let changes = result["changes"].as_array().expect("changes array");
 
         assert_eq!(result["epoch"], 1);
@@ -1158,6 +1496,64 @@ mod tests {
         assert_eq!(changes[1]["seq"], 2);
         assert!(changes[0]["session"].is_object());
         assert!(changes[1]["pane"].is_object());
+    }
+
+    #[test]
+    fn ui_health_v1_reports_component_statuses() {
+        let mut state = make_managed_state();
+        let now = Utc::now();
+
+        state.runtime_last_ok_at = Some(now);
+        state.metadata_stale = true;
+        state.metadata_last_success_at = Some(now);
+        state.metadata_last_error = Some("metadata timeout".to_string());
+        state.focused_pane_id = Some("%0".to_string());
+        state.focus_last_sync_at = Some(now);
+        state.daemon.record_replay_resync("trimmed_cursor", now);
+
+        let result = build_ui_health_v1(&state);
+
+        assert_eq!(result["runtime"]["status"], "ok");
+        assert_eq!(result["overlay"]["status"], "degraded");
+        assert_eq!(result["overlay"]["detail"], "metadata timeout");
+        assert_eq!(result["replay"]["status"], "degraded");
+        assert_eq!(result["replay"]["last_resync_reason"], "trimmed_cursor");
+        assert_eq!(result["focus"]["status"], "ok");
+        assert_eq!(result["focus"]["focused_pane_id"], "%0");
+    }
+
+    #[test]
+    fn ui_health_v1_marks_runtime_unavailable_before_first_success() {
+        let mut state = make_state();
+        state.runtime_last_error = Some("socket bind failed".to_string());
+
+        let result = build_ui_health_v1(&state);
+        assert_eq!(result["runtime"]["status"], "unavailable");
+        assert_eq!(result["runtime"]["detail"], "socket bind failed");
+    }
+
+    #[test]
+    fn ui_health_v1_marks_focus_degraded_on_mismatch() {
+        let mut state = make_state();
+        let now = Utc::now();
+        state.last_panes = vec![TmuxPaneInfo {
+            pane_id: "%0".to_string(),
+            session_id: "$0".to_string(),
+            session_name: "main".to_string(),
+            window_id: "@0".to_string(),
+            window_name: "dev".to_string(),
+            current_cmd: "zsh".to_string(),
+            active: true,
+            session_attached: true,
+            ..Default::default()
+        }];
+        state.focused_pane_id = Some("%0".to_string());
+        state.focus_mismatch_count = 2;
+        state.focus_last_sync_at = Some(now);
+
+        let result = build_ui_health_v1(&state);
+        assert_eq!(result["focus"]["status"], "degraded");
+        assert_eq!(result["focus"]["mismatch_count"], 2);
     }
 
     #[tokio::test]
@@ -1255,7 +1651,7 @@ mod tests {
     #[tokio::test]
     async fn ui_changes_v2_handler_resyncs_on_trimmed_cursor() {
         let mut state = make_managed_state();
-        state.daemon.trim_changes_before(1);
+        state.daemon.trim_replay_before(1);
         let state = Arc::new(Mutex::new(state));
         let request = serde_json::json!({
             "jsonrpc": "2.0",
@@ -1294,6 +1690,48 @@ mod tests {
             "invalid_cursor"
         );
         assert_eq!(resp["result"]["resync_required"]["current_epoch"], 1);
+    }
+
+    #[tokio::test]
+    async fn ui_bootstrap_v2_handler_compacts_only_sync_v2_log() {
+        let state = Arc::new(Mutex::new(make_managed_state()));
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "ui.bootstrap.v2",
+            "id": 96,
+            "params": {}
+        });
+
+        let resp = call_handler(Arc::clone(&state), request).await;
+        assert_eq!(resp["result"]["epoch"], 1);
+
+        let st = state.lock().await;
+        assert_eq!(st.daemon.replay_len(), 0, "sync-v2 replay should compact");
+        assert!(
+            !st.daemon.changes_since(0).is_empty(),
+            "legacy change log must remain available"
+        );
+    }
+
+    #[tokio::test]
+    async fn ui_health_v1_handler_returns_snapshot() {
+        let mut state = make_managed_state();
+        let now = Utc::now();
+        state.runtime_last_ok_at = Some(now);
+        state.focused_pane_id = Some("%0".to_string());
+        state.focus_last_sync_at = Some(now);
+        let state = Arc::new(Mutex::new(state));
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "ui.health.v1",
+            "id": 97,
+            "params": {}
+        });
+
+        let resp = call_handler(Arc::clone(&state), request).await;
+        assert!(resp["result"].get("generated_at").is_some());
+        assert_eq!(resp["result"]["runtime"]["status"], "ok");
+        assert_eq!(resp["result"]["focus"]["focused_pane_id"], "%0");
     }
 
     // ── source.ingest tests (via UDS handler) ──────────────────────────

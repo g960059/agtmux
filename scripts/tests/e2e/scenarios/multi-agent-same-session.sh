@@ -69,9 +69,9 @@ pass "Scenario 1: Both $PROVIDER agents managed independently in same session (d
 wait_until_provider_idle "$PANE1" 30 || log "WARN: pane1 idle check timed out"
 wait_until_provider_idle "$PANE2" 30 || log "WARN: pane2 idle check timed out"
 
-wait_for_agtmux_state "$SOCKET" "$PANE1" "activity_state" "idle" 60
-wait_for_agtmux_state "$SOCKET" "$PANE2" "activity_state" "idle" 60
+wait_for_agtmux_state_any "$SOCKET" "$PANE1" "activity_state" "waiting_input idle" 60
+wait_for_agtmux_state_any "$SOCKET" "$PANE2" "activity_state" "waiting_input idle" 60
 
-pass "Scenario 2: Both $PROVIDER agents idle after completion"
+pass "Scenario 2: Both $PROVIDER agents completed after completion"
 
 echo "=== multi-agent-same-session.sh PASS (PROVIDER=${PROVIDER}) ==="

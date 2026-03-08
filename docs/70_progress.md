@@ -2369,3 +2369,73 @@ JSONL スキャナーなし) を発見 → デーモンが stale binary で起�
 ### 状態
 - `docs/60_tasks.md` の `T-XTERM-A1` を DONE 扱いに更新。
 - A2（ack compaction / true stream / observability）は未着手のまま維持。
+
+## 2026-03-06 — agtmux-term V2 A2 daemon-side kickoff (replay ack compaction + `ui.health.v1`)
+
+### 実装
+- `crates/agtmux-daemon-v5/src/projection.rs`
+  - sync-v2 専用 replay log を追加し、legacy `changes` log と retention を分離した。
+  - `ui.bootstrap.v2` / `ui.changes.v2` cursor を implicit ack として扱えるようにし、acked seq まで replay log を compact するようにした。
+  - replay observability snapshot (`current_epoch`, `cursor_seq`, `head_seq`, `lag`, `last_resync_reason`, `last_resync_at`) を追加した。
+- `crates/agtmux-runtime/src/poll_loop.rs`
+  - runtime health 用に `runtime_started_at`, `runtime_last_ok_at`, `runtime_last_error` を追加した。
+  - focus health 用に `focused_pane_id`, `focus_mismatch_count`, `focus_last_sync_at` を追加し、tmux active-pane invariant から更新するようにした。
+- `crates/agtmux-runtime/src/server.rs`
+  - additive JSON-RPC `ui.health.v1` を追加した。
+  - `runtime` / `replay` / `overlay` / `focus` status を daemon 側で計算して返すようにした。
+  - `ui.bootstrap.v2` / `ui.changes.v2` 呼び出し時に replay ack / resync observability を更新するようにした。
+
+### ドキュメント
+- `docs/20_spec.md`
+  - FR-063 / FR-064 を追加し、`ui.health.v1` と sync-v2 replay ack compaction の不変条件を固定した。
+- `docs/40_design.md`
+  - Appendix A10 として `ui.health.v1` payload と dedicated replay retention の設計を追加した。
+- `docs/60_tasks.md`
+  - `T-XTERM-A2` を追加し、daemon 側実装の証跡と cross-repo 残課題を記録した。
+
+### 検証
+- `cargo test -p agtmux-daemon-v5` → 153 passed
+- `cargo test -p agtmux` → 165 passed
+
+### 状態
+- daemon 側 A2 kickoff は handover scope に沿って実装開始済み。
+- cross-repo の残りは agtmux-term 側 `ui.health.v1` consumer 接続確認と A1 compatibility handback。
+
+## 2026-03-07 — agtmux-term live smoke で A1 bootstrap wire drift を確認
+
+### 発見
+- `AGTMUX_BIN=/Users/virtualmachine/ghq/github.com/g960059/agtmux/target/debug/agtmux swift run AgtmuxTerm` で local daemon 自体は起動するが、`ui.bootstrap.v2` decode が `sync-v2 pane payload contains legacy identity field 'session_id'` で fail-closed することを確認した。
+- 根本原因は `crates/agtmux-runtime/src/server.rs` の `build_ui_bootstrap_v2()` が human-facing inventory serializer `build_pane_list()` を再利用している点。`build_pane_list()` は legacy JSON / CLI 向けに `session_id` を保持しており、strict sync-v2 consumer にそのまま漏れていた。
+- 影響範囲は bootstrap compatibility handback で、A2 observability 自体ではない。現状の agtmux-term では overlay lane が無効化され、`Local daemon incompatible` banner が出続ける。
+
+### docs反映
+- `docs/20_spec.md`
+  - FR-065 / FR-066 を追加し、`ui.bootstrap.v2.panes[]` required exact fields と legacy identity alias 禁止を明文化した。
+- `docs/40_design.md`
+  - Appendix A9 に sync-v2 専用 DTO / builder 分離、forbidden fields、producer boundary を追記した。
+- `docs/60_tasks.md`
+  - `T-XTERM-A3` を追加し、TDD -> builder split -> live smoke の順で compatibility handback を回収する実装計画を登録した。
+  - `T-XTERM-A2` は `T-XTERM-A3` 依存を追加した。
+
+### Next
+- `T-XTERM-A3` として failing regression を先に追加し、`ui.bootstrap.v2` serializer を `build_pane_list()` から切り離す。
+- `just verify` 後に strict agtmux-term consumer で live smoke を再実施する。
+
+## 2026-03-08 — Cross-repo live E2E ownership split locked with agtmux-term
+
+### 背景
+- live activity-state / waiting-state / no-bleed は `agtmux-term` 側でも重要だが、semantic truth 自体は daemon が生成している。
+- 同じ real-provider scenario を両 repo に無秩序に複製すると、producer-side regression と consumer-side regression の責任境界が曖昧になる。
+
+### docs反映
+- `docs/20_spec.md`
+  - FR-067 を追加し、real-CLI semantic live E2E の source of truth は agtmux repo が持つことを固定した。
+  - cross-repo validation は「semantic truth vs consumer truth」の責務分離で行うことを NFR-Reliability に追記した。
+- `docs/40_design.md`
+  - producer boundary に live E2E ownership を追記し、agtmux-term 側の mirror は thin canary に限定する方針を明文化した。
+- `docs/60_tasks.md`
+  - `T-XTERM-A4` を追加し、Claude Sonnet 4.6 / Codex 5.4 medium の live scenario handback を daemon-owned source-of-truth suite として追跡することにした。
+
+### 状態
+- agtmux-term 側は daemon payload truth を primary oracle にする thin live canary を実装開始できる状態になった。
+- daemon 側の semantic truth suite は引き続き agtmux repo が owner。

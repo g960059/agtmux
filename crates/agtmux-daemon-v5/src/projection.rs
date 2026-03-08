@@ -48,6 +48,17 @@ pub struct ReplayBatch<'a> {
     pub changes: Vec<&'a StateChange>,
 }
 
+/// Replay observability snapshot for `ui.health.v1`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayHealthSnapshot {
+    pub current_epoch: u64,
+    pub cursor_seq: StateVersion,
+    pub head_seq: StateVersion,
+    pub lag: StateVersion,
+    pub last_resync_reason: Option<&'static str>,
+    pub last_resync_at: Option<DateTime<Utc>>,
+}
+
 /// Change notification for a pane or session state update.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StateChange {
@@ -88,8 +99,16 @@ pub struct DaemonProjection {
     version: StateVersion,
     /// Replay epoch for strict UI change-feed continuity.
     epoch: u64,
-    /// Change log for client polling.
+    /// Legacy change log for `state_changed` / `summary_changed`.
     changes: Vec<StateChange>,
+    /// Sync-v2 replay log with its own retention policy.
+    replay_log: Vec<StateChange>,
+    /// Highest sync-v2 cursor acknowledged by the client.
+    replay_acked_cursor: ReplayCursor,
+    /// Last explicit resync reason emitted for sync-v2 replay.
+    replay_last_resync_reason: Option<&'static str>,
+    /// Timestamp of the last explicit resync emitted for sync-v2 replay.
+    replay_last_resync_at: Option<DateTime<Utc>>,
     /// Source rank policy.
     source_ranks: Vec<SourceRank>,
     /// Per-pane, per-provider last non-heartbeat deterministic event timestamp.
@@ -114,6 +133,10 @@ impl DaemonProjection {
             version: 0,
             epoch: 1,
             changes: Vec::new(),
+            replay_log: Vec::new(),
+            replay_acked_cursor: ReplayCursor { epoch: 1, seq: 0 },
+            replay_last_resync_reason: None,
+            replay_last_resync_at: None,
             source_ranks: resolver::default_source_ranks(),
             last_real_activity: HashMap::new(),
         }
@@ -318,7 +341,7 @@ impl DaemonProjection {
 
         if changed {
             self.version += 1;
-            self.changes.push(StateChange {
+            self.record_change(StateChange {
                 version: self.version,
                 session_key: session_key.to_owned(),
                 pane_id: None,
@@ -489,7 +512,7 @@ impl DaemonProjection {
 
         if changed {
             self.version += 1;
-            self.changes.push(StateChange {
+            self.record_change(StateChange {
                 version: self.version,
                 session_key: event.session_key.clone(),
                 pane_id: Some(pane_id.to_owned()),
@@ -586,7 +609,7 @@ impl DaemonProjection {
             return Err(self.resync_required("unknown_cursor"));
         }
 
-        if self.changes.is_empty() {
+        if self.replay_log.is_empty() {
             return if cursor.seq == self.version {
                 Ok(ReplayBatch {
                     epoch: self.epoch,
@@ -600,23 +623,23 @@ impl DaemonProjection {
             };
         }
 
-        let first_retained = self.changes[0].version;
+        let first_retained = self.replay_log[0].version;
         let expected_next = cursor.seq.saturating_add(1);
         if expected_next < first_retained {
             return Err(self.resync_required("trimmed_cursor"));
         }
 
-        let start = self.changes.partition_point(|c| c.version <= cursor.seq);
-        if start < self.changes.len() {
-            if cursor.seq < self.version && self.changes[start].version != expected_next {
+        let start = self.replay_log.partition_point(|c| c.version <= cursor.seq);
+        if start < self.replay_log.len() {
+            if cursor.seq < self.version && self.replay_log[start].version != expected_next {
                 return Err(self.resync_required("replay_miss"));
             }
         } else if cursor.seq < self.version {
             return Err(self.resync_required("replay_miss"));
         }
 
-        let end = start.saturating_add(limit).min(self.changes.len());
-        let selected: Vec<&StateChange> = self.changes[start..end].iter().collect();
+        let end = start.saturating_add(limit).min(self.replay_log.len());
+        let selected: Vec<&StateChange> = self.replay_log[start..end].iter().collect();
 
         let mut prev_seq = cursor.seq;
         for change in &selected {
@@ -677,6 +700,60 @@ impl DaemonProjection {
     /// version, to prevent unbounded growth of the change log.
     pub fn trim_changes_before(&mut self, before_version: StateVersion) {
         self.changes.retain(|c| c.version > before_version);
+    }
+
+    /// Remove sync-v2 replay entries with version <= `before_version`.
+    pub fn trim_replay_before(&mut self, before_version: StateVersion) {
+        self.replay_log.retain(|c| c.version > before_version);
+    }
+
+    /// Record the highest sync-v2 cursor the client has acknowledged.
+    ///
+    /// Acknowledged replay entries are compacted immediately from the sync-v2
+    /// replay log. The legacy `changes` log remains untouched.
+    pub fn acknowledge_replay_cursor(&mut self, cursor: ReplayCursor) {
+        if cursor.epoch != self.epoch || cursor.seq > self.version {
+            return;
+        }
+        if cursor.seq <= self.replay_acked_cursor.seq {
+            return;
+        }
+
+        self.replay_acked_cursor = cursor;
+        self.trim_replay_before(cursor.seq);
+
+        if cursor.seq == self.version {
+            self.replay_last_resync_reason = None;
+            self.replay_last_resync_at = None;
+        }
+    }
+
+    /// Record that sync-v2 required an explicit resync.
+    pub fn record_replay_resync(&mut self, reason: &'static str, at: DateTime<Utc>) {
+        self.replay_last_resync_reason = Some(reason);
+        self.replay_last_resync_at = Some(at);
+    }
+
+    /// Snapshot replay observability counters for `ui.health.v1`.
+    pub fn replay_health_snapshot(&self) -> ReplayHealthSnapshot {
+        let cursor_seq = if self.replay_acked_cursor.epoch == self.epoch {
+            self.replay_acked_cursor.seq.min(self.version)
+        } else {
+            0
+        };
+        ReplayHealthSnapshot {
+            current_epoch: self.epoch,
+            cursor_seq,
+            head_seq: self.version,
+            lag: self.version.saturating_sub(cursor_seq),
+            last_resync_reason: self.replay_last_resync_reason,
+            last_resync_at: self.replay_last_resync_at,
+        }
+    }
+
+    /// Current number of retained sync-v2 replay entries.
+    pub fn replay_len(&self) -> usize {
+        self.replay_log.len()
     }
 
     /// Current projection version (for change tracking).
@@ -743,22 +820,29 @@ impl DaemonProjection {
                 .insert(key.clone(), output.next_state.clone());
 
             // Update pane evidence_mode if it changed
-            if let Some(pane) = self.panes.get_mut(&key) {
+            let pane_change = if let Some(pane) = self.panes.get_mut(&key) {
                 let new_mode = tier_to_evidence_mode(output.result.winner_tier);
                 if pane.evidence_mode != new_mode {
                     pane.evidence_mode = new_mode;
                     pane.updated_at = now;
                     self.version += 1;
-                    self.changes.push(StateChange {
+                    Some(StateChange {
                         version: self.version,
                         session_key: pane.session_key.clone(),
                         pane_id: Some(key.clone()),
                         timestamp: now,
                         session_state: None,
                         pane_state: Some(pane.clone()),
-                    });
-                    changed += 1;
+                    })
+                } else {
+                    None
                 }
+            } else {
+                None
+            };
+            if let Some(change) = pane_change {
+                self.record_change(change);
+                changed += 1;
             }
 
             // Update session evidence_mode if it changed.
@@ -769,21 +853,28 @@ impl DaemonProjection {
                 .map(|(session_key, _)| session_key.clone())
                 .collect();
             for session_key in affected_sessions {
-                if let Some(session) = self.sessions.get_mut(&session_key) {
+                let session_change = if let Some(session) = self.sessions.get_mut(&session_key) {
                     let new_mode = tier_to_evidence_mode(output.result.winner_tier);
                     if session.evidence_mode != new_mode {
                         session.evidence_mode = new_mode;
                         session.updated_at = now;
                         self.version += 1;
-                        self.changes.push(StateChange {
+                        Some(StateChange {
                             version: self.version,
                             session_key: session_key.clone(),
                             pane_id: None,
                             timestamp: now,
                             session_state: Some(session.clone()),
                             pane_state: None,
-                        });
+                        })
+                    } else {
+                        None
                     }
+                } else {
+                    None
+                };
+                if let Some(change) = session_change {
+                    self.record_change(change);
                 }
             }
 
@@ -792,6 +883,11 @@ impl DaemonProjection {
         }
 
         changed
+    }
+
+    fn record_change(&mut self, change: StateChange) {
+        self.replay_log.push(change.clone());
+        self.changes.push(change);
     }
 }
 
@@ -1379,7 +1475,7 @@ mod tests {
             )],
             t + TimeDelta::seconds(1),
         );
-        proj.trim_changes_before(2);
+        proj.trim_replay_before(2);
 
         let err = proj
             .replay_changes(ReplayCursor { epoch: 1, seq: 0 }, 10)
@@ -1410,7 +1506,7 @@ mod tests {
     fn replay_changes_resyncs_on_replay_gap() {
         let mut proj = DaemonProjection::new();
         proj.version = 3;
-        proj.changes = vec![
+        proj.replay_log = vec![
             StateChange {
                 version: 1,
                 session_key: "s1".to_owned(),
@@ -1433,6 +1529,64 @@ mod tests {
             .replay_changes(ReplayCursor { epoch: 1, seq: 0 }, 10)
             .expect_err("gap should resync");
         assert_eq!(err.reason, "replay_miss");
+    }
+
+    #[test]
+    fn acknowledge_replay_cursor_compacts_only_sync_v2_log() {
+        let mut proj = DaemonProjection::new();
+        let t = t0();
+
+        proj.apply_events(vec![det_event("e1", "s1", "%1", "activity.running", t)], t);
+        proj.apply_events(
+            vec![det_event(
+                "e2",
+                "s1",
+                "%1",
+                "activity.waiting_input",
+                t + TimeDelta::seconds(1),
+            )],
+            t + TimeDelta::seconds(1),
+        );
+
+        let legacy_len = proj.changes_since(0).len();
+        assert_eq!(proj.replay_len(), legacy_len);
+
+        let head = proj.replay_cursor();
+        proj.acknowledge_replay_cursor(head);
+
+        assert_eq!(proj.replay_len(), 0, "sync-v2 replay log should compact");
+        assert_eq!(
+            proj.changes_since(0).len(),
+            legacy_len,
+            "legacy change log must remain intact"
+        );
+
+        let batch = proj.replay_changes(head, 10).expect("caught up cursor");
+        assert!(batch.changes.is_empty());
+    }
+
+    #[test]
+    fn replay_health_snapshot_tracks_lag_and_resync() {
+        let mut proj = DaemonProjection::new();
+        let t = t0();
+
+        proj.apply_events(vec![det_event("e1", "s1", "%1", "activity.running", t)], t);
+        proj.record_replay_resync("trimmed_cursor", t + TimeDelta::seconds(1));
+
+        let initial = proj.replay_health_snapshot();
+        assert_eq!(initial.current_epoch, 1);
+        assert_eq!(initial.cursor_seq, 0);
+        assert_eq!(initial.head_seq, proj.version());
+        assert_eq!(initial.lag, proj.version());
+        assert_eq!(initial.last_resync_reason, Some("trimmed_cursor"));
+        assert_eq!(initial.last_resync_at, Some(t + TimeDelta::seconds(1)));
+
+        proj.acknowledge_replay_cursor(proj.replay_cursor());
+
+        let recovered = proj.replay_health_snapshot();
+        assert_eq!(recovered.lag, 0);
+        assert_eq!(recovered.last_resync_reason, None);
+        assert_eq!(recovered.last_resync_at, None);
     }
 
     // ── 15. Event without pane_id still updates session ────────────
