@@ -299,7 +299,10 @@ impl DaemonProjection {
             .or(latest_event);
 
         let (activity_state, activity_source) = match state_event {
-            Some(event) => (parse_activity_state(&event.event_type), event.source_kind),
+            Some(event) => (
+                parse_sync_v2_compat_activity_state(&event.event_type),
+                event.source_kind,
+            ),
             None => return false,
         };
 
@@ -460,13 +463,16 @@ impl DaemonProjection {
         // periodic idle_heartbeats from flipping Running→Idle between real tool events.
         // If the pane has no prior state (first event is a heartbeat), fall back to
         // the heartbeat's own event_type so initial bootstraps still work.
+        // Legacy sync-v2 projection still derives its collapsed activity enum from
+        // the compat `event_type` string. The sync-v3 truth path is updated
+        // separately from provider-native payloads and must not depend on this parser.
         let pane_activity_state = if event.is_heartbeat {
             self.panes
                 .get(pane_id)
                 .map(|p| p.activity_state)
-                .unwrap_or_else(|| parse_activity_state(&event.event_type))
+                .unwrap_or_else(|| parse_sync_v2_compat_activity_state(&event.event_type))
         } else {
-            parse_activity_state(&event.event_type)
+            parse_sync_v2_compat_activity_state(&event.event_type)
         };
         let pane_provider = Some(event.provider);
 
@@ -959,12 +965,16 @@ impl DaemonProjection {
 
 // ─── Helpers ─────────────────────────────────────────────────────
 
-/// Parse an `ActivityState` from an `event_type` string.
+/// Parse a legacy sync-v2-compatible `ActivityState` from an `event_type` string.
 ///
-/// Supports three event_type namespaces:
-/// - `activity.*` / `lifecycle.*`: poller heuristic + Claude hooks
-/// - `thread.*` / `turn.*`: Codex App Server (JSON-RPC thread/list + notifications)
-fn parse_activity_state(event_type: &str) -> ActivityState {
+/// This parser exists only for the old sync-v2 projection / replay boundary.
+/// The sync-v3 reducer path uses provider-native payloads and must not treat
+/// these collapsed strings as semantic truth.
+///
+/// Supports three legacy event_type namespaces:
+/// - `activity.*` / `lifecycle.*`: poller heuristic + Claude hooks compat strings
+/// - `thread.*` / `turn.*`: older Codex app-server compat strings
+fn parse_sync_v2_compat_activity_state(event_type: &str) -> ActivityState {
     match event_type {
         // Poller / Claude hooks namespace
         "activity.running" | "lifecycle.running" | "activity.start" | "lifecycle.start" => {
@@ -1187,87 +1197,126 @@ mod tests {
     // ── 4. Activity state parsing ──────────────────────────────────
 
     #[test]
-    fn activity_state_parsing() {
+    fn sync_v2_compat_activity_state_parsing() {
         assert_eq!(
-            parse_activity_state("activity.running"),
+            parse_sync_v2_compat_activity_state("activity.running"),
             ActivityState::Running
         );
         assert_eq!(
-            parse_activity_state("lifecycle.running"),
+            parse_sync_v2_compat_activity_state("lifecycle.running"),
             ActivityState::Running
         );
-        assert_eq!(parse_activity_state("activity.idle"), ActivityState::Idle);
-        assert_eq!(parse_activity_state("lifecycle.idle"), ActivityState::Idle);
         assert_eq!(
-            parse_activity_state("activity.waiting_input"),
+            parse_sync_v2_compat_activity_state("activity.idle"),
+            ActivityState::Idle
+        );
+        assert_eq!(
+            parse_sync_v2_compat_activity_state("lifecycle.idle"),
+            ActivityState::Idle
+        );
+        assert_eq!(
+            parse_sync_v2_compat_activity_state("activity.waiting_input"),
             ActivityState::WaitingInput
         );
         assert_eq!(
-            parse_activity_state("activity.waiting_approval"),
-            ActivityState::WaitingApproval
-        );
-        assert_eq!(parse_activity_state("activity.error"), ActivityState::Error);
-        assert_eq!(
-            parse_activity_state("lifecycle.start"),
-            ActivityState::Running
-        );
-        assert_eq!(
-            parse_activity_state("activity.start"),
-            ActivityState::Running
-        );
-        assert_eq!(parse_activity_state("lifecycle.end"), ActivityState::Idle);
-        assert_eq!(parse_activity_state("lifecycle.stop"), ActivityState::Idle);
-        assert_eq!(parse_activity_state("activity.end"), ActivityState::Idle);
-        assert_eq!(parse_activity_state("activity.stop"), ActivityState::Idle);
-        assert_eq!(
-            parse_activity_state("lifecycle.waiting_input"),
-            ActivityState::WaitingInput
-        );
-        assert_eq!(
-            parse_activity_state("lifecycle.waiting_approval"),
+            parse_sync_v2_compat_activity_state("activity.waiting_approval"),
             ActivityState::WaitingApproval
         );
         assert_eq!(
-            parse_activity_state("lifecycle.error"),
+            parse_sync_v2_compat_activity_state("activity.error"),
             ActivityState::Error
         );
-        assert_eq!(parse_activity_state("unknown.type"), ActivityState::Unknown);
+        assert_eq!(
+            parse_sync_v2_compat_activity_state("lifecycle.start"),
+            ActivityState::Running
+        );
+        assert_eq!(
+            parse_sync_v2_compat_activity_state("activity.start"),
+            ActivityState::Running
+        );
+        assert_eq!(
+            parse_sync_v2_compat_activity_state("lifecycle.end"),
+            ActivityState::Idle
+        );
+        assert_eq!(
+            parse_sync_v2_compat_activity_state("lifecycle.stop"),
+            ActivityState::Idle
+        );
+        assert_eq!(
+            parse_sync_v2_compat_activity_state("activity.end"),
+            ActivityState::Idle
+        );
+        assert_eq!(
+            parse_sync_v2_compat_activity_state("activity.stop"),
+            ActivityState::Idle
+        );
+        assert_eq!(
+            parse_sync_v2_compat_activity_state("lifecycle.waiting_input"),
+            ActivityState::WaitingInput
+        );
+        assert_eq!(
+            parse_sync_v2_compat_activity_state("lifecycle.waiting_approval"),
+            ActivityState::WaitingApproval
+        );
+        assert_eq!(
+            parse_sync_v2_compat_activity_state("lifecycle.error"),
+            ActivityState::Error
+        );
+        assert_eq!(
+            parse_sync_v2_compat_activity_state("unknown.type"),
+            ActivityState::Unknown
+        );
 
         // Claude JSONL namespace
         assert_eq!(
-            parse_activity_state("activity.user_input"),
+            parse_sync_v2_compat_activity_state("activity.user_input"),
             ActivityState::Running
         );
         assert_eq!(
-            parse_activity_state("activity.tool_complete"),
+            parse_sync_v2_compat_activity_state("activity.tool_complete"),
             ActivityState::Running
         );
 
         // Codex App Server namespace
         assert_eq!(
-            parse_activity_state("thread.active"),
+            parse_sync_v2_compat_activity_state("thread.active"),
             ActivityState::Running
         );
-        assert_eq!(parse_activity_state("thread.idle"), ActivityState::Idle);
-        assert_eq!(parse_activity_state("thread.error"), ActivityState::Error);
         assert_eq!(
-            parse_activity_state("thread.systemError"),
-            ActivityState::Error
-        );
-        assert_eq!(parse_activity_state("turn.started"), ActivityState::Running);
-        assert_eq!(
-            parse_activity_state("turn.inProgress"),
-            ActivityState::Running
-        );
-        assert_eq!(parse_activity_state("turn.completed"), ActivityState::Idle);
-        assert_eq!(
-            parse_activity_state("turn.interrupted"),
+            parse_sync_v2_compat_activity_state("thread.idle"),
             ActivityState::Idle
         );
-        assert_eq!(parse_activity_state("turn.failed"), ActivityState::Error);
+        assert_eq!(
+            parse_sync_v2_compat_activity_state("thread.error"),
+            ActivityState::Error
+        );
+        assert_eq!(
+            parse_sync_v2_compat_activity_state("thread.systemError"),
+            ActivityState::Error
+        );
+        assert_eq!(
+            parse_sync_v2_compat_activity_state("turn.started"),
+            ActivityState::Running
+        );
+        assert_eq!(
+            parse_sync_v2_compat_activity_state("turn.inProgress"),
+            ActivityState::Running
+        );
+        assert_eq!(
+            parse_sync_v2_compat_activity_state("turn.completed"),
+            ActivityState::Idle
+        );
+        assert_eq!(
+            parse_sync_v2_compat_activity_state("turn.interrupted"),
+            ActivityState::Idle
+        );
+        assert_eq!(
+            parse_sync_v2_compat_activity_state("turn.failed"),
+            ActivityState::Error
+        );
         // notLoaded threads map to Idle (defensive — primary filter is in codex_poller)
         assert_eq!(
-            parse_activity_state("thread.not_loaded"),
+            parse_sync_v2_compat_activity_state("thread.not_loaded"),
             ActivityState::Idle
         );
     }

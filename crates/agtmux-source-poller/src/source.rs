@@ -44,8 +44,11 @@ pub struct PollResult {
 
 // ─── Event type mapping ─────────────────────────────────────────────
 
-/// Map an `ActivityState` to the corresponding event_type string.
-fn activity_event_type(state: ActivityState) -> &'static str {
+/// Map an `ActivityState` to the legacy sync-v2-compatible `event_type` string.
+///
+/// This collapsed string namespace exists for the old projection / replay
+/// boundary only. The sync-v3 daemon truth path must not depend on it.
+fn sync_v2_compat_activity_event_type(state: ActivityState) -> &'static str {
     match state {
         ActivityState::Running => "activity.running",
         ActivityState::Idle => "activity.idle",
@@ -157,7 +160,7 @@ pub fn poll_pane(snapshot: &PaneSnapshot) -> Option<PollResult> {
         pane_generation: None,
         pane_birth_ts: None,
         source_event_id: None,
-        event_type: activity_event_type(activity_state).to_string(),
+        event_type: sync_v2_compat_activity_event_type(activity_state).to_string(),
         payload,
         confidence: detect_result.confidence,
         is_heartbeat: false, // Poller events are never heartbeats
@@ -509,29 +512,35 @@ mod tests {
     // ── 9. Activity state mapping to event_type ─────────────────────
 
     #[test]
-    fn activity_state_mapping_to_event_type() {
+    fn sync_v2_compat_activity_state_mapping_to_event_type() {
         // Running
         assert_eq!(
-            activity_event_type(ActivityState::Running),
+            sync_v2_compat_activity_event_type(ActivityState::Running),
             "activity.running"
         );
         // Idle
-        assert_eq!(activity_event_type(ActivityState::Idle), "activity.idle");
+        assert_eq!(
+            sync_v2_compat_activity_event_type(ActivityState::Idle),
+            "activity.idle"
+        );
         // WaitingInput
         assert_eq!(
-            activity_event_type(ActivityState::WaitingInput),
+            sync_v2_compat_activity_event_type(ActivityState::WaitingInput),
             "activity.waiting_input"
         );
         // WaitingApproval
         assert_eq!(
-            activity_event_type(ActivityState::WaitingApproval),
+            sync_v2_compat_activity_event_type(ActivityState::WaitingApproval),
             "activity.waiting_approval"
         );
         // Error
-        assert_eq!(activity_event_type(ActivityState::Error), "activity.error");
+        assert_eq!(
+            sync_v2_compat_activity_event_type(ActivityState::Error),
+            "activity.error"
+        );
         // Unknown
         assert_eq!(
-            activity_event_type(ActivityState::Unknown),
+            sync_v2_compat_activity_event_type(ActivityState::Unknown),
             "activity.unknown"
         );
     }

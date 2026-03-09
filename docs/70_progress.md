@@ -2958,3 +2958,26 @@ JSONL スキャナーなし) を発見 → デーモンが stale binary で起�
 ### Intentional deferrals
 - v3 replay trimming / epoch continuity hardening is still deferred; this slice keeps an in-memory untrimmed v3 log
 - freshness still uses the current row-age summary rather than separate blocking/execution freshness clocks
+
+## 2026-03-09 — T-SYNCV3-CLEANUP-COMPAT done: legacy activity collapse made explicitly sync-v2-only
+
+### Summary
+- Cleaned up the remaining daemon-side `ActivityState` / `activity.*` collapse helpers so they read as sync-v2 compatibility plumbing rather than generic daemon truth.
+- The old projection parser and poller event encoder now explicitly advertise that they serve only the legacy sync-v2 projection / replay boundary.
+- Added a guardrail test proving the sync-v3 runtime path still honors provider-native Codex payload truth even when the legacy `event_type` string is deliberately contradictory.
+
+### Implementation notes
+- Renamed the projection helper to `parse_sync_v2_compat_activity_state()` and tightened its documentation around:
+  - legacy `activity.*` / `lifecycle.*` / `thread.*` / `turn.*` compatibility
+  - non-applicability to sync-v3 truth reducers
+- Renamed the poller helper to `sync_v2_compat_activity_event_type()` and documented that the collapsed `event_type` namespace is for the old boundary only.
+- Added a runtime test that mutates a Codex `task_complete` event to carry `event_type = "activity.running"` and still expects sync-v3 bootstrap to emit `thread.lifecycle = idle` + `turn.outcome = completed`.
+
+### Gate
+- `cargo test -p agtmux-daemon-v5 sync_v2_compat_activity_state_parsing -- --nocapture` PASS
+- `cargo test -p agtmux-source-poller sync_v2_compat_activity_state_mapping_to_event_type -- --nocapture` PASS
+- `cargo test -p agtmux sync_v3_runtime::tests::build_bootstrap_ignores_legacy_event_type_when_codex_payload_has_v3_truth -- --nocapture` PASS
+
+### Intentional deferrals
+- sync-v2 transport / replay / CLI-facing activity fields still remain for compatibility
+- broader v2 deletion is still deferred; this slice only isolates the legacy collapse more clearly

@@ -731,3 +731,16 @@ Phase 7 (Distribution) と独立して実施可能。
     - `ui.bootstrap.v2` / `ui.changes.v2` は未変更
     - v3 replay trimming / epoch hardening はこの slice では未実装のため、`ui.changes.v3` は現状 in-memory untrimmed log を返す
     - freshness は引き続き row-age summary ベースで、blocking/execution 別 clock は後続 slice に deferred
+
+- [x] T-SYNCV3-CLEANUP-COMPAT (P1) Daemon cleanup: make `ActivityState` / `activity.*` collapse explicitly sync-v2 compat-only — DONE (2026-03-09)
+  - 目的: daemon 側で残っている collapsed `ActivityState` / `activity.*` namespace を old sync-v2 projection / poller boundary に閉じ込め、sync-v3 truth path がそこへ依存しないことをより明示する
+  - Deliverables:
+    - `agtmux-daemon-v5` projection helper を sync-v2 compat scope が分かる名前/comment に整理する
+    - `agtmux-source-poller` の `ActivityState -> event_type` encoder を sync-v2 compat helper として明示する
+    - sync-v3 bootstrap test で Codex payload truth が contradictory legacy `event_type` より優先されることを固定する
+  - Evidence:
+    - `cargo test -p agtmux-daemon-v5 -p agtmux-source-poller -p agtmux sync_v2_compat -- --nocapture` PASS
+    - `cargo test -p agtmux sync_v3_runtime::tests::build_bootstrap_ignores_legacy_event_type_when_codex_payload_has_v3_truth -- --nocapture` PASS
+  - Notes:
+    - sync-v2 transport / replay / CLI-facing activity fields は未削除
+    - sync-v3 bootstrap / changes semantics はこの slice で変更しない

@@ -583,6 +583,29 @@ mod tests {
     }
 
     #[test]
+    fn build_bootstrap_ignores_legacy_event_type_when_codex_payload_has_v3_truth() {
+        let mut live = SyncV3LiveState::default();
+        let pane = tmux_pane("%18", "workbench", "@8", "codex");
+        let panes = vec![pane];
+        let mut tracker = PaneGenerationTracker::new();
+        tracker.update(&["%18"], ts(0));
+
+        let mut event = codex_event("task_complete", "%18", ts(10));
+        event.event_type = "activity.running".to_string();
+
+        live.apply_events(&[event], &panes, &tracker);
+        live.reconcile(&[], &panes, &tracker, ts(11));
+
+        let payload = live.build_bootstrap(ts(11));
+        payload.validate().expect("payload should validate");
+
+        let pane = &payload.panes[0];
+        assert_eq!(pane.thread.lifecycle, ThreadLifecycleV3::Idle);
+        assert_eq!(pane.thread.execution, ThreadExecutionV3::None);
+        assert_eq!(pane.thread.turn.outcome, TurnOutcomeV3::Completed);
+    }
+
+    #[test]
     fn build_bootstrap_emits_unmanaged_row_with_strict_identity_when_no_v3_truth_exists() {
         let mut live = SyncV3LiveState::default();
         let pane = tmux_pane("%45", "shells", "@9", "zsh");

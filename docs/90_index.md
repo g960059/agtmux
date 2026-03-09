@@ -47,7 +47,8 @@
   - `docs/research/20260309-status-notification-comparison.md`
   - `docs/research/claude-jsonl-waiting-states.md`
 - Current scope: fixture-first `sync-v3` contract freeze, canonical Rust v3 types, daemon-side request/attention/freshness scaffolding, Codex + Claude Phase 2 normalization, and live additive `ui.bootstrap.v3` + `ui.changes.v3` wiring from daemon truth
-- Still deferred: v3 replay trimming / epoch hardening and richer field-group freshness clocks beyond the current row-age summary
+- Cleanup note: daemon-side `ActivityState` / `activity.*` collapse is now explicitly documented as sync-v2 compatibility plumbing, not sync-v3 truth
+- Still deferred: v3 replay trimming / epoch hardening, richer field-group freshness clocks beyond the current row-age summary, and broader sync-v2 deletion
 
 ## Phase 3 Hardening (COMPLETE — 585 tests)
 - `docs/50_plan.md` (Phase 3 section)
