@@ -3,6 +3,7 @@
 //! States are derived from semantic events in the JSONL file,
 //! NOT from mtime or file-growth heuristics.
 
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 /// FSM states for a Codex session.
@@ -29,6 +30,9 @@ pub enum CodexSessionState {
 /// Inner type lives at `.payload.type`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CodexJsonlEvent {
+    /// RFC3339 timestamp for the JSONL record.
+    #[serde(default)]
+    pub timestamp: Option<String>,
     /// Top-level line type (event_msg, response_item, session_meta, etc.)
     #[serde(rename = "type")]
     pub top_type: String,
@@ -43,6 +47,19 @@ impl CodexJsonlEvent {
         self.payload["type"].as_str()
     }
 
+    /// Parse the top-level timestamp when present.
+    pub fn timestamp(&self) -> Option<DateTime<Utc>> {
+        self.timestamp
+            .as_deref()
+            .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+            .map(|ts| ts.with_timezone(&Utc))
+    }
+
+    /// Borrow the raw top-level timestamp string when present.
+    pub fn timestamp_str(&self) -> Option<&str> {
+        self.timestamp.as_deref()
+    }
+
     /// Extract the working directory from a session_meta event (`.payload.cwd`).
     pub fn session_cwd(&self) -> Option<&str> {
         if self.top_type == "session_meta" {
@@ -50,6 +67,43 @@ impl CodexJsonlEvent {
         } else {
             None
         }
+    }
+
+    /// Extract the turn identifier from `.payload.turn_id`.
+    pub fn turn_id(&self) -> Option<&str> {
+        self.payload["turn_id"].as_str()
+    }
+
+    /// Extract the call identifier from `.payload.call_id`.
+    pub fn call_id(&self) -> Option<&str> {
+        self.payload["call_id"].as_str()
+    }
+
+    /// Extract the tool name from `.payload.name`.
+    pub fn tool_name(&self) -> Option<&str> {
+        self.payload["name"].as_str()
+    }
+
+    /// Extract the abort reason from `.payload.reason`.
+    pub fn abort_reason(&self) -> Option<&str> {
+        self.payload["reason"].as_str()
+    }
+
+    /// Extract a review target type from `.payload.target.type`.
+    pub fn review_target_type(&self) -> Option<&str> {
+        self.payload["target"]["type"].as_str()
+    }
+
+    /// Extract the user-facing review hint from `.payload.user_facing_hint`.
+    pub fn user_facing_hint(&self) -> Option<&str> {
+        self.payload["user_facing_hint"].as_str()
+    }
+
+    /// Extract a request identity if the provider payload exposes one directly.
+    pub fn request_id(&self) -> Option<&str> {
+        self.payload["request_id"]
+            .as_str()
+            .or_else(|| self.payload["requestId"].as_str())
     }
 }
 
@@ -91,6 +145,7 @@ mod tests {
 
     fn ev(top: &str, inner: &str) -> CodexJsonlEvent {
         CodexJsonlEvent {
+            timestamp: None,
             top_type: top.to_owned(),
             payload: serde_json::json!({"type": inner}),
         }
@@ -98,6 +153,7 @@ mod tests {
 
     fn ev_top(top: &str) -> CodexJsonlEvent {
         CodexJsonlEvent {
+            timestamp: None,
             top_type: top.to_owned(),
             payload: serde_json::Value::Null,
         }
@@ -276,6 +332,7 @@ mod tests {
     #[test]
     fn session_meta_cwd_extraction() {
         let event = CodexJsonlEvent {
+            timestamp: None,
             top_type: "session_meta".to_owned(),
             payload: serde_json::json!({"type": "session_meta", "cwd": "/Users/vm/project"}),
         };

@@ -679,3 +679,15 @@ Phase 7 (Distribution) と独立して実施可能。
     - online/live E2E covers the `shell + non-agent child` demotion seam
   - Scratch handover: `/tmp/agtmux-a8-shell-non-agent-child-demotion-20260309.md`
   - blocked_by: T-XTERM-A7
+
+- [x] T-SYNCV3-P2 (P0) Cross-repo: v3 Codex semantic normalization in daemon truth path — DONE (2026-03-09)
+  - 目的: v3 truth path で Codex JSONL の旧 collapsed semantics を継承せず、`task_complete` / review mode / tool execution / approval truth を frozen contract に合わせて正規化する
+  - Deliverables:
+    - `agtmux-source-codex-jsonl` が transition payload に raw Codex semantic trigger (`task_complete`, `entered_review_mode`, `function_call` など) と actual activity timestamp を保持
+    - `agtmux-daemon-v5` に Codex v3 normalizer を追加し、`task_complete -> thread.lifecycle=idle + turn.outcome=completed`、`entered_review_mode -> flags.review_mode + pending approval request`、`function_call -> execution=tool_running` を実装
+    - review flag 単体では blocking/attention を駆動しないことをテストで固定
+  - Evidence:
+    - `cargo test -p agtmux-source-codex-jsonl -p agtmux-daemon-v5` PASS
+  - Notes:
+    - v2 projection / `ActivityState` は未削除
+    - live `ui.bootstrap.v3` RPC はこの slice では未接続

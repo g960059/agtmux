@@ -27,6 +27,8 @@ pub struct CodexSessionFileWatcher {
     historical_state: CodexSessionState,
     /// Timestamp of the last state-changing historical event, if present.
     last_event_ts: Option<DateTime<Utc>>,
+    /// Full state-changing historical event used for bootstrap semantic replay.
+    last_transition_event: Option<CodexJsonlEvent>,
     /// First non-injected user prompt seen in this session, used as a title fallback.
     last_first_prompt: Option<String>,
 }
@@ -35,11 +37,12 @@ impl CodexSessionFileWatcher {
     /// Create a new watcher, seeking to EOF so that future lines are tracked.
     pub fn new(path: PathBuf) -> Self {
         let (seek_pos, inode) = file_metadata(&path).unwrap_or((0, 0));
-        let (historical_state, last_event_ts, last_first_prompt) = if seek_pos > 0 {
-            scan_historical(&path)
-        } else {
-            (CodexSessionState::Init, None, None)
-        };
+        let (historical_state, last_event_ts, last_transition_event, last_first_prompt) =
+            if seek_pos > 0 {
+                scan_historical(&path)
+            } else {
+                (CodexSessionState::Init, None, None, None)
+            };
         Self {
             path,
             seek_pos,
@@ -48,6 +51,7 @@ impl CodexSessionFileWatcher {
             bootstrapped: false,
             historical_state,
             last_event_ts,
+            last_transition_event,
             last_first_prompt,
         }
     }
@@ -64,6 +68,7 @@ impl CodexSessionFileWatcher {
             bootstrapped: false,
             historical_state: CodexSessionState::Init,
             last_event_ts: None,
+            last_transition_event: None,
             last_first_prompt: None,
         }
     }
@@ -86,6 +91,10 @@ impl CodexSessionFileWatcher {
 
     pub fn last_event_ts(&self) -> Option<DateTime<Utc>> {
         self.last_event_ts
+    }
+
+    pub fn last_transition_event(&self) -> Option<&CodexJsonlEvent> {
+        self.last_transition_event.as_ref()
     }
 
     pub fn last_first_prompt(&self) -> Option<&str> {
@@ -175,14 +184,22 @@ fn file_metadata(path: &Path) -> Option<(u64, u64)> {
     }
 }
 
-fn scan_historical(path: &Path) -> (CodexSessionState, Option<DateTime<Utc>>, Option<String>) {
+fn scan_historical(
+    path: &Path,
+) -> (
+    CodexSessionState,
+    Option<DateTime<Utc>>,
+    Option<CodexJsonlEvent>,
+    Option<String>,
+) {
     let file = match File::open(path) {
         Ok(file) => file,
-        Err(_) => return (CodexSessionState::Init, None, None),
+        Err(_) => return (CodexSessionState::Init, None, None, None),
     };
 
     let mut state = CodexSessionState::Init;
     let mut last_event_ts = None;
+    let mut last_transition_event = None;
     let mut first_prompt = None;
     let reader = BufReader::new(file);
 
@@ -196,21 +213,12 @@ fn scan_historical(path: &Path) -> (CodexSessionState, Option<DateTime<Utc>>, Op
         let new_state = transition(state, &event);
         if new_state != state {
             state = new_state;
-            if let Some(ts) = parse_timestamp(&line) {
-                last_event_ts = Some(ts);
-            }
+            last_event_ts = event.timestamp();
+            last_transition_event = Some(event);
         }
     }
 
-    (state, last_event_ts, first_prompt)
-}
-
-fn parse_timestamp(line: &str) -> Option<DateTime<Utc>> {
-    let value: serde_json::Value = serde_json::from_str(line).ok()?;
-    let timestamp = value["timestamp"].as_str()?;
-    DateTime::parse_from_rfc3339(timestamp)
-        .ok()
-        .map(|ts| ts.with_timezone(&Utc))
+    (state, last_event_ts, last_transition_event, first_prompt)
 }
 
 fn extract_first_prompt(line: &str) -> Option<String> {
@@ -372,6 +380,12 @@ mod tests {
         let watcher = CodexSessionFileWatcher::new(path.clone());
         assert_eq!(watcher.historical_state(), CodexSessionState::WaitingInput);
         assert_eq!(
+            watcher
+                .last_transition_event()
+                .and_then(CodexJsonlEvent::inner_type),
+            Some("task_complete")
+        );
+        assert_eq!(
             watcher.last_event_ts(),
             Some(
                 DateTime::parse_from_rfc3339("2026-03-06T04:48:49.314Z")
@@ -379,6 +393,36 @@ mod tests {
                     .with_timezone(&Utc)
             )
         );
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn watcher_preserves_historical_review_event_payload_for_bootstrap() {
+        let path = temp_jsonl("codex-test-historical-review.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                r#"{"timestamp":"2026-03-06T04:48:31.769Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-03-06T04:48:49.314Z","type":"event_msg","payload":{"type":"entered_review_mode","turn_id":"turn-1","target":{"type":"uncommittedChanges"},"user_facing_hint":"current changes"}}"#
+            ),
+        )
+        .expect("test");
+
+        let watcher = CodexSessionFileWatcher::new(path.clone());
+        let review_event = watcher.last_transition_event().expect("transition event");
+        assert_eq!(
+            watcher.historical_state(),
+            CodexSessionState::WaitingApproval
+        );
+        assert_eq!(review_event.inner_type(), Some("entered_review_mode"));
+        assert_eq!(review_event.turn_id(), Some("turn-1"));
+        assert_eq!(
+            review_event.review_target_type(),
+            Some("uncommittedChanges")
+        );
+        assert_eq!(review_event.user_facing_hint(), Some("current changes"));
 
         let _ = fs::remove_file(&path);
     }

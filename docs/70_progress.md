@@ -2822,3 +2822,35 @@ JSONL スキャナーなし) を発見 → デーモンが stale binary で起�
   - shell demotion on exact pane row after agent termination / `Ctrl-C`
   - same-session same-provider no-bleed with multiple Codex panes
 - then rerun downstream direct bootstrap probe and the thin `agtmux-term` live canaries
+
+## 2026-03-09 — T-SYNCV3-P2 done: Codex semantic normalization landed in the v3 daemon truth path
+
+### Summary
+- `agtmux-source-codex-jsonl` now preserves the actual Codex JSONL semantic trigger inside `SourceEventV2.payload.codex_jsonl` while leaving the old v2 `event_type` strings unchanged for compatibility.
+- The preserved payload includes the inner event type (`task_complete`, `entered_review_mode`, `function_call`, etc.), turn/call identity where available, review target metadata, and the real activity timestamp.
+- `agtmux-daemon-v5` now has a dedicated `codex_v3` normalizer for the frozen sync-v3 contract instead of reusing collapsed `ActivityState` semantics.
+
+### Behavior corrections fixed in this slice
+- `task_complete` now normalizes to:
+  - `thread.lifecycle = idle`
+  - `turn.outcome = completed`
+  - no implicit `waiting_user_input`
+- `entered_review_mode` now normalizes to:
+  - `thread.flags.review_mode = true`
+  - synthetic pending approval request entity in `pending_requests[]`
+  - `thread.blocking` / `attention` derived from that request entity, not from the flag alone
+- `function_call` / `custom_tool_call` now normalize to:
+  - `thread.execution = tool_running`
+  - no flattening back to generic running semantics in the v3 path
+- `exited_review_mode` resolves the synthetic approval request and clears derived blocking state
+
+### Implementation notes
+- Added `crates/agtmux-daemon-v5/src/codex_v3.rs` as a standalone daemon normalizer module.
+- Extended `SyncV3Reducer` with the minimal helpers needed for this slice:
+  - request resolution by predicate
+  - `review_mode` flag mutation
+  - Codex `provider_raw` update
+- Kept v2 projection behavior untouched; this slice does not wire live `ui.bootstrap.v3` / `ui.changes.v3` yet.
+
+### Gate
+- `cargo test -p agtmux-source-codex-jsonl -p agtmux-daemon-v5` PASS

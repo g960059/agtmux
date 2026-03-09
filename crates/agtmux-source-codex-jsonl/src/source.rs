@@ -159,6 +159,7 @@ impl CodexJsonlSourceState {
 
                     if let Some(ev) = translate::translate_state_change(
                         new_state,
+                        &codex_event,
                         &discovery.session_key,
                         &discovery.pane_id,
                         discovery.pane_generation,
@@ -177,12 +178,12 @@ impl CodexJsonlSourceState {
                 if !emitted_real_event {
                     if let Some(event) = translate::bootstrap_event(
                         watcher.historical_state(),
+                        watcher.last_transition_event(),
                         &discovery.session_key,
                         &discovery.pane_id,
                         discovery.pane_generation,
                         discovery.pane_birth_ts,
                         now,
-                        watcher.last_event_ts(),
                     ) {
                         events.push(event);
                     } else {
@@ -304,6 +305,8 @@ mod tests {
         assert_eq!(ev.source_kind, SourceKind::CodexJsonl);
         assert_eq!(ev.tier, EvidenceTier::Deterministic);
         assert!(!ev.is_heartbeat);
+        assert_eq!(ev.payload["codex_jsonl"]["inner_type"], "task_started");
+        assert_eq!(ev.payload["codex_jsonl"]["top_type"], "event_msg");
 
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -345,6 +348,10 @@ mod tests {
             !waiting_input_real.is_empty(),
             "task_complete should produce activity.waiting_input (non-heartbeat)"
         );
+        assert_eq!(
+            waiting_input_real[0].payload["codex_jsonl"]["inner_type"],
+            "task_complete"
+        );
 
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -384,6 +391,10 @@ mod tests {
             !approval_events.is_empty(),
             "entered_review_mode should produce activity.waiting_approval"
         );
+        assert_eq!(
+            approval_events[0].payload["codex_jsonl"]["inner_type"],
+            "entered_review_mode"
+        );
 
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -413,6 +424,18 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_type, "activity.running");
         assert!(!events[0].is_heartbeat);
+        assert_eq!(
+            events[0].payload["codex_jsonl"]["inner_type"],
+            "task_started"
+        );
+        assert_eq!(
+            events[0].actual_activity_at,
+            Some(
+                DateTime::parse_from_rfc3339("2026-03-06T04:48:31.770Z")
+                    .expect("valid timestamp")
+                    .with_timezone(&Utc)
+            )
+        );
 
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -437,6 +460,10 @@ mod tests {
         let mut source = CodexJsonlSourceState::new();
         let first = source.poll_files(&mut watchers, &discoveries, now());
         assert_eq!(first[0].event_type, "activity.running");
+        assert_eq!(
+            first[0].payload["codex_jsonl"]["inner_type"],
+            "task_started"
+        );
 
         let mut f = fs::OpenOptions::new()
             .append(true)
@@ -455,6 +482,14 @@ mod tests {
                 .iter()
                 .any(|e| e.event_type == "activity.waiting_input" && !e.is_heartbeat),
             "task_complete after historical running state should still transition"
+        );
+        let task_complete = second
+            .iter()
+            .find(|e| e.event_type == "activity.waiting_input" && !e.is_heartbeat)
+            .expect("task_complete event");
+        assert_eq!(
+            task_complete.payload["codex_jsonl"]["inner_type"],
+            "task_complete"
         );
 
         let _ = fs::remove_dir_all(&tmp);

@@ -185,6 +185,54 @@ impl SyncV3Reducer {
         true
     }
 
+    pub fn resolve_requests_matching<F>(
+        &mut self,
+        status: PendingRequestStatusV3,
+        updated_at: DateTime<Utc>,
+        mut predicate: F,
+    ) -> usize
+    where
+        F: FnMut(&PendingRequestV3) -> bool,
+    {
+        let mut changed = 0usize;
+        for request in self.requests.entries.values_mut() {
+            if predicate(request) && request.status != status {
+                request.status = status;
+                request.updated_at = updated_at;
+                changed += 1;
+            }
+        }
+
+        if changed > 0 {
+            self.refresh_requests_and_summaries(updated_at);
+        }
+
+        changed
+    }
+
+    pub fn set_review_mode(&mut self, review_mode: bool, updated_at: DateTime<Utc>) {
+        if self.snapshot.thread.flags.review_mode == review_mode
+            && self.snapshot.updated_at == updated_at
+        {
+            return;
+        }
+
+        self.snapshot.thread.flags.review_mode = review_mode;
+        self.snapshot.updated_at = updated_at;
+        self.recompute_attention(updated_at);
+    }
+
+    pub fn set_provider_raw_codex(&mut self, raw: serde_json::Value, updated_at: DateTime<Utc>) {
+        if self.snapshot.provider_raw.codex.as_ref() == Some(&raw)
+            && self.snapshot.updated_at == updated_at
+        {
+            return;
+        }
+
+        self.snapshot.provider_raw.codex = Some(raw);
+        self.snapshot.updated_at = updated_at;
+    }
+
     pub fn set_turn(&mut self, turn: TurnStateV3, updated_at: DateTime<Utc>) {
         self.snapshot.thread.turn = turn;
         self.snapshot.updated_at = updated_at;

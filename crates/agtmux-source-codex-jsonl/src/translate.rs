@@ -3,13 +3,14 @@
 use agtmux_core_v5::types::{EvidenceTier, Provider, SourceEventV2, SourceKind};
 use chrono::{DateTime, Utc};
 
-use crate::fsm::CodexSessionState;
+use crate::fsm::{CodexJsonlEvent, CodexSessionState};
 
 /// Translate a Codex FSM state transition into a SourceEventV2.
 ///
 /// Returns `None` for states that don't produce events (e.g. Init, Ended).
 pub fn translate_state_change(
     new_state: CodexSessionState,
+    event: &CodexJsonlEvent,
     session_key: &str,
     pane_id: &str,
     pane_generation: Option<u64>,
@@ -31,10 +32,10 @@ pub fn translate_state_change(
         pane_birth_ts,
         source_event_id: None,
         event_type: event_type.to_owned(),
-        payload: serde_json::json!({"fsm_state": format!("{new_state:?}")}),
+        payload: build_payload(new_state, Some(event), false),
         confidence: 1.0,
         is_heartbeat: false,
-        actual_activity_at: None,
+        actual_activity_at: event.timestamp(),
     })
 }
 
@@ -42,12 +43,12 @@ pub fn translate_state_change(
 /// creation time.
 pub fn bootstrap_event(
     state: CodexSessionState,
+    transition_event: Option<&CodexJsonlEvent>,
     session_key: &str,
     pane_id: &str,
     pane_generation: Option<u64>,
     pane_birth_ts: Option<DateTime<Utc>>,
     observed_at: DateTime<Utc>,
-    actual_activity_at: Option<DateTime<Utc>>,
 ) -> Option<SourceEventV2> {
     let event_type = state_to_event_type(state)?;
 
@@ -63,10 +64,10 @@ pub fn bootstrap_event(
         pane_birth_ts,
         source_event_id: None,
         event_type: event_type.to_owned(),
-        payload: serde_json::json!({"fsm_state": format!("{state:?}"), "bootstrap": true}),
+        payload: build_payload(state, transition_event, true),
         confidence: 1.0,
         is_heartbeat: false,
-        actual_activity_at,
+        actual_activity_at: transition_event.and_then(CodexJsonlEvent::timestamp),
     })
 }
 
@@ -114,6 +115,35 @@ fn state_to_event_type(state: CodexSessionState) -> Option<&'static str> {
     }
 }
 
+fn build_payload(
+    state: CodexSessionState,
+    event: Option<&CodexJsonlEvent>,
+    bootstrap: bool,
+) -> serde_json::Value {
+    let mut payload = serde_json::json!({
+        "fsm_state": format!("{state:?}"),
+        "bootstrap": bootstrap,
+    });
+
+    if let Some(event) = event {
+        payload["codex_jsonl"] = serde_json::json!({
+            "timestamp": event.timestamp_str(),
+            "top_type": event.top_type.as_str(),
+            "inner_type": event.inner_type(),
+            "turn_id": event.turn_id(),
+            "call_id": event.call_id(),
+            "tool_name": event.tool_name(),
+            "reason": event.abort_reason(),
+            "review_target_type": event.review_target_type(),
+            "user_facing_hint": event.user_facing_hint(),
+            "request_id": event.request_id(),
+            "bootstrap": bootstrap
+        });
+    }
+
+    payload
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,6 +160,11 @@ mod tests {
     fn running_state_produces_activity_running() {
         let ev = translate_state_change(
             CodexSessionState::Running,
+            &CodexJsonlEvent {
+                timestamp: Some("2026-03-02T10:00:00Z".to_owned()),
+                top_type: "event_msg".to_owned(),
+                payload: serde_json::json!({"type": "task_started", "turn_id": "turn-1"}),
+            },
             "sess-1",
             "%3",
             Some(1),
@@ -147,12 +182,20 @@ mod tests {
         assert_eq!(ev.pane_generation, Some(1));
         assert!(!ev.is_heartbeat);
         assert!((ev.confidence - 1.0).abs() < f64::EPSILON);
+        assert_eq!(ev.actual_activity_at, Some(now()));
+        assert_eq!(ev.payload["codex_jsonl"]["inner_type"], "task_started");
+        assert_eq!(ev.payload["codex_jsonl"]["turn_id"], "turn-1");
     }
 
     #[test]
     fn tool_executing_state_produces_activity_running() {
         let ev = translate_state_change(
             CodexSessionState::ToolExecuting,
+            &CodexJsonlEvent {
+                timestamp: Some("2026-03-02T10:00:00Z".to_owned()),
+                top_type: "response_item".to_owned(),
+                payload: serde_json::json!({"type": "function_call", "name": "shell_command", "call_id": "call-1"}),
+            },
             "sess-1",
             "%3",
             None,
@@ -161,29 +204,50 @@ mod tests {
             2,
         );
         assert!(ev.is_some());
-        assert_eq!(ev.expect("event").event_type, "activity.running");
+        let ev = ev.expect("event");
+        assert_eq!(ev.event_type, "activity.running");
+        assert_eq!(ev.payload["codex_jsonl"]["inner_type"], "function_call");
+        assert_eq!(ev.payload["codex_jsonl"]["tool_name"], "shell_command");
+        assert_eq!(ev.payload["codex_jsonl"]["call_id"], "call-1");
     }
 
     #[test]
     fn bootstrap_waiting_input_produces_real_event() {
         let ev = bootstrap_event(
             CodexSessionState::WaitingInput,
+            Some(&CodexJsonlEvent {
+                timestamp: Some("2026-03-02T10:00:00Z".to_owned()),
+                top_type: "event_msg".to_owned(),
+                payload: serde_json::json!({"type": "task_complete", "turn_id": "turn-1"}),
+            }),
             "sess-1",
             "%3",
             None,
             None,
             now(),
-            None,
         );
         let ev = ev.expect("event");
         assert_eq!(ev.event_type, "activity.waiting_input");
         assert!(!ev.is_heartbeat);
+        assert_eq!(ev.actual_activity_at, Some(now()));
+        assert_eq!(ev.payload["codex_jsonl"]["inner_type"], "task_complete");
+        assert_eq!(ev.payload["codex_jsonl"]["bootstrap"], true);
     }
 
     #[test]
     fn waiting_approval_produces_waiting_approval() {
         let ev = translate_state_change(
             CodexSessionState::WaitingApproval,
+            &CodexJsonlEvent {
+                timestamp: Some("2026-03-02T10:00:00Z".to_owned()),
+                top_type: "event_msg".to_owned(),
+                payload: serde_json::json!({
+                    "type": "entered_review_mode",
+                    "turn_id": "turn-1",
+                    "target": { "type": "uncommittedChanges" },
+                    "user_facing_hint": "current changes"
+                }),
+            },
             "sess-1",
             "%3",
             None,
@@ -192,13 +256,27 @@ mod tests {
             3,
         );
         assert!(ev.is_some());
-        assert_eq!(ev.expect("event").event_type, "activity.waiting_approval");
+        let ev = ev.expect("event");
+        assert_eq!(ev.event_type, "activity.waiting_approval");
+        assert_eq!(
+            ev.payload["codex_jsonl"]["review_target_type"],
+            "uncommittedChanges"
+        );
+        assert_eq!(
+            ev.payload["codex_jsonl"]["user_facing_hint"],
+            "current changes"
+        );
     }
 
     #[test]
     fn waiting_input_produces_activity_waiting_input() {
         let ev = translate_state_change(
             CodexSessionState::WaitingInput,
+            &CodexJsonlEvent {
+                timestamp: Some("2026-03-02T10:00:00Z".to_owned()),
+                top_type: "event_msg".to_owned(),
+                payload: serde_json::json!({"type": "task_complete"}),
+            },
             "sess-1",
             "%3",
             None,
@@ -214,6 +292,11 @@ mod tests {
     fn init_state_produces_no_event() {
         let ev = translate_state_change(
             CodexSessionState::Init,
+            &CodexJsonlEvent {
+                timestamp: Some("2026-03-02T10:00:00Z".to_owned()),
+                top_type: "event_msg".to_owned(),
+                payload: serde_json::json!({"type": "token_count"}),
+            },
             "sess-1",
             "%3",
             None,
@@ -228,6 +311,11 @@ mod tests {
     fn ended_state_produces_no_event() {
         let ev = translate_state_change(
             CodexSessionState::Ended,
+            &CodexJsonlEvent {
+                timestamp: Some("2026-03-02T10:00:00Z".to_owned()),
+                top_type: "event_msg".to_owned(),
+                payload: serde_json::json!({"type": "thread_rolled_back"}),
+            },
             "sess-1",
             "%3",
             None,
