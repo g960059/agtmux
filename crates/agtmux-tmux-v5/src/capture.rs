@@ -1,5 +1,6 @@
 //! Pane capture and process inspection.
 
+use agtmux_core_v5::system_bin::resolve_ps_bin;
 use std::collections::{HashMap, HashSet};
 
 use crate::error::TmuxError;
@@ -23,12 +24,13 @@ pub type ProcessMap = HashMap<u32, ProcessInfo>;
 ///
 /// Called once per tick; returns an error string on failure (non-fatal to the daemon).
 pub fn scan_all_processes() -> Result<ProcessMap, String> {
-    let output = match std::process::Command::new("ps")
+    let ps_bin = resolve_ps_bin();
+    let output = match std::process::Command::new(&ps_bin)
         .args(["-eo", "pid=,ppid=,args="])
         .output()
     {
         Ok(o) => o,
-        Err(e) => return Err(format!("failed to spawn ps: {e}")),
+        Err(e) => return Err(format!("failed to spawn ps via {ps_bin}: {e}")),
     };
 
     if !output.status.success() {

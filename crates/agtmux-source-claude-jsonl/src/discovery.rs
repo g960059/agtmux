@@ -4,6 +4,7 @@
 //! Claude Code JSONL transcript file by checking `sessions-index.json`
 //! and falling back to project-directory `*.jsonl` scan.
 
+use agtmux_core_v5::system_bin::resolve_lsof_bin;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -283,7 +284,8 @@ fn discover_jsonl_via_lsof(pid: u32, claude_projects_dir: &Path) -> Option<(Stri
     use std::process::Command;
     use std::time::SystemTime;
 
-    let output = Command::new("lsof")
+    let lsof_bin = resolve_lsof_bin();
+    let output = Command::new(&lsof_bin)
         .args(["-F", "n", "-p", &pid.to_string()])
         .output()
         .ok()?;

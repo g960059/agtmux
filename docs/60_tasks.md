@@ -820,3 +820,20 @@ Phase 7 (Distribution) と独立して実施可能。
   - Notes:
     - by design, `task_complete` does not imply `waiting_user_input` in sync-v3 without an explicit unresolved input request entity
     - term must not infer `waiting_user_input` from Codex `completed_idle` rows alone
+
+- [x] T-XTERM-A6b (P0) Producer fix: app-child exact-socket Codex promotion survives stripped PATH metadata tools — DONE (2026-03-09)
+  - 目的: tmux inventory は exact socket で見えているのに `ui.bootstrap.v3` では `shell:%pane` unmanaged row しか出ない blocker を producer-side metadata pipeline で解消する
+  - Deliverables:
+    - shared producer-side system binary resolver を追加し、app-child / XCUITest 由来の stripped PATH でも `ps` と `lsof` を標準 system path fallback で解決する
+    - `scan_all_processes()` と JSONL discovery の `lsof` call sites を helper 経由に寄せ、tmux inventory だけ成功して managed promotion が fail-closed になる drift をなくす
+    - docs / tests で「sync-v3 bootstrap が unmanaged なのは row composition の collapse ではなく producer managed-truth 未形成だった」ことを固定する
+  - Evidence:
+    - `cargo fmt --all` PASS
+    - `cargo test -p agtmux-core-v5 system_bin -- --nocapture` PASS
+    - `cargo test -p agtmux-tmux-v5 snapshot_deep_inspection_shell_descendant_codex -- --nocapture` PASS
+    - `cargo test -p agtmux-source-codex-jsonl get_cwd_via_lsof_invalid_pid_returns_none -- --nocapture` PASS
+    - `cargo test -p agtmux-source-claude-jsonl discover_jsonl_via_lsof_nonexistent_pid_returns_none -- --nocapture` PASS
+    - `cargo test -p agtmux ui_bootstrap_v3_emits_unmanaged_row_when_no_semantic_truth_exists -- --nocapture` PASS
+  - Notes:
+    - no sync-v3 semantics changed in this slice
+    - this restores producer managed-truth formation so bootstrap can surface the row that already belongs on the exact socket

@@ -3145,3 +3145,39 @@ JSONL スキャナーなし) を発見 → デーモンが stale binary で起�
 ### Consumer implication
 - term cannot rely on `waiting_user_input` for Codex rows in sync-v3 unless producer truth includes an explicit pending input request
 - `completed_idle` for Codex after `task_complete` is the canonical v3 truth, even when sync-v2/json still shows `waiting_input`
+
+## 2026-03-09 — T-XTERM-A6b done: app-child exact-socket managed promotion no longer depends on PATH finding `ps` / `lsof`
+
+### Summary
+- Investigated the new upstream blocker where the term-side targeted XCUITest could directly probe the pane on the exact tmux socket, but `ui.bootstrap.v3` still surfaced only one unmanaged row such as `presence=unmanaged provider=nil session_key=shell:%0 current_cmd=zsh freshness=down`.
+- The failure was upstream of sync-v3 row composition. `ui.bootstrap.v3` only emits that unmanaged fallback row when:
+  - tmux inventory already contains the pane in `last_panes`
+  - but neither the daemon managed projection nor the sync-v3 reducer has any truth for that pane
+- For a plain shell pane hosting a live Codex child, producer promotion depends on metadata tools:
+  - `scan_all_processes()` must succeed so deep process inspection can turn `current_cmd=zsh` into `process_hint=codex`
+  - Codex / Claude discovery may also call `lsof`
+- `tmux` already had hardened binary resolution via `TMUX_BIN` + standard-path fallback, but `ps` and `lsof` still used bare PATH lookup. In app-child / XCUITest environments that can leave inventory working on the exact socket while the metadata path fails closed, which exactly matches the observed `shell:%0` bootstrap row.
+
+### Implementation notes
+- Added `agtmux-core-v5::system_bin` as the shared producer-side system binary resolver.
+  - `resolve_ps_bin()` falls back to `/bin/ps`, `/usr/bin/ps`
+  - `resolve_lsof_bin()` falls back to `/usr/sbin/lsof`, `/usr/bin/lsof`
+- Updated `crates/agtmux-tmux-v5/src/capture.rs`
+  - `scan_all_processes()` now resolves `ps` through the shared helper before spawning
+  - failure logging now includes the resolved spawn target for easier future diagnosis
+- Updated `crates/agtmux-source-codex-jsonl/src/discovery.rs`
+  - `get_cwd_via_lsof()` now resolves `lsof` through the shared helper
+- Updated `crates/agtmux-source-claude-jsonl/src/discovery.rs`
+  - fd-based JSONL discovery now resolves `lsof` through the same helper
+
+### Producer implication
+- This slice does not change sync-v3 truth semantics or identity rules.
+- It fixes the upstream condition where managed truth never formed for the pane, so bootstrap can again surface the correct managed Codex row on the exact socket instead of falling back to unmanaged shell inventory.
+
+### Gate
+- `cargo fmt --all` PASS
+- `cargo test -p agtmux-core-v5 system_bin -- --nocapture` PASS
+- `cargo test -p agtmux-tmux-v5 snapshot_deep_inspection_shell_descendant_codex -- --nocapture` PASS
+- `cargo test -p agtmux-source-codex-jsonl get_cwd_via_lsof_invalid_pid_returns_none -- --nocapture` PASS
+- `cargo test -p agtmux-source-claude-jsonl discover_jsonl_via_lsof_nonexistent_pid_returns_none -- --nocapture` PASS
+- `cargo test -p agtmux ui_bootstrap_v3_emits_unmanaged_row_when_no_semantic_truth_exists -- --nocapture` PASS

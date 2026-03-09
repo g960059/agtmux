@@ -6,6 +6,7 @@
 //! When multiple panes share the same CWD, discovery must assign distinct JSONL
 //! sessions per pane instead of letting every pane claim the newest transcript.
 
+use agtmux_core_v5::system_bin::resolve_lsof_bin;
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
@@ -233,7 +234,8 @@ pub fn read_session_meta_cwd(path: &Path) -> Option<String> {
 /// The CWD file descriptor is always open (unlike regular files which may be
 /// burst-written and closed), making this timing-independent.
 pub fn get_cwd_via_lsof(pid: u32) -> Option<String> {
-    let output = Command::new("lsof")
+    let lsof_bin = resolve_lsof_bin();
+    let output = Command::new(&lsof_bin)
         .args(["-p", &pid.to_string(), "-d", "cwd", "-Fn"])
         .output()
         .ok()?;

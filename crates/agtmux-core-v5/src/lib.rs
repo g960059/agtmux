@@ -5,5 +5,6 @@ pub mod resolver;
 pub mod signature;
 pub mod sync_v2_compat;
 pub mod sync_v3;
+pub mod system_bin;
 pub mod title;
 pub mod types;
