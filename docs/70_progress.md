@@ -2919,3 +2919,42 @@ JSONL スキャナーなし) を発見 → デーモンが stale binary で起�
 ### Intentional deferrals
 - `ui.changes.v3` remains unimplemented
 - bootstrap freshness currently uses row-age summary rather than separate blocking/execution freshness clocks
+
+## 2026-03-09 — T-SYNCV3-P3-CHANGES done: additive `ui.changes.v3` wired from daemon truth
+
+### Summary
+- `agtmux-runtime` now exposes `ui.changes.v3` as the additive follow-on to `ui.bootstrap.v3`, driven from the same daemon-owned sync-v3 row truth rather than any term-side reinterpretation.
+- The v3 runtime path now keeps a canonical row store, replay cursor, and incremental change log keyed by the frozen exact identity contract.
+- Upserts carry the full normalized pane snapshot plus explicit `field_groups`; removals carry strict top-level identity only and never drop `pane_instance_id`.
+
+### Behavior in this slice
+- `ui.bootstrap.v3` now returns a `replay_cursor` so consumers can bootstrap and immediately continue with `ui.changes.v3`.
+- `ui.changes.v3` now emits:
+  - strict top-level identity on every change entry
+  - `kind = upsert` with the full sync-v3 pane row
+  - `kind = remove` with no nested pane payload
+  - field-group diffs for identity/presence/provider/agent/thread/pending_requests/attention/freshness/provider_raw
+- The live change feed preserves the earlier semantic corrections:
+  - Codex `task_complete` stays `thread.lifecycle = idle` + `turn.outcome = completed`
+  - Codex/Claude tool execution stays `execution = tool_running`
+  - Claude approval truth stays request-driven (`pending_requests[].request_id`, `blocking = waiting_approval`, attention summary)
+  - no synthetic collapse back into v2 `waiting_input` / `waiting_approval`
+
+### Implementation notes
+- Extended `SyncV3LiveState` to:
+  - reconcile canonical rows from provider reducers + managed fallback rows + unmanaged inventory rows
+  - append incremental v3 upsert/remove changes whenever those canonical rows change
+  - expose a replay cursor for bootstrap and replay batches for `ui.changes.v3`
+- Poll loop now reconciles the sync-v3 row store on each tick after daemon truth updates and shell demotion, so the v3 feed preserves intermediate daemon-side truth transitions instead of collapsing them to the next client read.
+- Server wiring now:
+  - reconciles sync-v3 state before serving `ui.bootstrap.v3` / `ui.changes.v3`
+  - returns `resync_required` for invalid/ahead-of-head v3 cursors
+  - keeps sync-v2 replay handlers untouched
+
+### Gate
+- `cargo fmt --all` PASS
+- `cargo test -p agtmux` PASS
+
+### Intentional deferrals
+- v3 replay trimming / epoch continuity hardening is still deferred; this slice keeps an in-memory untrimmed v3 log
+- freshness still uses the current row-age summary rather than separate blocking/execution freshness clocks

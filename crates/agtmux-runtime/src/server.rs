@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use agtmux_core_v5::sync_v3::UiBootstrapV3;
+use agtmux_core_v5::sync_v3::{SyncV3CursorV3, UiBootstrapV3, UiChangesV3};
 use serde::Serialize;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
@@ -276,8 +276,19 @@ async fn handle_connection(
             build_ui_bootstrap_v2(&st)
         }
         "ui.bootstrap.v3" => {
-            let st = state.lock().await;
-            build_ui_bootstrap_v3(&st)
+            let mut st = state.lock().await;
+            build_ui_bootstrap_v3(&mut st)
+        }
+        "ui.changes.v3" => {
+            let params = &request["params"];
+            let cursor = parse_sync_v3_cursor(&params["cursor"]);
+            let limit = params["limit"]
+                .as_u64()
+                .and_then(|n| usize::try_from(n).ok())
+                .unwrap_or(100)
+                .clamp(1, 1000);
+            let mut st = state.lock().await;
+            build_ui_changes_v3(&mut st, cursor, limit)
         }
         "ui.changes.v2" => {
             let params = &request["params"];
@@ -624,6 +635,12 @@ fn parse_replay_cursor(value: &serde_json::Value) -> Option<ReplayCursor> {
     })
 }
 
+fn parse_sync_v3_cursor(value: &serde_json::Value) -> Option<SyncV3CursorV3> {
+    Some(SyncV3CursorV3 {
+        seq: value.get("seq")?.as_u64()?,
+    })
+}
+
 fn build_session_list(state: &DaemonState) -> serde_json::Value {
     serde_json::to_value(state.daemon.list_sessions()).unwrap_or_else(|_| serde_json::json!([]))
 }
@@ -793,22 +810,37 @@ pub(crate) fn build_ui_bootstrap_v2(state: &DaemonState) -> serde_json::Value {
     })
 }
 
-pub(crate) fn build_ui_bootstrap_v3(state: &DaemonState) -> serde_json::Value {
-    let managed = state.daemon.list_panes();
-    let payload = state.sync_v3.build_bootstrap(
-        &managed,
-        &state.last_panes,
-        &state.generation_tracker,
-        chrono::Utc::now(),
-    );
+fn reconcile_sync_v3(state: &mut DaemonState, now: chrono::DateTime<chrono::Utc>) {
+    let managed = state
+        .daemon
+        .list_panes()
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let managed_refs = managed.iter().collect::<Vec<_>>();
+    let last_panes = state.last_panes.clone();
+    let generation_tracker = state.generation_tracker.clone();
+    state
+        .sync_v3
+        .reconcile(&managed_refs, &last_panes, &generation_tracker, now);
+}
+
+pub(crate) fn build_ui_bootstrap_v3(state: &mut DaemonState) -> serde_json::Value {
+    let now = chrono::Utc::now();
+    reconcile_sync_v3(state, now);
+    let payload = state.sync_v3.build_bootstrap(now);
 
     if let Err(err) = payload.validate() {
         tracing::warn!("ui.bootstrap.v3 validation error: {err}");
-        let fallback = UiBootstrapV3::new(payload.generated_at, Vec::new());
+        let mut fallback = UiBootstrapV3::new(payload.generated_at, Vec::new());
+        fallback.replay_cursor = Some(state.sync_v3.current_cursor());
         return serde_json::to_value(fallback).unwrap_or_else(|_| {
             serde_json::json!({
                 "version": agtmux_core_v5::sync_v3::UI_BOOTSTRAP_V3_VERSION,
                 "generated_at": chrono::Utc::now(),
+                "replay_cursor": {
+                    "seq": state.sync_v3.current_cursor().seq,
+                },
                 "panes": [],
             })
         });
@@ -818,7 +850,48 @@ pub(crate) fn build_ui_bootstrap_v3(state: &DaemonState) -> serde_json::Value {
         serde_json::json!({
             "version": agtmux_core_v5::sync_v3::UI_BOOTSTRAP_V3_VERSION,
             "generated_at": chrono::Utc::now(),
+            "replay_cursor": {
+                "seq": state.sync_v3.current_cursor().seq,
+            },
             "panes": [],
+        })
+    })
+}
+
+pub(crate) fn build_ui_changes_v3(
+    state: &mut DaemonState,
+    cursor: Option<SyncV3CursorV3>,
+    limit: usize,
+) -> serde_json::Value {
+    reconcile_sync_v3(state, chrono::Utc::now());
+    let payload = state.sync_v3.build_changes(cursor, limit);
+
+    if let Err(err) = payload.validate() {
+        tracing::warn!("ui.changes.v3 validation error: {err}");
+        let fallback = UiChangesV3::resync_required(
+            state.sync_v3.current_cursor().seq,
+            "invalid_server_payload",
+        );
+        return serde_json::to_value(fallback).unwrap_or_else(|_| {
+            serde_json::json!({
+                "version": agtmux_core_v5::sync_v3::UI_BOOTSTRAP_V3_VERSION,
+                "changes": [],
+                "resync_required": {
+                    "latest_snapshot_seq": state.sync_v3.current_cursor().seq,
+                    "reason": "invalid_server_payload",
+                },
+            })
+        });
+    }
+
+    serde_json::to_value(payload).unwrap_or_else(|_| {
+        serde_json::json!({
+            "version": agtmux_core_v5::sync_v3::UI_BOOTSTRAP_V3_VERSION,
+            "changes": [],
+            "resync_required": {
+                "latest_snapshot_seq": state.sync_v3.current_cursor().seq,
+                "reason": "serialization_failed",
+            },
         })
     })
 }
@@ -1856,14 +1929,15 @@ mod tests {
 
     #[test]
     fn ui_bootstrap_v3_emits_strict_identity_and_normalized_codex_truth() {
-        let state = make_bootstrap_v3_codex_completed_state();
+        let mut state = make_bootstrap_v3_codex_completed_state();
 
-        let result = build_ui_bootstrap_v3(&state);
+        let result = build_ui_bootstrap_v3(&mut state);
         let payload: UiBootstrapV3 =
             serde_json::from_value(result).expect("ui.bootstrap.v3 should parse");
         payload.validate().expect("ui.bootstrap.v3 should validate");
 
         assert_eq!(payload.version, 3);
+        assert_eq!(payload.replay_cursor, Some(SyncV3CursorV3 { seq: 1 }));
         assert_eq!(payload.panes.len(), 1);
         let pane = &payload.panes[0];
         assert_eq!(pane.session_name, "workbench");
@@ -1900,12 +1974,13 @@ mod tests {
         }];
         state.generation_tracker.update(&["%99"], now);
 
-        let result = build_ui_bootstrap_v3(&state);
+        let result = build_ui_bootstrap_v3(&mut state);
         let payload: UiBootstrapV3 =
             serde_json::from_value(result).expect("ui.bootstrap.v3 should parse");
         payload.validate().expect("ui.bootstrap.v3 should validate");
 
         assert_eq!(payload.panes.len(), 1);
+        assert_eq!(payload.replay_cursor, Some(SyncV3CursorV3 { seq: 1 }));
         let pane = &payload.panes[0];
         assert_eq!(pane.session_key, "shell:%99");
         assert_eq!(
@@ -1917,6 +1992,80 @@ mod tests {
             pane.freshness.snapshot,
             agtmux_core_v5::types::FreshnessState::Down
         );
+    }
+
+    #[test]
+    fn ui_changes_v3_emits_upsert_with_strict_identity_from_sync_v3_truth() {
+        let mut state = make_bootstrap_v3_codex_completed_state();
+        let bootstrap: UiBootstrapV3 = serde_json::from_value(build_ui_bootstrap_v3(&mut state))
+            .expect("ui.bootstrap.v3 should parse");
+        let cursor = bootstrap.replay_cursor.expect("bootstrap cursor");
+        let observed_at = Utc::now();
+
+        state.sync_v3.apply_events(
+            &[codex_v3_event("%12", "function_call", observed_at)],
+            &state.last_panes,
+            &state.generation_tracker,
+        );
+
+        let result = build_ui_changes_v3(&mut state, Some(cursor), 100);
+        let payload: UiChangesV3 =
+            serde_json::from_value(result).expect("ui.changes.v3 should parse");
+        payload.validate().expect("ui.changes.v3 should validate");
+
+        assert_eq!(payload.from_seq, Some(2));
+        assert_eq!(payload.to_seq, Some(2));
+        assert_eq!(payload.next_cursor, Some(SyncV3CursorV3 { seq: 2 }));
+        assert_eq!(payload.changes.len(), 1);
+
+        let change = &payload.changes[0];
+        assert_eq!(change.pane_id, "%12");
+        assert_eq!(change.session_name, "workbench");
+        assert_eq!(change.window_id, "@5");
+        assert_eq!(change.session_key, "codex:%12");
+        assert_eq!(change.pane_instance_id.pane_id, "%12");
+        assert!(
+            change
+                .field_groups
+                .contains(&agtmux_core_v5::sync_v3::SyncV3FieldGroupV3::Thread)
+        );
+        let pane = change.pane.as_ref().expect("upsert pane");
+        assert_eq!(
+            pane.thread.execution,
+            agtmux_core_v5::sync_v3::ThreadExecutionV3::ToolRunning
+        );
+    }
+
+    #[test]
+    fn ui_changes_v3_emits_remove_with_strict_identity_when_row_disappears() {
+        let mut state = make_bootstrap_v3_codex_completed_state();
+        let bootstrap: UiBootstrapV3 = serde_json::from_value(build_ui_bootstrap_v3(&mut state))
+            .expect("ui.bootstrap.v3 should parse");
+        let cursor = bootstrap.replay_cursor.expect("bootstrap cursor");
+
+        state.last_panes.clear();
+        state.sync_v3.retain_inventory(&state.last_panes);
+
+        let result = build_ui_changes_v3(&mut state, Some(cursor), 100);
+        let payload: UiChangesV3 =
+            serde_json::from_value(result).expect("ui.changes.v3 should parse");
+        payload.validate().expect("ui.changes.v3 should validate");
+
+        assert_eq!(payload.changes.len(), 1);
+        let change = &payload.changes[0];
+        assert_eq!(
+            change.kind,
+            agtmux_core_v5::sync_v3::SyncV3ChangeKindV3::Remove
+        );
+        assert_eq!(change.pane_id, "%12");
+        assert_eq!(change.session_name, "workbench");
+        assert_eq!(change.window_id, "@5");
+        assert_eq!(change.session_key, "codex:%12");
+        assert_eq!(
+            change.field_groups,
+            vec![agtmux_core_v5::sync_v3::SyncV3FieldGroupV3::Identity]
+        );
+        assert!(change.pane.is_none());
     }
 
     #[tokio::test]
@@ -1968,6 +2117,27 @@ mod tests {
             st.daemon.replay_len() > 0,
             "ui.bootstrap.v3 must not compact sync-v2 replay state"
         );
+    }
+
+    #[tokio::test]
+    async fn ui_changes_v3_handler_resyncs_on_invalid_cursor() {
+        let state = Arc::new(Mutex::new(make_bootstrap_v3_codex_completed_state()));
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "ui.changes.v3",
+            "id": 193,
+            "params": {
+                "cursor": {},
+                "limit": 100
+            }
+        });
+
+        let resp = call_handler(Arc::clone(&state), request).await;
+        assert_eq!(
+            resp["result"]["resync_required"]["reason"],
+            "invalid_cursor"
+        );
+        assert_eq!(resp["result"]["version"], 3);
     }
 
     #[tokio::test]

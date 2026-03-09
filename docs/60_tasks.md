@@ -717,3 +717,17 @@ Phase 7 (Distribution) と独立して実施可能。
   - Notes:
     - `ui.bootstrap.v2` / `ui.changes.v2` は未変更
     - live freshness は bootstrap では row-age based summary を使用し、 field-group differential freshness は後続 sliceに deferred
+
+- [x] T-SYNCV3-P3-CHANGES (P0) Cross-repo: additive `ui.changes.v3` wire from daemon truth — DONE (2026-03-09)
+  - 目的: `ui.bootstrap.v3` の frozen shape をそのまま継続利用しつつ、sync-v3 canonical row truth から additive な incremental update feed を公開する
+  - Deliverables:
+    - `agtmux-runtime` に sync-v3 canonical row store + replay cursor + change log を追加し、poll tick ごとに daemon truth から structured field-group update を emit する
+    - `ui.changes.v3` handler を追加し、strict identity fields (`session_name`, `window_id`, `session_key`, `pane_id`, `pane_instance_id`) を every upsert/remove payload に保持する
+    - upsert は full pane row を返しつつ `field_groups` で changed groups を明示し、remove は exact identity only で返す
+    - intermediate v3 semantic truth (`task_complete -> idle+completed`, Claude approval request truth, tool_running execution など) を v2 collapsed activity へ戻さないことをテストで固定する
+  - Evidence:
+    - `cargo test -p agtmux` PASS
+  - Notes:
+    - `ui.bootstrap.v2` / `ui.changes.v2` は未変更
+    - v3 replay trimming / epoch hardening はこの slice では未実装のため、`ui.changes.v3` は現状 in-memory untrimmed log を返す
+    - freshness は引き続き row-age summary ベースで、blocking/execution 別 clock は後続 slice に deferred

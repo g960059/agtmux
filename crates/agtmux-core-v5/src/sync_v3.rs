@@ -346,6 +346,8 @@ impl SyncV3PaneSnapshot {
 pub struct UiBootstrapV3 {
     pub version: u32,
     pub generated_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_cursor: Option<SyncV3CursorV3>,
     pub panes: Vec<SyncV3PaneSnapshot>,
 }
 
@@ -354,6 +356,7 @@ impl UiBootstrapV3 {
         Self {
             version: UI_BOOTSTRAP_V3_VERSION,
             generated_at,
+            replay_cursor: None,
             panes,
         }
     }
@@ -368,6 +371,202 @@ impl UiBootstrapV3 {
 
         for pane in &self.panes {
             pane.validate()?;
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncV3CursorV3 {
+    pub seq: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncV3FieldGroupV3 {
+    Identity,
+    Presence,
+    Provider,
+    Agent,
+    Thread,
+    PendingRequests,
+    Attention,
+    Freshness,
+    ProviderRaw,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncV3ChangeKindV3 {
+    Upsert,
+    Remove,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SyncV3PaneChangeV3 {
+    pub seq: u64,
+    pub at: DateTime<Utc>,
+    pub kind: SyncV3ChangeKindV3,
+    pub pane_id: String,
+    pub session_name: String,
+    pub window_id: String,
+    pub session_key: String,
+    pub pane_instance_id: PaneInstanceId,
+    pub field_groups: Vec<SyncV3FieldGroupV3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane: Option<SyncV3PaneSnapshot>,
+}
+
+impl SyncV3PaneChangeV3 {
+    pub fn validate(&self) -> Result<(), String> {
+        for (field_name, value) in [
+            ("session_name", self.session_name.as_str()),
+            ("window_id", self.window_id.as_str()),
+            ("session_key", self.session_key.as_str()),
+            ("pane_id", self.pane_id.as_str()),
+        ] {
+            if value.is_empty() {
+                return Err(format!(
+                    "required identity field {field_name} must not be empty"
+                ));
+            }
+        }
+
+        if self.pane_instance_id.pane_id != self.pane_id {
+            return Err("pane_instance_id.pane_id must match pane_id".to_string());
+        }
+
+        if self.field_groups.is_empty() {
+            return Err("ui.changes.v3 field_groups must not be empty".to_string());
+        }
+
+        match self.kind {
+            SyncV3ChangeKindV3::Upsert => {
+                let pane = self
+                    .pane
+                    .as_ref()
+                    .ok_or_else(|| "upsert change requires pane payload".to_string())?;
+                pane.validate()?;
+                if pane.pane_id != self.pane_id
+                    || pane.session_name != self.session_name
+                    || pane.window_id != self.window_id
+                    || pane.session_key != self.session_key
+                    || pane.pane_instance_id != self.pane_instance_id
+                {
+                    return Err(
+                        "upsert change identity fields must match nested pane payload".to_string(),
+                    );
+                }
+            }
+            SyncV3ChangeKindV3::Remove => {
+                if self.pane.is_some() {
+                    return Err("remove change must not include pane payload".to_string());
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncV3ResyncRequiredV3 {
+    pub latest_snapshot_seq: u64,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UiChangesV3 {
+    pub version: u32,
+    #[serde(default)]
+    pub changes: Vec<SyncV3PaneChangeV3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<SyncV3CursorV3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resync_required: Option<SyncV3ResyncRequiredV3>,
+}
+
+impl UiChangesV3 {
+    pub fn batch(
+        from_seq: u64,
+        to_seq: u64,
+        next_cursor: SyncV3CursorV3,
+        changes: Vec<SyncV3PaneChangeV3>,
+    ) -> Self {
+        Self {
+            version: UI_BOOTSTRAP_V3_VERSION,
+            changes,
+            from_seq: Some(from_seq),
+            to_seq: Some(to_seq),
+            next_cursor: Some(next_cursor),
+            resync_required: None,
+        }
+    }
+
+    pub fn resync_required(latest_snapshot_seq: u64, reason: impl Into<String>) -> Self {
+        Self {
+            version: UI_BOOTSTRAP_V3_VERSION,
+            changes: Vec::new(),
+            from_seq: None,
+            to_seq: None,
+            next_cursor: None,
+            resync_required: Some(SyncV3ResyncRequiredV3 {
+                latest_snapshot_seq,
+                reason: reason.into(),
+            }),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.version != UI_BOOTSTRAP_V3_VERSION {
+            return Err(format!(
+                "unexpected ui.changes.v3 version: {}",
+                self.version
+            ));
+        }
+
+        if self.resync_required.is_some() {
+            if self.from_seq.is_some() || self.to_seq.is_some() || self.next_cursor.is_some() {
+                return Err(
+                    "resync_required ui.changes.v3 response must not include batch cursors"
+                        .to_string(),
+                );
+            }
+            if !self.changes.is_empty() {
+                return Err(
+                    "resync_required ui.changes.v3 response must not include changes".to_string(),
+                );
+            }
+            return Ok(());
+        }
+
+        let from_seq = self
+            .from_seq
+            .ok_or_else(|| "ui.changes.v3 batch missing from_seq".to_string())?;
+        let to_seq = self
+            .to_seq
+            .ok_or_else(|| "ui.changes.v3 batch missing to_seq".to_string())?;
+        let next_cursor = self
+            .next_cursor
+            .ok_or_else(|| "ui.changes.v3 batch missing next_cursor".to_string())?;
+
+        if to_seq < from_seq.saturating_sub(1) {
+            return Err("ui.changes.v3 to_seq must be >= from_seq - 1".to_string());
+        }
+        if next_cursor.seq != to_seq {
+            return Err("ui.changes.v3 next_cursor.seq must equal to_seq".to_string());
+        }
+
+        for change in &self.changes {
+            change.validate()?;
+            if change.seq <= from_seq.saturating_sub(1) || change.seq > to_seq {
+                return Err("ui.changes.v3 change seq outside response window".to_string());
+            }
         }
 
         Ok(())
@@ -397,6 +596,7 @@ mod tests {
     fn bootstrap_version_is_frozen() {
         let payload = parse_fixture("codex-running.json");
         assert_eq!(payload.version, UI_BOOTSTRAP_V3_VERSION);
+        assert!(payload.replay_cursor.is_none());
         assert_eq!(payload.panes.len(), 1);
     }
 
@@ -467,5 +667,61 @@ mod tests {
             .validate()
             .expect_err("blocking must match requests");
         assert!(err.contains("waiting_approval"));
+    }
+
+    #[test]
+    fn ui_changes_v3_batch_validates() {
+        let pane = parse_fixture("codex-running.json")
+            .panes
+            .into_iter()
+            .next()
+            .expect("fixture pane");
+        let payload = UiChangesV3::batch(
+            0,
+            1,
+            SyncV3CursorV3 { seq: 1 },
+            vec![SyncV3PaneChangeV3 {
+                seq: 1,
+                at: pane.updated_at,
+                kind: SyncV3ChangeKindV3::Upsert,
+                pane_id: pane.pane_id.clone(),
+                session_name: pane.session_name.clone(),
+                window_id: pane.window_id.clone(),
+                session_key: pane.session_key.clone(),
+                pane_instance_id: pane.pane_instance_id.clone(),
+                field_groups: vec![SyncV3FieldGroupV3::Thread],
+                pane: Some(pane),
+            }],
+        );
+
+        payload.validate().expect("batch should validate");
+    }
+
+    #[test]
+    fn ui_changes_v3_remove_requires_identity_only() {
+        let pane = parse_fixture("codex-running.json")
+            .panes
+            .into_iter()
+            .next()
+            .expect("fixture pane");
+        let payload = UiChangesV3::batch(
+            1,
+            2,
+            SyncV3CursorV3 { seq: 2 },
+            vec![SyncV3PaneChangeV3 {
+                seq: 2,
+                at: pane.updated_at,
+                kind: SyncV3ChangeKindV3::Remove,
+                pane_id: pane.pane_id.clone(),
+                session_name: pane.session_name.clone(),
+                window_id: pane.window_id.clone(),
+                session_key: pane.session_key.clone(),
+                pane_instance_id: pane.pane_instance_id.clone(),
+                field_groups: vec![SyncV3FieldGroupV3::Identity],
+                pane: None,
+            }],
+        );
+
+        payload.validate().expect("remove batch should validate");
     }
 }
