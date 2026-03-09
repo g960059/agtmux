@@ -1176,12 +1176,7 @@ mod tests {
             pane_generation: None,
             pane_birth_ts: None,
             source_event_id: None,
-            event_type: match inner_type {
-                "task_complete" => "activity.waiting_input",
-                "function_call" => "activity.running",
-                _ => "activity.idle",
-            }
-            .to_string(),
+            event_type: "activity.unknown".to_string(),
             payload: serde_json::json!({
                 "codex_jsonl": {
                     "top_type": "event_msg",

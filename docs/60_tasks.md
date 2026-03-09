@@ -744,3 +744,20 @@ Phase 7 (Distribution) と独立して実施可能。
   - Notes:
     - sync-v2 transport / replay / CLI-facing activity fields は未削除
     - sync-v3 bootstrap / changes semantics はこの slice で変更しない
+
+- [x] T-SYNCV3-CLEANUP-PAYLOAD-TESTS (P1) Daemon cleanup: make sync-v3 tests payload-first instead of `activity.*`-first — DONE (2026-03-09)
+  - 目的: sync-v3 provider/runtime tests で native payload truth が既に存在する箇所について、legacy `activity.*` fixture strings への依存を減らし、compat-only fallback であることをより明示する
+  - Deliverables:
+    - `codex_v3.rs` / `claude_v3.rs` test helpers を payload-first default に寄せ、legacy compat `event_type` は neutral override として扱う
+    - sync-v3 runtime/server helper fixtures も neutral compat `event_type` を default にする
+    - poll-loop tests の deterministic Codex JSONL pre-ingest fixtures で empty payload をやめ、actual `payload.codex_jsonl` semantics を持つ event を使う
+    - contradictory compat `event_type` でも payload/native semantics が v3 reducer/runtime behavior を駆動することを focused tests で固定する
+  - Evidence:
+    - `cargo test -p agtmux-daemon-v5 task_complete_ignores_contradictory_compat_event_type_when_payload_truth_exists -- --nocapture` PASS
+    - `cargo test -p agtmux-daemon-v5 permission_request_ignores_contradictory_compat_event_type_when_hook_payload_exists -- --nocapture` PASS
+    - `cargo test -p agtmux-daemon-v5 jsonl_tool_use_ignores_contradictory_compat_event_type_when_payload_exists -- --nocapture` PASS
+    - `cargo test -p agtmux sync_v3_runtime::tests::build_bootstrap_ignores_legacy_event_type_when_codex_payload_has_v3_truth -- --nocapture` PASS
+    - `cargo test -p agtmux poll_tick_pulls_from_codex_jsonl_source -- --nocapture` PASS
+  - Notes:
+    - sync-v2 transport / replay / compat `event_type` field は未削除
+    - this slice is test/helper cleanup only; no intended daemon behavior change

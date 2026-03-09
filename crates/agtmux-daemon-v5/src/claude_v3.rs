@@ -388,6 +388,20 @@ mod tests {
         actual_activity_at: DateTime<Utc>,
         data: serde_json::Value,
     ) -> SourceEventV2 {
+        claude_hook_event_with_compat_event_type(
+            "lifecycle.unknown",
+            hook_type,
+            actual_activity_at,
+            data,
+        )
+    }
+
+    fn claude_hook_event_with_compat_event_type(
+        compat_event_type: &str,
+        hook_type: &str,
+        actual_activity_at: DateTime<Utc>,
+        data: serde_json::Value,
+    ) -> SourceEventV2 {
         let mut payload = match data {
             serde_json::Value::Object(map) => serde_json::Value::Object(map),
             other => serde_json::json!({ "raw_data": other }),
@@ -420,13 +434,9 @@ mod tests {
             pane_generation: Some(2),
             pane_birth_ts: Some(ts(0)),
             source_event_id: Some(format!("hook-{}", actual_activity_at.timestamp())),
-            event_type: match hook_type {
-                "PermissionRequest" => "activity.waiting_approval",
-                "Stop" | "SubagentStop" => "activity.waiting_input",
-                "Notification" => "activity.waiting_input",
-                _ => "lifecycle.unknown",
-            }
-            .to_string(),
+            // Sync-v3 hook semantics come from `payload.claude_hook`; the legacy
+            // compat `event_type` should not drive these reducer tests.
+            event_type: compat_event_type.to_string(),
             payload,
             confidence: 1.0,
             is_heartbeat: false,
@@ -435,6 +445,14 @@ mod tests {
     }
 
     fn claude_jsonl_event(line_type: &str, actual_activity_at: DateTime<Utc>) -> SourceEventV2 {
+        claude_jsonl_event_with_compat_event_type("activity.unknown", line_type, actual_activity_at)
+    }
+
+    fn claude_jsonl_event_with_compat_event_type(
+        compat_event_type: &str,
+        line_type: &str,
+        actual_activity_at: DateTime<Utc>,
+    ) -> SourceEventV2 {
         SourceEventV2 {
             event_id: format!(
                 "claude-jsonl-{line_type}-{}",
@@ -449,12 +467,7 @@ mod tests {
             pane_generation: Some(2),
             pane_birth_ts: Some(ts(0)),
             source_event_id: Some(format!("uuid-{}", actual_activity_at.timestamp())),
-            event_type: match line_type {
-                "assistant" => "activity.idle",
-                "tool_result" => "activity.tool_complete",
-                _ => "activity.running",
-            }
-            .to_string(),
+            event_type: compat_event_type.to_string(),
             payload: serde_json::json!({
                 "line_type": line_type,
                 "claude_jsonl": {
@@ -613,6 +626,44 @@ mod tests {
         assert_eq!(
             reducer.snapshot().thread.turn.outcome,
             TurnOutcomeV3::Completed
+        );
+    }
+
+    #[test]
+    fn permission_request_ignores_contradictory_compat_event_type_when_hook_payload_exists() {
+        let mut reducer = SyncV3Reducer::new(base_snapshot());
+        let event = claude_hook_event_with_compat_event_type(
+            "activity.idle",
+            "PermissionRequest",
+            ts(17),
+            serde_json::json!({
+                "tool_name": "Bash",
+                "request_id": "req-456"
+            }),
+        );
+
+        assert!(apply_claude_source_event(&mut reducer, &event));
+        assert_eq!(
+            reducer.snapshot().thread.blocking,
+            ThreadBlockingV3::WaitingApproval
+        );
+        assert_eq!(reducer.snapshot().pending_requests.len(), 1);
+        assert_eq!(reducer.snapshot().pending_requests[0].request_id, "req-456");
+    }
+
+    #[test]
+    fn jsonl_tool_use_ignores_contradictory_compat_event_type_when_payload_exists() {
+        let mut reducer = SyncV3Reducer::new(base_snapshot());
+        let event = claude_jsonl_event_with_compat_event_type("activity.idle", "tool_use", ts(18));
+
+        assert!(apply_claude_source_event(&mut reducer, &event));
+        assert_eq!(
+            reducer.snapshot().thread.execution,
+            ThreadExecutionV3::ToolRunning
+        );
+        assert_eq!(
+            reducer.snapshot().thread.lifecycle,
+            ThreadLifecycleV3::Active
         );
     }
 }

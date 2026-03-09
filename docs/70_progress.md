@@ -2981,3 +2981,34 @@ JSONL スキャナーなし) を発見 → デーモンが stale binary で起�
 ### Intentional deferrals
 - sync-v2 transport / replay / CLI-facing activity fields still remain for compatibility
 - broader v2 deletion is still deferred; this slice only isolates the legacy collapse more clearly
+
+## 2026-03-09 — T-SYNCV3-CLEANUP-PAYLOAD-TESTS done: sync-v3 tests now default to payload/native truth
+
+### Summary
+- Cleaned up sync-v3 reducer/runtime tests so native payload semantics are now the default source of truth in fixtures, while legacy `activity.*` strings are treated as compat-only overrides.
+- Codex and Claude v3 reducer tests no longer need semantic `event_type` strings for their main cases; they now carry neutral compat strings unless a test explicitly wants to prove the override is ignored.
+- Runtime-side Codex fixtures used by sync-v3 bootstrap tests now also default to neutral compat strings, and the remaining direct Codex JSONL pre-ingest tests in `poll_loop` now carry real `payload.codex_jsonl` semantics instead of empty payloads.
+
+### Implementation notes
+- `codex_v3.rs`
+  - split the test builder into a payload-first default helper plus a compat override helper
+  - added a focused test showing `task_complete` still normalizes to idle+completed even if `event_type = activity.running`
+- `claude_v3.rs`
+  - changed hook/JSONL test builders to default to neutral compat strings
+  - added focused tests showing `PermissionRequest` and JSONL `tool_use` still drive blocking/execution from native payload truth even with contradictory compat strings
+- `sync_v3_runtime.rs` / `server.rs`
+  - Codex v3 fixture builders now default to neutral compat strings
+- `poll_loop.rs`
+  - direct deterministic Codex JSONL pre-ingest tests now include `payload.codex_jsonl.inner_type = task_started` instead of empty payloads
+
+### Gate
+- `cargo fmt --all` PASS
+- `cargo test -p agtmux-daemon-v5 task_complete_ignores_contradictory_compat_event_type_when_payload_truth_exists -- --nocapture` PASS
+- `cargo test -p agtmux-daemon-v5 permission_request_ignores_contradictory_compat_event_type_when_hook_payload_exists -- --nocapture` PASS
+- `cargo test -p agtmux-daemon-v5 jsonl_tool_use_ignores_contradictory_compat_event_type_when_payload_exists -- --nocapture` PASS
+- `cargo test -p agtmux sync_v3_runtime::tests::build_bootstrap_ignores_legacy_event_type_when_codex_payload_has_v3_truth -- --nocapture` PASS
+- `cargo test -p agtmux poll_tick_pulls_from_codex_jsonl_source -- --nocapture` PASS
+
+### Intentional deferrals
+- sync-v2 transport / replay / compat `event_type` strings still remain for old consumers
+- this slice does not delete any compat transport or change runtime wire semantics

@@ -1066,7 +1066,9 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agtmux_core_v5::types::{EvidenceTier, Provider, SourceEventV2, SourceKind};
     use agtmux_tmux_v5::error::TmuxError;
+    use chrono::DateTime;
     use std::collections::HashMap;
 
     /// Fake tmux backend for integration testing.
@@ -1160,6 +1162,38 @@ mod tests {
 
     fn new_state() -> Arc<Mutex<DaemonState>> {
         Arc::new(Mutex::new(DaemonState::new()))
+    }
+
+    fn codex_jsonl_semantic_event(
+        pane_id: &str,
+        inner_type: &str,
+        observed_at: DateTime<Utc>,
+    ) -> SourceEventV2 {
+        SourceEventV2 {
+            event_id: format!("codex-jsonl-{inner_type}-{}", observed_at.timestamp()),
+            provider: Provider::Codex,
+            source_kind: SourceKind::CodexJsonl,
+            tier: EvidenceTier::Deterministic,
+            observed_at,
+            session_key: format!("codex-session-{pane_id}"),
+            pane_id: Some(pane_id.to_string()),
+            pane_generation: None,
+            pane_birth_ts: None,
+            source_event_id: None,
+            // Legacy compat string stays present for old projection paths, but
+            // these runtime fixtures carry native Codex JSONL semantics too.
+            event_type: "activity.unknown".to_string(),
+            payload: serde_json::json!({
+                "codex_jsonl": {
+                    "top_type": "event_msg",
+                    "inner_type": inner_type,
+                    "bootstrap": false
+                }
+            }),
+            confidence: 1.0,
+            is_heartbeat: false,
+            actual_activity_at: Some(observed_at),
+        }
     }
 
     // --- Integration tests ---
@@ -1508,8 +1542,6 @@ mod tests {
 
     #[tokio::test]
     async fn poll_tick_demotes_deterministic_pane_immediately_after_return_to_shell() {
-        use agtmux_core_v5::types::{EvidenceTier, Provider, SourceEventV2, SourceKind};
-
         let state = new_state();
         let codex_backend = Arc::new(FakeTmuxBackend::new().with_pane(
             "%0",
@@ -1520,23 +1552,11 @@ mod tests {
 
         {
             let mut st = state.lock().await;
-            st.codex_jsonl_source.ingest(SourceEventV2 {
-                event_id: "codex-jsonl-det-1".to_string(),
-                provider: Provider::Codex,
-                source_kind: SourceKind::CodexJsonl,
-                tier: EvidenceTier::Deterministic,
-                observed_at: Utc::now(),
-                session_key: "codex-sess-live-like".to_string(),
-                pane_id: Some("%0".to_string()),
-                pane_generation: None,
-                pane_birth_ts: None,
-                source_event_id: None,
-                event_type: "activity.running".to_string(),
-                payload: serde_json::json!({}),
-                confidence: 1.0,
-                is_heartbeat: false,
-                actual_activity_at: None,
-            });
+            st.codex_jsonl_source.ingest(codex_jsonl_semantic_event(
+                "%0",
+                "task_started",
+                Utc::now(),
+            ));
         }
 
         poll_tick(&codex_backend, &state)
@@ -1591,31 +1611,17 @@ mod tests {
 
     #[tokio::test]
     async fn poll_tick_pulls_from_codex_jsonl_source() {
-        use agtmux_core_v5::types::{EvidenceTier, Provider, SourceEventV2, SourceKind};
-
         let backend = Arc::new(FakeTmuxBackend::new().with_pane("%0", "main", "node", "$ ls"));
         let state = new_state();
 
         // Pre-ingest a Codex JSONL event directly into the codex_jsonl_source
         {
             let mut st = state.lock().await;
-            st.codex_jsonl_source.ingest(SourceEventV2 {
-                event_id: "codex-jsonl-cx-001".to_string(),
-                provider: Provider::Codex,
-                source_kind: SourceKind::CodexJsonl,
-                tier: EvidenceTier::Deterministic,
-                observed_at: Utc::now(),
-                session_key: "codex-sess-1".to_string(),
-                pane_id: Some("%0".to_string()),
-                pane_generation: None,
-                pane_birth_ts: None,
-                source_event_id: None,
-                event_type: "activity.running".to_string(),
-                payload: serde_json::json!({}),
-                confidence: 1.0,
-                is_heartbeat: false,
-                actual_activity_at: None,
-            });
+            st.codex_jsonl_source.ingest(codex_jsonl_semantic_event(
+                "%0",
+                "task_started",
+                Utc::now(),
+            ));
         }
 
         poll_tick(&backend, &state).await.expect("tick");

@@ -523,6 +523,15 @@ mod tests {
     }
 
     fn codex_event(inner_type: &str, pane_id: &str, observed_at: DateTime<Utc>) -> SourceEventV2 {
+        codex_event_with_compat_event_type("activity.unknown", inner_type, pane_id, observed_at)
+    }
+
+    fn codex_event_with_compat_event_type(
+        compat_event_type: &str,
+        inner_type: &str,
+        pane_id: &str,
+        observed_at: DateTime<Utc>,
+    ) -> SourceEventV2 {
         SourceEventV2 {
             event_id: format!("codex-{inner_type}-{}", observed_at.timestamp()),
             provider: Provider::Codex,
@@ -534,12 +543,9 @@ mod tests {
             pane_generation: None,
             pane_birth_ts: None,
             source_event_id: None,
-            event_type: match inner_type {
-                "task_complete" => "activity.waiting_input",
-                "function_call" => "activity.running",
-                _ => "activity.idle",
-            }
-            .to_string(),
+            // Sync-v3 runtime tests should derive semantics from the native
+            // `payload.codex_jsonl` truth rather than this legacy compat string.
+            event_type: compat_event_type.to_string(),
             payload: serde_json::json!({
                 "codex_jsonl": {
                     "top_type": "event_msg",
@@ -590,8 +596,8 @@ mod tests {
         let mut tracker = PaneGenerationTracker::new();
         tracker.update(&["%18"], ts(0));
 
-        let mut event = codex_event("task_complete", "%18", ts(10));
-        event.event_type = "activity.running".to_string();
+        let event =
+            codex_event_with_compat_event_type("activity.running", "task_complete", "%18", ts(10));
 
         live.apply_events(&[event], &panes, &tracker);
         live.reconcile(&[], &panes, &tracker, ts(11));

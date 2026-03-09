@@ -414,7 +414,20 @@ mod tests {
     }
 
     fn codex_event(
-        event_type: &str,
+        inner_type: &str,
+        actual_activity_at: DateTime<Utc>,
+        extra: serde_json::Value,
+    ) -> SourceEventV2 {
+        codex_event_with_compat_event_type(
+            "activity.unknown",
+            inner_type,
+            actual_activity_at,
+            extra,
+        )
+    }
+
+    fn codex_event_with_compat_event_type(
+        compat_event_type: &str,
         inner_type: &str,
         actual_activity_at: DateTime<Utc>,
         extra: serde_json::Value,
@@ -450,7 +463,9 @@ mod tests {
             pane_generation: Some(7),
             pane_birth_ts: Some(ts(0)),
             source_event_id: None,
-            event_type: event_type.to_string(),
+            // Legacy compat string is still carried for sync-v2 consumers, but the
+            // v3 reducer should derive semantics from `payload.codex_jsonl`.
+            event_type: compat_event_type.to_string(),
             payload: serde_json::json!({
                 "fsm_state": "legacy",
                 "codex_jsonl": semantic
@@ -465,7 +480,6 @@ mod tests {
     fn task_complete_normalizes_to_idle_completion_without_blocking() {
         let mut reducer = SyncV3Reducer::new(base_snapshot());
         let event = codex_event(
-            "activity.waiting_input",
             "task_complete",
             ts(10),
             serde_json::json!({"turn_id": "turn-1"}),
@@ -497,7 +511,6 @@ mod tests {
         snapshot.thread.execution = ThreadExecutionV3::ToolRunning;
         let mut reducer = SyncV3Reducer::new(snapshot);
         let event = codex_event(
-            "activity.waiting_approval",
             "entered_review_mode",
             ts(11),
             serde_json::json!({
@@ -555,7 +568,6 @@ mod tests {
             ts(9),
         );
         let event = codex_event(
-            "activity.running",
             "function_call",
             ts(13),
             serde_json::json!({
@@ -586,7 +598,6 @@ mod tests {
     fn exited_review_mode_resolves_synthetic_request_and_clears_blocking() {
         let mut reducer = SyncV3Reducer::new(base_snapshot());
         let enter = codex_event(
-            "activity.waiting_approval",
             "entered_review_mode",
             ts(14),
             serde_json::json!({
@@ -595,12 +606,7 @@ mod tests {
                 "user_facing_hint": "current changes"
             }),
         );
-        let exit = codex_event(
-            "activity.running",
-            "exited_review_mode",
-            ts(15),
-            serde_json::json!({}),
-        );
+        let exit = codex_event("exited_review_mode", ts(15), serde_json::json!({}));
 
         assert!(apply_codex_source_event(&mut reducer, &enter));
         assert_eq!(reducer.snapshot().pending_requests.len(), 1);
@@ -611,6 +617,29 @@ mod tests {
         assert_eq!(
             reducer.snapshot().attention.highest_priority,
             agtmux_core_v5::sync_v3::AttentionPriorityV3::None
+        );
+    }
+
+    #[test]
+    fn task_complete_ignores_contradictory_compat_event_type_when_payload_truth_exists() {
+        let mut reducer = SyncV3Reducer::new(base_snapshot());
+        let event = codex_event_with_compat_event_type(
+            "activity.running",
+            "task_complete",
+            ts(16),
+            serde_json::json!({"turn_id": "turn-1"}),
+        );
+
+        assert!(apply_codex_source_event(&mut reducer, &event));
+        assert_eq!(
+            reducer.snapshot().agent.lifecycle,
+            AgentLifecycleV3::Completed
+        );
+        assert_eq!(reducer.snapshot().thread.lifecycle, ThreadLifecycleV3::Idle);
+        assert_eq!(reducer.snapshot().thread.execution, ThreadExecutionV3::None);
+        assert_eq!(
+            reducer.snapshot().thread.turn.outcome,
+            TurnOutcomeV3::Completed
         );
     }
 }
