@@ -49,6 +49,7 @@
 - Current scope: fixture-first `sync-v3` contract freeze, canonical Rust v3 types, daemon-side request/attention/freshness scaffolding, Codex + Claude Phase 2 normalization, and live additive `ui.bootstrap.v3` + `ui.changes.v3` wiring from daemon truth
 - Cleanup note: daemon-side `ActivityState` / `activity.*` collapse is now explicitly documented as sync-v2 compatibility plumbing, not sync-v3 truth
 - Cleanup note: sync-v3 provider/runtime tests are being moved to payload/native fixture truth by default, with compat `event_type` strings retained only as explicit legacy overrides
+- Cleanup note: runtime `ui.bootstrap.v2` / `ui.changes.v2` builders are now isolated in a compat-only module; `server.rs` keeps only the RPC boundary
 - Still deferred: v3 replay trimming / epoch hardening, richer field-group freshness clocks beyond the current row-age summary, and broader sync-v2 deletion
 
 ## Phase 3 Hardening (COMPLETE — 585 tests)

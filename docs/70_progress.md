@@ -3012,3 +3012,33 @@ JSONL スキャナーなし) を発見 → デーモンが stale binary で起�
 ### Intentional deferrals
 - sync-v2 transport / replay / compat `event_type` strings still remain for old consumers
 - this slice does not delete any compat transport or change runtime wire semantics
+
+## 2026-03-09 — T-SYNCV3-CLEANUP-RUNTIME-V2-WIRE done: sync-v2 runtime builders extracted behind a compat module
+
+### Summary
+- Moved the remaining `ui.bootstrap.v2` / `ui.changes.v2` payload builders out of `crates/agtmux-runtime/src/server.rs` into a dedicated compat-only runtime module.
+- The server keeps the public JSON-RPC methods unchanged, but the runtime wire layer now makes it much clearer that v2 bootstrap/changes are legacy compatibility surfaces rather than the main product path.
+- Added focused handler tests proving sync-v2 ack/compaction still works while the sync-v3 replay cursor remains untouched.
+
+### Implementation notes
+- Added `crates/agtmux-runtime/src/sync_v2_compat.rs` containing:
+  - `parse_replay_cursor()`
+  - `build_ui_bootstrap_v2()`
+  - `build_ui_changes_v2()`
+  - the sync-v2-only DTO assembly helpers (`build_sync_v2_pane_list`, resync payload, change entry mapping)
+- `crates/agtmux-runtime/src/server.rs` now imports those compat helpers instead of carrying the v2 builder implementation inline.
+- `crates/agtmux-runtime/src/main.rs` now wires the new compat module explicitly.
+- Added a shared server test helper that populates the sync-v2 replay log, then used it to lock:
+  - `ui.bootstrap.v2` compacts sync-v2 replay without touching the sync-v3 cursor
+  - `ui.changes.v2` acknowledges/compacts sync-v2 replay without touching the sync-v3 cursor
+  - `ui.bootstrap.v3` still does not compact sync-v2 replay
+
+### Gate
+- `cargo fmt --all` PASS
+- `cargo test -p agtmux ui_bootstrap_v2_handler_compacts_sync_v2_without_touching_sync_v3_cursor -- --nocapture` PASS
+- `cargo test -p agtmux ui_changes_v2_handler_acknowledges_sync_v2_without_touching_sync_v3_cursor -- --nocapture` PASS
+- `cargo test -p agtmux ui_bootstrap_v3_handler_does_not_compact_sync_v2_log -- --nocapture` PASS
+
+### Intentional deferrals
+- sync-v2 transport / replay deletion is still deferred
+- no `ui.bootstrap.v3` / `ui.changes.v3` semantic changes were made in this slice

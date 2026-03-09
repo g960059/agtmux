@@ -761,3 +761,17 @@ Phase 7 (Distribution) と独立して実施可能。
   - Notes:
     - sync-v2 transport / replay / compat `event_type` field は未削除
     - this slice is test/helper cleanup only; no intended daemon behavior change
+
+- [x] T-SYNCV3-CLEANUP-RUNTIME-V2-WIRE (P1) Runtime cleanup: extract sync-v2 bootstrap/changes builders into a compat-only module — DONE (2026-03-09)
+  - 目的: term product path が v3-only になった現状に合わせて、runtime wire layer でも `ui.bootstrap.v2` / `ui.changes.v2` builder logic を compat-only surface として明示する
+  - Deliverables:
+    - `crates/agtmux-runtime/src/server.rs` から sync-v2 builder logic を compat-only helper/module に抽出する
+    - RPC method names / payload shape / ack-compaction behavior は unchanged のまま維持する
+    - focused handler tests で sync-v2 ack/compaction が継続しつつ sync-v3 cursor/state を perturb しないことを固定する
+  - Evidence:
+    - `cargo test -p agtmux ui_bootstrap_v2_handler_compacts_sync_v2_without_touching_sync_v3_cursor -- --nocapture` PASS
+    - `cargo test -p agtmux ui_changes_v2_handler_acknowledges_sync_v2_without_touching_sync_v3_cursor -- --nocapture` PASS
+    - `cargo test -p agtmux ui_bootstrap_v3_handler_does_not_compact_sync_v2_log -- --nocapture` PASS
+  - Notes:
+    - sync-v2 transport / replay payloads are still present for compatibility
+    - no `ui.bootstrap.v3` / `ui.changes.v3` semantic changes in this slice

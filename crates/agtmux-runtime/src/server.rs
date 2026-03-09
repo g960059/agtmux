@@ -11,9 +11,9 @@ use tokio::sync::Mutex;
 
 use agtmux_core_v5::title::{TitleInput, resolve_title};
 use agtmux_core_v5::types::{EvidenceMode, PanePresence};
-use agtmux_daemon_v5::projection::ReplayCursor;
 
 use crate::poll_loop::DaemonState;
+use crate::sync_v2_compat::{build_ui_bootstrap_v2, build_ui_changes_v2, parse_replay_cursor};
 
 const REPLAY_HEALTHY_LAG_WINDOW: u64 = 10;
 
@@ -628,185 +628,9 @@ pub(crate) fn build_latency_status(state: &DaemonState) -> serde_json::Value {
     }
 }
 
-fn parse_replay_cursor(value: &serde_json::Value) -> Option<ReplayCursor> {
-    Some(ReplayCursor {
-        epoch: value.get("epoch")?.as_u64()?,
-        seq: value.get("seq")?.as_u64()?,
-    })
-}
-
 fn parse_sync_v3_cursor(value: &serde_json::Value) -> Option<SyncV3CursorV3> {
     Some(SyncV3CursorV3 {
         seq: value.get("seq")?.as_u64()?,
-    })
-}
-
-fn build_session_list(state: &DaemonState) -> serde_json::Value {
-    serde_json::to_value(state.daemon.list_sessions()).unwrap_or_else(|_| serde_json::json!([]))
-}
-
-fn build_resync_required(
-    current_epoch: u64,
-    latest_snapshot_seq: u64,
-    reason: &str,
-) -> serde_json::Value {
-    serde_json::json!({
-        "resync_required": {
-            "current_epoch": current_epoch,
-            "latest_snapshot_seq": latest_snapshot_seq,
-            "reason": reason,
-        }
-    })
-}
-
-fn sync_v2_pane_session_key(pane_id: &str) -> String {
-    format!("poller-{pane_id}")
-}
-
-fn build_change_entry(change: &agtmux_daemon_v5::projection::StateChange) -> serde_json::Value {
-    let sync_session_key = change
-        .pane_id
-        .as_deref()
-        .map(sync_v2_pane_session_key)
-        .unwrap_or_else(|| change.session_key.clone());
-
-    let mut entry = serde_json::json!({
-        "seq": change.version,
-        "session_key": sync_session_key,
-        "timestamp": change.timestamp,
-    });
-
-    if let Some(ref pane_id) = change.pane_id {
-        entry["pane_id"] = serde_json::Value::String(pane_id.clone());
-    }
-    if let Some(ref pane_state) = change.pane_state {
-        let mut pane_value = serde_json::to_value(pane_state).unwrap_or(serde_json::Value::Null);
-        if let Some(pane_id) = change.pane_id.as_deref()
-            && let Some(pane_obj) = pane_value.as_object_mut()
-        {
-            pane_obj.insert(
-                "session_key".to_string(),
-                serde_json::Value::String(sync_v2_pane_session_key(pane_id)),
-            );
-        }
-        entry["pane"] = pane_value;
-    }
-    if let Some(ref session_state) = change.session_state {
-        entry["session"] = serde_json::to_value(session_state).unwrap_or(serde_json::Value::Null);
-    }
-
-    entry
-}
-
-/// Build sync-v2 pane list with exact-identity contract (FR-065 / FR-066).
-///
-/// Does NOT reuse `build_pane_list()` — the human-facing inventory serializer emits
-/// legacy aliases such as `session_id` that are forbidden in sync-v2 payloads.
-/// Only fields required or explicitly allowed by FR-065 are emitted here.
-fn build_sync_v2_pane_list(state: &DaemonState) -> serde_json::Value {
-    let managed_panes = state.daemon.list_panes();
-    let managed_ids: std::collections::HashSet<&str> = managed_panes
-        .iter()
-        .map(|p| p.pane_instance_id.pane_id.as_str())
-        .collect();
-    let now = chrono::Utc::now();
-    let mut result: Vec<serde_json::Value> = Vec::new();
-
-    // Managed panes: full exact-identity payload.
-    for pane in &managed_panes {
-        let Some(tmux_info) = state
-            .last_panes
-            .iter()
-            .find(|p| p.pane_id == pane.pane_instance_id.pane_id)
-        else {
-            // FR-065: strict sync-v2 consumers require exact tmux location fields.
-            // If the live tmux inventory can no longer resolve this managed pane,
-            // exclude it from bootstrap instead of emitting null exact-location fields.
-            continue;
-        };
-
-        let age_secs = (now - pane.updated_at).num_seconds().max(0) as u64;
-
-        result.push(serde_json::json!({
-            // Required identity fields (FR-065)
-            "pane_id": pane.pane_instance_id.pane_id,
-            "session_name": tmux_info.session_name.as_str(),
-            "session_key": sync_v2_pane_session_key(&pane.pane_instance_id.pane_id),
-            "window_id": tmux_info.window_id.as_str(),
-            "pane_instance_id": {
-                "pane_id": pane.pane_instance_id.pane_id,
-                "generation": pane.pane_instance_id.generation,
-                "birth_ts": pane.pane_instance_id.birth_ts,
-            },
-            // Allowed adjunct fields (FR-065)
-            "window_name": tmux_info.window_name.as_str(),
-            "session_group": serde_json::Value::Null,
-            "presence": "managed",
-            "evidence_mode": pane.evidence_mode,
-            "activity_state": format!("{:?}", pane.activity_state),
-            "provider": pane.provider.map(|p| p.as_str()),
-            "conversation_title": state.conversation_titles.get(&pane.session_key),
-            "current_path": tmux_info.current_path.as_str(),
-            "git_branch": serde_json::Value::Null,
-            "current_cmd": tmux_info.current_cmd.as_str(),
-            "updated_at": pane.updated_at,
-            "age_secs": age_secs,
-            // NOTE: `session_id` intentionally absent — legacy alias forbidden in sync-v2 (FR-066).
-        }));
-    }
-
-    // Unmanaged panes: emit exact tmux identity so sync-v2 consumers can align bootstrap
-    // rows with inventory before managed promotion appears.
-    for tmux_pane in &state.last_panes {
-        if managed_ids.contains(tmux_pane.pane_id.as_str()) {
-            continue;
-        }
-
-        let (generation, birth_ts) = state
-            .generation_tracker
-            .get(&tmux_pane.pane_id)
-            .unwrap_or((0, now));
-
-        result.push(serde_json::json!({
-            "pane_id": tmux_pane.pane_id.as_str(),
-            "session_name": tmux_pane.session_name.as_str(),
-            "session_key": sync_v2_pane_session_key(&tmux_pane.pane_id),
-            "window_id": tmux_pane.window_id.as_str(),
-            "pane_instance_id": {
-                "pane_id": tmux_pane.pane_id.as_str(),
-                "generation": generation,
-                "birth_ts": birth_ts,
-            },
-            "window_name": tmux_pane.window_name.as_str(),
-            "session_group": serde_json::Value::Null,
-            "presence": PanePresence::Unmanaged,
-            "evidence_mode": EvidenceMode::None,
-            "activity_state": "Unknown",
-            "provider": serde_json::Value::Null,
-            "conversation_title": serde_json::Value::Null,
-            "current_path": tmux_pane.current_path.as_str(),
-            "git_branch": serde_json::Value::Null,
-            "current_cmd": tmux_pane.current_cmd.as_str(),
-            "updated_at": now,
-            "age_secs": 0,
-        }));
-    }
-
-    serde_json::Value::Array(result)
-}
-
-pub(crate) fn build_ui_bootstrap_v2(state: &DaemonState) -> serde_json::Value {
-    let replay_cursor = state.daemon.replay_cursor();
-    serde_json::json!({
-        "epoch": replay_cursor.epoch,
-        "snapshot_seq": replay_cursor.seq,
-        "panes": build_sync_v2_pane_list(state),
-        "sessions": build_session_list(state),
-        "generated_at": chrono::Utc::now(),
-        "replay_cursor": {
-            "epoch": replay_cursor.epoch,
-            "seq": replay_cursor.seq,
-        },
     })
 }
 
@@ -894,53 +718,6 @@ pub(crate) fn build_ui_changes_v3(
             },
         })
     })
-}
-
-pub(crate) fn build_ui_changes_v2(
-    state: &mut DaemonState,
-    cursor: Option<ReplayCursor>,
-    limit: usize,
-) -> serde_json::Value {
-    let now = chrono::Utc::now();
-    let Some(cursor) = cursor else {
-        let replay_cursor = state.daemon.replay_cursor();
-        state.daemon.record_replay_resync("invalid_cursor", now);
-        return build_resync_required(replay_cursor.epoch, replay_cursor.seq, "invalid_cursor");
-    };
-
-    match state.daemon.replay_changes(cursor, limit) {
-        Ok(batch) => {
-            let changes = batch
-                .changes
-                .iter()
-                .map(|change| build_change_entry(change))
-                .collect::<Vec<_>>();
-            let epoch = batch.epoch;
-            let from_seq = batch.from_seq;
-            let to_seq = batch.to_seq;
-            let next_epoch = batch.next_cursor.epoch;
-            let next_seq = batch.next_cursor.seq;
-            state.daemon.acknowledge_replay_cursor(cursor);
-            serde_json::json!({
-                "epoch": epoch,
-                "changes": changes,
-                "from_seq": from_seq,
-                "to_seq": to_seq,
-                "next_cursor": {
-                    "epoch": next_epoch,
-                    "seq": next_seq,
-                },
-            })
-        }
-        Err(resync) => {
-            state.daemon.record_replay_resync(resync.reason, now);
-            build_resync_required(
-                resync.current_epoch,
-                resync.latest_snapshot_seq,
-                resync.reason,
-            )
-        }
-    }
 }
 
 pub(crate) fn build_ui_health_v1(state: &DaemonState) -> serde_json::Value {
@@ -1153,6 +930,7 @@ pub(crate) fn build_summary_changed(state: &DaemonState, since_version: u64) -> 
 mod tests {
     use super::*;
     use agtmux_core_v5::types::{EvidenceTier, Provider, SourceEventV2, SourceKind};
+    use agtmux_daemon_v5::projection::ReplayCursor;
     use agtmux_tmux_v5::TmuxPaneInfo;
     use chrono::Utc;
 
@@ -1513,6 +1291,33 @@ mod tests {
             &state.generation_tracker,
         );
         state
+    }
+
+    fn populate_sync_v2_replay(state: &mut DaemonState) {
+        let now = Utc::now();
+        let snapshot = agtmux_source_poller::source::PaneSnapshot {
+            pane_id: "%0".to_string(),
+            pane_title: "claude code".to_string(),
+            current_cmd: "claude".to_string(),
+            process_hint: Some("claude".to_string()),
+            capture_lines: vec!["\u{256D} Claude Code".to_string()],
+            captured_at: now,
+        };
+        state.poller.poll_batch(&[snapshot]);
+        let pull_req = agtmux_core_v5::types::PullEventsRequest {
+            cursor: None,
+            limit: 100,
+        };
+        let poller_resp = state.poller.pull_events(&pull_req, now);
+        state
+            .gateway
+            .ingest_source_response(SourceKind::Poller, poller_resp);
+        let gw_req = agtmux_core_v5::types::GatewayPullRequest {
+            cursor: None,
+            limit: 100,
+        };
+        let gw_resp = state.gateway.pull_events(&gw_req);
+        state.daemon.apply_events(gw_resp.events, now);
     }
 
     #[test]
@@ -2068,29 +1873,7 @@ mod tests {
         let state = Arc::new(Mutex::new(make_bootstrap_v3_codex_completed_state()));
         {
             let mut st = state.lock().await;
-            let now = Utc::now();
-            let snapshot = agtmux_source_poller::source::PaneSnapshot {
-                pane_id: "%0".to_string(),
-                pane_title: "claude code".to_string(),
-                current_cmd: "claude".to_string(),
-                process_hint: Some("claude".to_string()),
-                capture_lines: vec!["\u{256D} Claude Code".to_string()],
-                captured_at: now,
-            };
-            st.poller.poll_batch(&[snapshot]);
-            let pull_req = agtmux_core_v5::types::PullEventsRequest {
-                cursor: None,
-                limit: 100,
-            };
-            let poller_resp = st.poller.pull_events(&pull_req, now);
-            st.gateway
-                .ingest_source_response(SourceKind::Poller, poller_resp);
-            let gw_req = agtmux_core_v5::types::GatewayPullRequest {
-                cursor: None,
-                limit: 100,
-            };
-            let gw_resp = st.gateway.pull_events(&gw_req);
-            st.daemon.apply_events(gw_resp.events, now);
+            populate_sync_v2_replay(&mut st);
             assert!(
                 st.daemon.replay_len() > 0,
                 "sync-v2 replay log should be populated"
@@ -2201,8 +1984,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ui_bootstrap_v2_handler_compacts_only_sync_v2_log() {
-        let state = Arc::new(Mutex::new(make_managed_state()));
+    async fn ui_bootstrap_v2_handler_compacts_sync_v2_without_touching_sync_v3_cursor() {
+        let mut state = make_bootstrap_v3_codex_completed_state();
+        let expected_v3_cursor = {
+            let payload: UiBootstrapV3 = serde_json::from_value(build_ui_bootstrap_v3(&mut state))
+                .expect("ui.bootstrap.v3 should parse");
+            payload.replay_cursor.expect("v3 replay cursor")
+        };
+        populate_sync_v2_replay(&mut state);
+        let state = Arc::new(Mutex::new(state));
         let request = serde_json::json!({
             "jsonrpc": "2.0",
             "method": "ui.bootstrap.v2",
@@ -2218,6 +2008,60 @@ mod tests {
         assert!(
             !st.daemon.changes_since(0).is_empty(),
             "legacy change log must remain available"
+        );
+        assert_eq!(
+            st.sync_v3.current_cursor(),
+            expected_v3_cursor,
+            "ui.bootstrap.v2 must not perturb the sync-v3 replay cursor"
+        );
+    }
+
+    #[tokio::test]
+    async fn ui_changes_v2_handler_acknowledges_sync_v2_without_touching_sync_v3_cursor() {
+        let mut state = make_bootstrap_v3_codex_completed_state();
+        let expected_v3_cursor = {
+            let payload: UiBootstrapV3 = serde_json::from_value(build_ui_bootstrap_v3(&mut state))
+                .expect("ui.bootstrap.v3 should parse");
+            payload.replay_cursor.expect("v3 replay cursor")
+        };
+        populate_sync_v2_replay(&mut state);
+        let state = Arc::new(Mutex::new(state));
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "ui.changes.v2",
+            "id": 196,
+            "params": {
+                "cursor": {"epoch": 1, "seq": 0},
+                "limit": 100
+            }
+        });
+
+        let resp = call_handler(Arc::clone(&state), request).await;
+        assert_eq!(resp["result"]["epoch"], 1);
+        assert!(resp["result"]["changes"].is_array());
+
+        let ack_request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "ui.changes.v2",
+            "id": 197,
+            "params": {
+                "cursor": resp["result"]["next_cursor"].clone(),
+                "limit": 100
+            }
+        });
+        let ack_resp = call_handler(Arc::clone(&state), ack_request).await;
+        assert_eq!(ack_resp["result"]["epoch"], 1);
+
+        let st = state.lock().await;
+        assert_eq!(
+            st.daemon.replay_len(),
+            0,
+            "sync-v2 replay should acknowledge and compact"
+        );
+        assert_eq!(
+            st.sync_v3.current_cursor(),
+            expected_v3_cursor,
+            "ui.changes.v2 must not perturb the sync-v3 replay cursor"
         );
     }
 
