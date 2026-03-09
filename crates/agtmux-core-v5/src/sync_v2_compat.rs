@@ -18,6 +18,40 @@ pub fn activity_event_type(state: ActivityState) -> &'static str {
     }
 }
 
+/// Parse a legacy sync-v2-compatible `ActivityState` from an `event_type` string.
+///
+/// This parser exists only for the old sync-v2 projection / replay boundary.
+/// Sync-v3 reducers must continue to rely on provider-native payload truth.
+///
+/// Supports three legacy event_type namespaces:
+/// - `activity.*` / `lifecycle.*`: poller heuristic + Claude compat strings
+/// - `thread.*` / `turn.*`: older Codex app-server compat strings
+pub fn parse_activity_state(event_type: &str) -> ActivityState {
+    match event_type {
+        "activity.running" | "lifecycle.running" | "activity.start" | "lifecycle.start" => {
+            ActivityState::Running
+        }
+        // Claude JSONL: user_input means the user just sent a message (agent will act).
+        ACTIVITY_USER_INPUT_EVENT_TYPE => ActivityState::Running,
+        "activity.idle" | "lifecycle.idle" | "activity.end" | "activity.stop" | "lifecycle.end"
+        | "lifecycle.stop" => ActivityState::Idle,
+        // Claude JSONL: tool_complete is followed by model inference before assistant output.
+        // Treat as Running to avoid transient idle flaps under high load.
+        ACTIVITY_TOOL_COMPLETE_EVENT_TYPE => ActivityState::Running,
+        "activity.waiting_input" | "lifecycle.waiting_input" => ActivityState::WaitingInput,
+        "activity.waiting_approval" | "lifecycle.waiting_approval" => {
+            ActivityState::WaitingApproval
+        }
+        "activity.error" | "lifecycle.error" => ActivityState::Error,
+        "thread.active" | "turn.started" | "turn.inProgress" => ActivityState::Running,
+        "thread.idle" | "thread.not_loaded" | "turn.completed" | "turn.interrupted" => {
+            ActivityState::Idle
+        }
+        "thread.error" | "thread.systemError" | "turn.failed" => ActivityState::Error,
+        _ => ActivityState::Unknown,
+    }
+}
+
 /// Legacy sync-v2-compatible mapping for Claude hook types.
 pub fn claude_hook_event_type(hook_type: &str) -> &'static str {
     match hook_type {
@@ -137,6 +171,45 @@ mod tests {
 
         for (line_type, expected) in cases {
             assert_eq!(claude_jsonl_event_type(line_type), expected);
+        }
+    }
+
+    #[test]
+    fn parse_activity_state_matches_legacy_strings() {
+        let cases = [
+            ("activity.running", ActivityState::Running),
+            ("lifecycle.running", ActivityState::Running),
+            ("activity.idle", ActivityState::Idle),
+            ("lifecycle.idle", ActivityState::Idle),
+            ("activity.waiting_input", ActivityState::WaitingInput),
+            ("activity.waiting_approval", ActivityState::WaitingApproval),
+            ("activity.error", ActivityState::Error),
+            ("lifecycle.start", ActivityState::Running),
+            ("activity.start", ActivityState::Running),
+            ("lifecycle.end", ActivityState::Idle),
+            ("lifecycle.stop", ActivityState::Idle),
+            ("activity.end", ActivityState::Idle),
+            ("activity.stop", ActivityState::Idle),
+            ("lifecycle.waiting_input", ActivityState::WaitingInput),
+            ("lifecycle.waiting_approval", ActivityState::WaitingApproval),
+            ("lifecycle.error", ActivityState::Error),
+            ("activity.user_input", ActivityState::Running),
+            ("activity.tool_complete", ActivityState::Running),
+            ("thread.active", ActivityState::Running),
+            ("thread.idle", ActivityState::Idle),
+            ("thread.error", ActivityState::Error),
+            ("thread.systemError", ActivityState::Error),
+            ("turn.started", ActivityState::Running),
+            ("turn.inProgress", ActivityState::Running),
+            ("turn.completed", ActivityState::Idle),
+            ("turn.interrupted", ActivityState::Idle),
+            ("turn.failed", ActivityState::Error),
+            ("thread.not_loaded", ActivityState::Idle),
+            ("unknown.type", ActivityState::Unknown),
+        ];
+
+        for (event_type, expected) in cases {
+            assert_eq!(parse_activity_state(event_type), expected);
         }
     }
 }

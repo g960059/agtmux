@@ -51,6 +51,7 @@
 - Cleanup note: sync-v3 provider/runtime tests are being moved to payload/native fixture truth by default, with compat `event_type` strings retained only as explicit legacy overrides
 - Cleanup note: runtime `ui.bootstrap.v2` / `ui.changes.v2` builders are now isolated in a compat-only module; `server.rs` keeps only the RPC boundary
 - Cleanup note: source-side legacy `event_type` generation now lives in shared `agtmux-core-v5::sync_v2_compat` helpers instead of inline poller / translator string tables
+- Cleanup note: projection-side legacy `event_type -> ActivityState` parsing now also lives in shared `agtmux-core-v5::sync_v2_compat`, so compat encode/decode no longer diverge across crates
 - Still deferred: v3 replay trimming / epoch hardening, richer field-group freshness clocks beyond the current row-age summary, and broader sync-v2 deletion
 
 ## Phase 3 Hardening (COMPLETE — 585 tests)

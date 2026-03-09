@@ -791,3 +791,18 @@ Phase 7 (Distribution) と独立して実施可能。
   - Notes:
     - sync-v2 transport / replay / legacy `event_type` fields are still present for compatibility
     - this slice does not change v3 reducer truth or source-native payload contents
+
+- [x] T-SYNCV3-CLEANUP-PROJECTION-V2-PARSER (P1) Daemon cleanup: move sync-v2 compat `event_type` parsing into shared core helper — DONE (2026-03-09)
+  - 目的: projection がまだローカル所有している legacy `event_type -> ActivityState` parser を `agtmux-core-v5::sync_v2_compat` に寄せ、source-side compat helper と同じ shared boundary に揃える
+  - Deliverables:
+    - `agtmux-core-v5::sync_v2_compat` に legacy parse helper を追加し、`activity.*` / `lifecycle.*` / `thread.*` / `turn.*` aliases をそこで一元管理する
+    - `agtmux-daemon-v5::projection` は shared parser を consume するだけにし、ローカル duplicate parser を削除する
+    - parsing behavior / projection behavior / sync-v3 semantics は unchanged のまま維持する
+  - Evidence:
+    - `cargo test -p agtmux-core-v5 sync_v2_compat -- --nocapture` PASS
+    - `cargo test -p agtmux-daemon-v5 sync_v2_compat_activity_state_parsing -- --nocapture` PASS
+    - `cargo test -p agtmux-daemon-v5 heartbeat_on_new_pane_sets_initial_activity -- --nocapture` PASS
+    - `cargo test -p agtmux-daemon-v5 real_stop_event_correctly_sets_idle -- --nocapture` PASS
+  - Notes:
+    - no sync-v3 reducer/runtime semantics changed in this slice
+    - broader `ActivityState` deletion remains deferred

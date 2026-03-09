@@ -3079,3 +3079,33 @@ JSONL スキャナーなし) を発見 → デーモンが stale binary で起�
 ### Intentional deferrals
 - sync-v2 transport / replay deletion is still deferred
 - no source semantic rewrite or sync-v3 reducer behavior change was made in this slice
+
+## 2026-03-09 — T-SYNCV3-CLEANUP-PROJECTION-V2-PARSER done: projection compat parser moved into shared core helper
+
+### Summary
+- Moved the remaining legacy `event_type -> ActivityState` parser out of `crates/agtmux-daemon-v5/src/projection.rs` and into `agtmux-core-v5::sync_v2_compat` so both sync-v2 compat encoding and decoding now live behind the same shared core boundary.
+- Projection now consumes the shared parser instead of owning a local duplicate, but the supported alias set is unchanged: `activity.*`, `lifecycle.*`, `thread.*`, and `turn.*` still collapse exactly the same way for sync-v2 projection/replay compatibility.
+- This is cleanup only. Sync-v3 reducers still ignore these compat strings in favor of provider-native payload truth.
+
+### Implementation notes
+- `crates/agtmux-core-v5/src/sync_v2_compat.rs`
+  - added `parse_activity_state(event_type)` covering the full legacy parser surface that projection previously owned
+  - added focused core tests locking the parse behavior for:
+    - `activity.*` / `lifecycle.*`
+    - Claude JSONL compat aliases (`activity.user_input`, `activity.tool_complete`)
+    - old Codex app-server aliases (`thread.*`, `turn.*`)
+- `crates/agtmux-daemon-v5/src/projection.rs`
+  - imports `agtmux_core_v5::sync_v2_compat`
+  - removed the local `parse_sync_v2_compat_activity_state()` implementation
+  - existing daemon tests now exercise the shared parser directly, while projection behavior tests continue to prove the parser is still consumed on real code paths
+
+### Gate
+- `cargo fmt --all` PASS
+- `cargo test -p agtmux-core-v5 sync_v2_compat -- --nocapture` PASS
+- `cargo test -p agtmux-daemon-v5 sync_v2_compat_activity_state_parsing -- --nocapture` PASS
+- `cargo test -p agtmux-daemon-v5 heartbeat_on_new_pane_sets_initial_activity -- --nocapture` PASS
+- `cargo test -p agtmux-daemon-v5 real_stop_event_correctly_sets_idle -- --nocapture` PASS
+
+### Intentional deferrals
+- sync-v2 transport / replay deletion remains deferred
+- no sync-v3 semantic path changed in this slice
