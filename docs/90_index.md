@@ -27,7 +27,7 @@
 ## Cross-Repo V2 A6
 - Source of truth: `docs/20_spec.md` (FR-069), `docs/60_tasks.md` (`T-XTERM-A6`)
 - Scratch handover: `/tmp/agtmux-app-child-bootstrap-still-empty-after-term-hardening-20260309.md`
-- Current scope: exact-socket inventory drift was narrowed to producer-side metadata tool resolution. `tmux` inventory already worked on the custom socket, but app-child PATH loss could still break `ps` / `lsof`, leaving sync-v3 bootstrap with only unmanaged `shell:%pane` fallback rows. Producer now resolves those tools via standard system-path fallbacks as well.
+- Current scope: exact-socket inventory and sync-v3 bootstrap now appear consistent for the pre-launch plain-shell phase: the same `%pane` is visible on the custom socket as `zsh`, and producer bootstrap intentionally keeps it as unmanaged `shell:%pane` until provider truth arrives. The remaining cross-repo work is downstream gating on that producer contract, not a bootstrap identity mismatch.
 
 ## Cross-Repo V2 A7
 - Source of truth: `docs/60_tasks.md` (`T-XTERM-A7`)

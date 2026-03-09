@@ -837,3 +837,18 @@ Phase 7 (Distribution) と独立して実施可能。
   - Notes:
     - no sync-v3 semantics changed in this slice
     - this restores producer managed-truth formation so bootstrap can surface the row that already belongs on the exact socket
+
+- [x] T-XTERM-A6c (P0) Producer proof: exact-socket shell inventory is not managed truth before Codex launch — DONE (2026-03-09)
+  - 目的: term 側 targeted UI lane が `codex exec` 送信前の bootstrap-ready gate で `presence=managed provider!=nil` を待っている件について、same-pane inventory と `ui.bootstrap.v3` を同時点比較し、producer semantics が plain `zsh` inventory を unmanaged のまま返すことを固定する
+  - Deliverables:
+    - runtime test で cached inventory row (`current_cmd=zsh`) と `ui.bootstrap.v3` row が同一 pane identity を共有しつつ、provider truth 未到着の間は `session_key=shell:%pane` / `presence=unmanaged` を返すことを証明する
+    - 同じ pane に Codex source event が入った後だけ `presence=managed provider=codex` へ遷移することを同じ test 内で固定する
+    - docs に「exact socket pane visibility does not imply managed bootstrap before provider truth arrives」を追記する
+  - Evidence:
+    - `cargo fmt --all` PASS
+    - `cargo test -p agtmux plain_shell_inventory_remains_unmanaged_in_bootstrap_until_provider_truth_arrives -- --nocapture` PASS
+    - `cargo test -p agtmux ui_bootstrap_v3_emits_unmanaged_row_when_no_semantic_truth_exists -- --nocapture` PASS
+    - `cargo test -p agtmux ui_bootstrap_v3_emits_strict_identity_and_normalized_codex_truth -- --nocapture` PASS
+  - Notes:
+    - appDirectSocketProbe proving `tmux -S <socket> list-panes` can see `%0 zsh` is inventory truth only
+    - managed/provider truth begins after Codex source semantics arrive, not before `codex exec` is sent

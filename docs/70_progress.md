@@ -3181,3 +3181,41 @@ JSONL スキャナーなし) を発見 → デーモンが stale binary で起�
 - `cargo test -p agtmux-source-codex-jsonl get_cwd_via_lsof_invalid_pid_returns_none -- --nocapture` PASS
 - `cargo test -p agtmux-source-claude-jsonl discover_jsonl_via_lsof_nonexistent_pid_returns_none -- --nocapture` PASS
 - `cargo test -p agtmux ui_bootstrap_v3_emits_unmanaged_row_when_no_semantic_truth_exists -- --nocapture` PASS
+
+## 2026-03-09 — T-XTERM-A6c done: direct socket visibility and pre-launch bootstrap agree on unmanaged shell truth
+
+### Summary
+- Re-read the downstream targeted UI test and found the failing `waitForAppDaemonBootstrapReady(...)` gate runs before the test sends the live `codex exec` command.
+- At that point, the downstream app has only proved two things:
+  - the exact tmux socket contains the target pane
+  - the pane's current command is still plain `zsh`
+- That is inventory truth, not provider truth. Producer bootstrap is therefore expected to return the same pane as unmanaged `shell:%pane` until an actual Codex source event arrives.
+
+### Source proof
+- `agtmux-term/Tests/AgtmuxTermUITests/AgtmuxTermUITests.swift`
+  - `waitForAppDaemonBootstrapReady(...)` is called before the test sends `codex exec ...`
+  - the helper still waits for `target?.presence == "managed"` and `target?.provider != nil`, which is stronger than current producer semantics for a pre-launch plain shell pane
+- `crates/agtmux-runtime/src/server.rs`
+  - `build_ui_bootstrap_v3()` only surfaces managed rows from daemon projection or sync-v3 reducers
+  - otherwise it emits the same pane identity via unmanaged fallback (`session_key = shell:%pane`)
+- `crates/agtmux-runtime/src/sync_v3_runtime.rs`
+  - `compose_rows()` picks:
+    - reducer snapshot when provider truth exists
+    - managed fallback only when daemon projection already has managed truth
+    - unmanaged shell inventory row otherwise
+
+### Implementation notes
+- Added a focused runtime proof test that uses the same pane identity in both views:
+  - cached inventory row: `%0`, session `agtmux-e2e-managed`, `current_cmd=zsh`, `presence=unmanaged`
+  - `ui.bootstrap.v3` row before provider truth: same `%0`, same session/window identity, `session_key=shell:%0`, `presence=unmanaged`, `provider=nil`
+  - same `ui.bootstrap.v3` row after a Codex source event: `presence=managed`, `provider=codex`, `session_key=codex:%0`
+
+### Consumer implication
+- `appDirectSocketProbe` proving `tmux -S <socket> list-panes` can see `%0 zsh` does not imply producer-managed bootstrap truth yet.
+- term cannot require `presence=managed provider!=nil` before it has actually launched Codex or otherwise caused provider truth to arrive for that pane.
+
+### Gate
+- `cargo fmt --all` PASS
+- `cargo test -p agtmux plain_shell_inventory_remains_unmanaged_in_bootstrap_until_provider_truth_arrives -- --nocapture` PASS
+- `cargo test -p agtmux ui_bootstrap_v3_emits_unmanaged_row_when_no_semantic_truth_exists -- --nocapture` PASS
+- `cargo test -p agtmux ui_bootstrap_v3_emits_strict_identity_and_normalized_codex_truth -- --nocapture` PASS
