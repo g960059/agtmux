@@ -1,0 +1,60 @@
+{
+  "version": 3,
+  "generated_at": "2026-03-09T20:19:00Z",
+  "panes": [
+    {
+      "session_name": "review",
+      "window_id": "@7",
+      "session_key": "claude:%34",
+      "pane_id": "%34",
+      "pane_instance_id": {
+        "pane_id": "%34",
+        "generation": 2,
+        "birth_ts": "2026-03-09T20:14:05Z"
+      },
+      "provider": "claude",
+      "presence": "managed",
+      "agent": {
+        "lifecycle": "running"
+      },
+      "thread": {
+        "lifecycle": "idle",
+        "blocking": "none",
+        "execution": "none",
+        "flags": {
+          "review_mode": false,
+          "subagent_active": false
+        },
+        "turn": {
+          "outcome": "completed",
+          "sequence": null,
+          "started_at": "2026-03-09T20:14:09Z",
+          "completed_at": "2026-03-09T20:18:57Z"
+        }
+      },
+      "pending_requests": [],
+      "attention": {
+        "active_kinds": [
+          "completion"
+        ],
+        "highest_priority": "completion",
+        "unresolved_count": 0,
+        "generation": 2,
+        "latest_at": "2026-03-09T20:18:57Z"
+      },
+      "freshness": {
+        "snapshot": "fresh",
+        "blocking": "fresh",
+        "execution": "fresh"
+      },
+      "provider_raw": {
+        "claude": {
+          "hook_event": "Stop",
+          "hook_source": "claude_hooks",
+          "jsonl_hint": "assistant"
+        }
+      },
+      "updated_at": "2026-03-09T20:19:00Z"
+    }
+  ]
+}

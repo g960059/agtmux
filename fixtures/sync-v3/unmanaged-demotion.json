@@ -1,0 +1,52 @@
+{
+  "version": 3,
+  "generated_at": "2026-03-09T20:22:00Z",
+  "panes": [
+    {
+      "session_name": "shells",
+      "window_id": "@9",
+      "session_key": "shell:%45",
+      "pane_id": "%45",
+      "pane_instance_id": {
+        "pane_id": "%45",
+        "generation": 11,
+        "birth_ts": "2026-03-09T19:58:00Z"
+      },
+      "provider": null,
+      "presence": "unmanaged",
+      "agent": {
+        "lifecycle": "unknown"
+      },
+      "thread": {
+        "lifecycle": "idle",
+        "blocking": "none",
+        "execution": "none",
+        "flags": {
+          "review_mode": false,
+          "subagent_active": false
+        },
+        "turn": {
+          "outcome": "none",
+          "sequence": null,
+          "started_at": null,
+          "completed_at": null
+        }
+      },
+      "pending_requests": [],
+      "attention": {
+        "active_kinds": [],
+        "highest_priority": "none",
+        "unresolved_count": 0,
+        "generation": 0,
+        "latest_at": null
+      },
+      "freshness": {
+        "snapshot": "down",
+        "blocking": "down",
+        "execution": "down"
+      },
+      "provider_raw": {},
+      "updated_at": "2026-03-09T20:22:00Z"
+    }
+  ]
+}

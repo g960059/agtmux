@@ -34,6 +34,20 @@
 - Scratch handover: `/tmp/agtmux-a7-managed-demotion-and-same-session-codex-bleed-20260309.md`
 - Current scope: direct app-owned daemon probing shows stale managed Codex truth after shell demotion (`current_cmd=zsh`) and same-session running bleed across sibling Codex panes
 
+## Cross-Repo V2 A8
+- Source of truth: `docs/60_tasks.md` (`T-XTERM-A8`)
+- Scratch handover: `/tmp/agtmux-a8-shell-non-agent-child-demotion-20260309.md`
+- Current scope: same-session running bleed is fixed on fresh desktop truth, but a pane that has returned to shell and now only has a non-agent child process (for example `chezmoi cd`) still remains a stale managed Codex row
+
+## Cross-Repo V3 Phase 0 / Phase 1
+- Design source of truth: `/tmp/agtmux-status-v3-final-design-20260309.md`
+- Decision freeze: `docs/80_decisions/ADR-20260309-sync-v3-contract-freeze.md`
+- Canonical daemon fixtures: `fixtures/sync-v3/`
+- Research inputs:
+  - `docs/research/20260309-status-notification-comparison.md`
+  - `docs/research/claude-jsonl-waiting-states.md`
+- Current scope: fixture-first `sync-v3` contract freeze, canonical Rust v3 types, daemon-side request/attention/freshness scaffolding, and bootstrap groundwork only
+
 ## Phase 3 Hardening (COMPLETE — 585 tests)
 - `docs/50_plan.md` (Phase 3 section)
 - `docs/60_tasks.md` (T-115〜T-118 DONE)
@@ -124,6 +138,7 @@
 - `docs/80_decisions/ADR-20260225-core-first-mode-b.md`
 - `docs/80_decisions/ADR-20260225-mvp-single-process-runtime.md`
 - `docs/80_decisions/ADR-20260226-pane-first-resolver-grouping.md`
+- `docs/80_decisions/ADR-20260309-sync-v3-contract-freeze.md`
 
 ## How to run (local-first)
 - quality gates:

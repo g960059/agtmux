@@ -1,0 +1,77 @@
+{
+  "version": 3,
+  "generated_at": "2026-03-09T20:11:20Z",
+  "panes": [
+    {
+      "session_name": "workbench",
+      "window_id": "@5",
+      "session_key": "codex:%12",
+      "pane_id": "%12",
+      "pane_instance_id": {
+        "pane_id": "%12",
+        "generation": 7,
+        "birth_ts": "2026-03-09T20:09:54Z"
+      },
+      "provider": "codex",
+      "presence": "managed",
+      "agent": {
+        "lifecycle": "running"
+      },
+      "thread": {
+        "lifecycle": "active",
+        "blocking": "waiting_approval",
+        "execution": "tool_running",
+        "flags": {
+          "review_mode": true,
+          "subagent_active": false
+        },
+        "turn": {
+          "outcome": "none",
+          "sequence": 42,
+          "started_at": "2026-03-09T20:10:00Z",
+          "completed_at": null
+        }
+      },
+      "pending_requests": [
+        {
+          "request_id": "req_codex_approval_001",
+          "kind": "approval",
+          "title": "Apply patch",
+          "detail": "Approve file modifications to continue the turn.",
+          "created_at": "2026-03-09T20:11:04Z",
+          "updated_at": "2026-03-09T20:11:04Z",
+          "status": "pending",
+          "source": {
+            "provider": "codex",
+            "source_kind": "codex_appserver"
+          }
+        }
+      ],
+      "attention": {
+        "active_kinds": [
+          "approval"
+        ],
+        "highest_priority": "approval",
+        "unresolved_count": 1,
+        "generation": 1,
+        "latest_at": "2026-03-09T20:11:04Z"
+      },
+      "freshness": {
+        "snapshot": "fresh",
+        "blocking": "fresh",
+        "execution": "fresh"
+      },
+      "provider_raw": {
+        "codex": {
+          "thread_status_type": "active",
+          "active_flags": [
+            "waitingOnApproval"
+          ],
+          "agent_status": "running",
+          "review_mode": true
+        }
+      },
+      "updated_at": "2026-03-09T20:11:20Z"
+    }
+  ]
+}

@@ -650,3 +650,32 @@ Phase 7 (Distribution) と独立して実施可能。
     - direct `ui.bootstrap.v2` can represent one running Codex pane while sibling Codex panes in the same session remain `idle` or `unmanaged`
   - Scratch handover: `/tmp/agtmux-a7-managed-demotion-and-same-session-codex-bleed-20260309.md`
   - blocked_by: T-XTERM-A5
+
+- [ ] T-XTERM-A8 (P0) Cross-repo: shell demotion when a non-agent child remains under the shell
+  - 目的: pane が shell (`current_cmd=zsh`) に戻ったあと、残っている child process が agent ではない場合まで stale managed/provider truth を保持しないようにする
+  - Fresh downstream evidence (2026-03-09, after A7 fixes + fresh desktop daemon restart):
+    - direct desktop daemon probe no longer shows same-session running bleed:
+      - `vm agtmux-term %2=running`
+      - `vm agtmux-term %5=waiting_input`
+      - `vm agtmux-term %6=waiting_input`
+    - but `%6` still reports:
+      - `current_cmd=zsh`
+      - `presence=managed`
+      - `provider=codex`
+      - `activity_state=waiting_input`
+    - tmux process inspection for the same exact row shows:
+      - shell pid `35774`
+      - only child process `37202 chezmoi cd`
+      - i.e. the pane no longer has a live Codex/Claude child process, but the producer still keeps the managed Codex row
+  - Deliverables:
+    - exact-row shell demotion does not require the pane to be childless; it only requires that the remaining live child process is not an agent process
+    - producer truth demotes `shell + non-agent child` rows back to `presence=unmanaged provider=null activity_state=null|unknown`
+    - producer-side live regression/E2E exists for:
+      - agent launch
+      - forced or natural return to shell
+      - replacement by a non-agent child process under the same shell
+  - Acceptance:
+    - direct `ui.bootstrap.v2` never reports `presence=managed` for a pane whose `current_cmd` is already a shell and whose remaining live child process is not an agent
+    - online/live E2E covers the `shell + non-agent child` demotion seam
+  - Scratch handover: `/tmp/agtmux-a8-shell-non-agent-child-demotion-20260309.md`
+  - blocked_by: T-XTERM-A7

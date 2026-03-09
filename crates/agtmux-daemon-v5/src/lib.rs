@@ -9,5 +9,6 @@ pub mod binding_projection;
 pub mod projection;
 pub mod snapshot;
 pub mod supervisor;
+pub mod sync_v3;
 
 pub use agtmux_core_v5::types;

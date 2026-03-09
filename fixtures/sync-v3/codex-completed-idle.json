@@ -1,0 +1,61 @@
+{
+  "version": 3,
+  "generated_at": "2026-03-09T20:12:10Z",
+  "panes": [
+    {
+      "session_name": "workbench",
+      "window_id": "@5",
+      "session_key": "codex:%12",
+      "pane_id": "%12",
+      "pane_instance_id": {
+        "pane_id": "%12",
+        "generation": 7,
+        "birth_ts": "2026-03-09T20:09:54Z"
+      },
+      "provider": "codex",
+      "presence": "managed",
+      "agent": {
+        "lifecycle": "completed"
+      },
+      "thread": {
+        "lifecycle": "idle",
+        "blocking": "none",
+        "execution": "none",
+        "flags": {
+          "review_mode": false,
+          "subagent_active": false
+        },
+        "turn": {
+          "outcome": "completed",
+          "sequence": 42,
+          "started_at": "2026-03-09T20:10:00Z",
+          "completed_at": "2026-03-09T20:12:06Z"
+        }
+      },
+      "pending_requests": [],
+      "attention": {
+        "active_kinds": [
+          "completion"
+        ],
+        "highest_priority": "completion",
+        "unresolved_count": 0,
+        "generation": 2,
+        "latest_at": "2026-03-09T20:12:06Z"
+      },
+      "freshness": {
+        "snapshot": "fresh",
+        "blocking": "fresh",
+        "execution": "fresh"
+      },
+      "provider_raw": {
+        "codex": {
+          "thread_status_type": "idle",
+          "active_flags": [],
+          "agent_status": "completed",
+          "turn_status": "completed"
+        }
+      },
+      "updated_at": "2026-03-09T20:12:10Z"
+    }
+  ]
+}

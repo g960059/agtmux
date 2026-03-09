@@ -2766,6 +2766,41 @@ JSONL スキャナーなし) を発見 → デーモンが stale binary で起�
   - any new higher-fidelity app-child repro
   - cross-repo `agtmux-term` focused metadata-enabled UI lane
 
+## 2026-03-09 — T-XTERM-A8 opened: `shell + non-agent child` still blocks exact-row managed demotion on the fresh desktop daemon
+
+### Fresh cross-repo evidence from `agtmux-term`
+- downstream reran the normal app path with the rebuilt local binary:
+  - `AGTMUX_BIN=/Users/virtualmachine/ghq/github.com/g960059/agtmux/target/debug/agtmux swift run AgtmuxTerm`
+  - the app supervisor logged:
+    - `restarting stale app-managed daemon ...`
+    - `started managed daemon ...`
+- this proves the desktop-owned socket is no longer a stale oracle
+- direct fresh probe against `/Users/virtualmachine/Library/Application Support/AGTMUXDesktop/agtmuxd.sock` now shows:
+  - same-session no-bleed is fixed:
+    - `vm agtmux-term %2=running`
+    - `vm agtmux-term %5=waiting_input`
+    - `vm agtmux-term %6=waiting_input`
+  - but `%6` still remains a stale managed Codex row even though tmux already says the pane is back at shell:
+    - `current_cmd=zsh`
+    - `presence=managed`
+    - `provider=codex`
+    - `activity_state=waiting_input`
+- tmux process inspection of that exact row shows the remaining child process is not an agent:
+  - shell pid `35774`
+  - child `37202 chezmoi cd`
+
+### Interpretation
+- A7 fixed the original same-session running bleed on fresh desktop truth
+- the remaining producer bug is narrower:
+  - demotion currently requires “no live child process under the shell”
+  - but the real contract needs “no live agent child process under the shell”
+- this is still producer truth before `agtmux-term` renders it, so the next fix belongs in the daemon repo
+
+### Next step
+- add producer-side regression/E2E for `shell + non-agent child` demotion
+- rerun downstream direct desktop-socket probe after the fix
+- only after that reopen any term-side consumer debugging
+
 ## 2026-03-09 — T-XTERM-A7 opened: direct daemon truth still keeps stale managed Codex rows and same-session running bleed
 
 ### Fresh downstream evidence
