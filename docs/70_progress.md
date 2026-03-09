@@ -3042,3 +3042,40 @@ JSONL スキャナーなし) を発見 → デーモンが stale binary で起�
 ### Intentional deferrals
 - sync-v2 transport / replay deletion is still deferred
 - no `ui.bootstrap.v3` / `ui.changes.v3` semantic changes were made in this slice
+
+## 2026-03-09 — T-SYNCV3-CLEANUP-SOURCE-V2-EVENT-TYPES done: source-side legacy `event_type` mapping extracted behind shared compat helpers
+
+### Summary
+- Moved the remaining source-side legacy `event_type` string tables behind a shared `agtmux-core-v5::sync_v2_compat` module so source code reads as provider payload/native truth first and explicit sync-v2 compatibility second.
+- Poller, Claude hooks, Claude JSONL, and the touched Codex JSONL translator/heartbeat paths still emit the exact same strings as before, but the compat mapping now lives in one place instead of being redefined per source.
+- This keeps sync-v3 truth cleanup moving in the same direction as the runtime v2 wire extraction: v3/native semantics stay in payloads, while collapsed sync-v2 compatibility strings are isolated plumbing.
+
+### Implementation notes
+- Added `crates/agtmux-core-v5/src/sync_v2_compat.rs` with:
+  - `activity_event_type(ActivityState)`
+  - `claude_hook_event_type(hook_type)`
+  - `claude_notification_event_type(notification_type)`
+  - `claude_jsonl_event_type(line_type)`
+  - focused helper tests that lock the exact legacy strings
+- `crates/agtmux-source-poller/src/source.rs`
+  - removed the local `sync_v2_compat_activity_event_type()` table and now imports the shared helper directly
+- `crates/agtmux-source-claude-hooks/src/translate.rs`
+  - `normalize_event_type()` / `resolve_event_type()` now delegate compat string generation to the shared helper
+- `crates/agtmux-source-claude-jsonl/src/translate.rs`
+  - the JSONL line-type compat mapping now comes from the shared helper instead of an inline match
+- `crates/agtmux-source-codex-jsonl/src/translate.rs`
+  - running / waiting compat strings and idle heartbeat now use the shared activity helper
+- `crates/agtmux-source-claude-jsonl/src/source.rs`
+  - idle bootstrap / ambiguous bootstrap / heartbeat events now use the shared compat helper explicitly
+
+### Gate
+- `cargo fmt --all` PASS
+- `cargo test -p agtmux-core-v5 sync_v2_compat -- --nocapture` PASS
+- `cargo test -p agtmux-source-poller sync_v2_compat_activity_state_mapping_to_event_type -- --nocapture` PASS
+- `cargo test -p agtmux-source-claude-hooks event_type_normalization -- --nocapture` PASS
+- `cargo test -p agtmux-source-claude-jsonl translate::tests -- --nocapture` PASS
+- `cargo test -p agtmux-source-codex-jsonl translate::tests -- --nocapture` PASS
+
+### Intentional deferrals
+- sync-v2 transport / replay deletion is still deferred
+- no source semantic rewrite or sync-v3 reducer behavior change was made in this slice

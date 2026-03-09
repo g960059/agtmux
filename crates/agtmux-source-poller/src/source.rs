@@ -5,9 +5,12 @@
 //! processes tmux pane snapshots, detects agents via heuristic pattern
 //! matching, and produces typed source events for the gateway.
 
-use agtmux_core_v5::types::{
-    ActivityState, EvidenceTier, Provider, PullEventsRequest, PullEventsResponse, SourceEventV2,
-    SourceHealthReport, SourceHealthStatus, SourceKind,
+use agtmux_core_v5::{
+    sync_v2_compat,
+    types::{
+        ActivityState, EvidenceTier, Provider, PullEventsRequest, PullEventsResponse,
+        SourceEventV2, SourceHealthReport, SourceHealthStatus, SourceKind,
+    },
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -40,23 +43,6 @@ pub struct PollResult {
     pub activity_state: ActivityState,
     pub confidence: f64,
     pub event: SourceEventV2,
-}
-
-// ─── Event type mapping ─────────────────────────────────────────────
-
-/// Map an `ActivityState` to the legacy sync-v2-compatible `event_type` string.
-///
-/// This collapsed string namespace exists for the old projection / replay
-/// boundary only. The sync-v3 daemon truth path must not depend on it.
-fn sync_v2_compat_activity_event_type(state: ActivityState) -> &'static str {
-    match state {
-        ActivityState::Running => "activity.running",
-        ActivityState::Idle => "activity.idle",
-        ActivityState::WaitingInput => "activity.waiting_input",
-        ActivityState::WaitingApproval => "activity.waiting_approval",
-        ActivityState::Error => "activity.error",
-        ActivityState::Unknown | _ => "activity.unknown",
-    }
 }
 
 // ─── Title-based activity classification ────────────────────────────
@@ -160,7 +146,7 @@ pub fn poll_pane(snapshot: &PaneSnapshot) -> Option<PollResult> {
         pane_generation: None,
         pane_birth_ts: None,
         source_event_id: None,
-        event_type: sync_v2_compat_activity_event_type(activity_state).to_string(),
+        event_type: sync_v2_compat::activity_event_type(activity_state).to_string(),
         payload,
         confidence: detect_result.confidence,
         is_heartbeat: false, // Poller events are never heartbeats
@@ -515,32 +501,32 @@ mod tests {
     fn sync_v2_compat_activity_state_mapping_to_event_type() {
         // Running
         assert_eq!(
-            sync_v2_compat_activity_event_type(ActivityState::Running),
+            sync_v2_compat::activity_event_type(ActivityState::Running),
             "activity.running"
         );
         // Idle
         assert_eq!(
-            sync_v2_compat_activity_event_type(ActivityState::Idle),
+            sync_v2_compat::activity_event_type(ActivityState::Idle),
             "activity.idle"
         );
         // WaitingInput
         assert_eq!(
-            sync_v2_compat_activity_event_type(ActivityState::WaitingInput),
+            sync_v2_compat::activity_event_type(ActivityState::WaitingInput),
             "activity.waiting_input"
         );
         // WaitingApproval
         assert_eq!(
-            sync_v2_compat_activity_event_type(ActivityState::WaitingApproval),
+            sync_v2_compat::activity_event_type(ActivityState::WaitingApproval),
             "activity.waiting_approval"
         );
         // Error
         assert_eq!(
-            sync_v2_compat_activity_event_type(ActivityState::Error),
+            sync_v2_compat::activity_event_type(ActivityState::Error),
             "activity.error"
         );
         // Unknown
         assert_eq!(
-            sync_v2_compat_activity_event_type(ActivityState::Unknown),
+            sync_v2_compat::activity_event_type(ActivityState::Unknown),
             "activity.unknown"
         );
     }

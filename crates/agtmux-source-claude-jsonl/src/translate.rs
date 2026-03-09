@@ -1,6 +1,9 @@
 //! Event translation from Claude JSONL transcript lines to [`SourceEventV2`].
 
-use agtmux_core_v5::types::{EvidenceTier, Provider, SourceEventV2, SourceKind};
+use agtmux_core_v5::{
+    sync_v2_compat,
+    types::{EvidenceTier, Provider, SourceEventV2, SourceKind},
+};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
@@ -81,17 +84,7 @@ pub fn translate(line: &ClaudeJsonlLine, ctx: &TranslateContext) -> Option<Sourc
 /// Returns `None` for metadata-only types that should not produce events
 /// (e.g. `system`, `file-history-snapshot`, `queue-operation`).
 fn normalize_event_type(line_type: &str) -> Option<String> {
-    match line_type {
-        "user" => Some("activity.user_input".to_owned()),
-        "tool_use" => Some("activity.running".to_owned()),
-        "tool_result" => Some("activity.tool_complete".to_owned()),
-        "assistant" => Some("activity.idle".to_owned()),
-        // Progress events indicate a tool is still executing (e.g. long-running bash).
-        // Claude Code emits these ~1/sec during tool execution.
-        "progress" => Some("activity.running".to_owned()),
-        // Metadata types that don't represent activity state changes — skip.
-        _ => None,
-    }
+    sync_v2_compat::claude_jsonl_event_type(line_type).map(str::to_owned)
 }
 
 #[cfg(test)]

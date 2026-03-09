@@ -3,9 +3,12 @@
 
 use std::collections::HashMap;
 
-use agtmux_core_v5::types::{
-    EvidenceTier, Provider, PullEventsRequest, PullEventsResponse, SourceEventV2,
-    SourceHealthReport, SourceHealthStatus, SourceKind,
+use agtmux_core_v5::{
+    sync_v2_compat,
+    types::{
+        ActivityState, EvidenceTier, Provider, PullEventsRequest, PullEventsResponse,
+        SourceEventV2, SourceHealthReport, SourceHealthStatus, SourceKind,
+    },
 };
 use chrono::{DateTime, Utc};
 use tracing::warn;
@@ -102,7 +105,7 @@ impl ClaudeJsonlSourceState {
     ///
     /// When a JSONL file is discovered but no real (non-metadata) lines are
     /// found this tick — e.g. idle pane after daemon restart — a heartbeat
-    /// event (`is_heartbeat = true`, `activity.idle`) is emitted so that
+    /// event (`is_heartbeat = true`, compat `activity.idle`) is emitted so that
     /// `deterministic_last_seen` stays fresh and the resolver does not fall
     /// back to heuristic or mis-attribute the pane to another provider.
     ///
@@ -271,7 +274,7 @@ fn bootstrap_event(
         pane_generation: discovery.pane_generation,
         pane_birth_ts: discovery.pane_birth_ts,
         source_event_id: None,
-        event_type: "activity.idle".to_owned(),
+        event_type: sync_v2_compat::activity_event_type(ActivityState::Idle).to_owned(),
         payload: serde_json::json!({}),
         confidence: 1.0,
         is_heartbeat: false, // KEY: updates last_real_activity in the projection
@@ -306,7 +309,7 @@ fn ambiguous_cwd_bootstrap(
         pane_generation: discovery.pane_generation,
         pane_birth_ts: discovery.pane_birth_ts,
         source_event_id: None,
-        event_type: "activity.idle".to_owned(),
+        event_type: sync_v2_compat::activity_event_type(ActivityState::Idle).to_owned(),
         payload: serde_json::json!({}),
         confidence: 1.0,
         is_heartbeat: true, // KEY: does NOT write last_real_activity
@@ -334,7 +337,7 @@ fn idle_heartbeat(discovery: &SessionDiscovery, now: DateTime<Utc>) -> SourceEve
         pane_generation: discovery.pane_generation,
         pane_birth_ts: discovery.pane_birth_ts,
         source_event_id: None,
-        event_type: "activity.idle".to_owned(),
+        event_type: sync_v2_compat::activity_event_type(ActivityState::Idle).to_owned(),
         payload: serde_json::json!({}),
         confidence: 1.0,
         is_heartbeat: true,
@@ -366,7 +369,7 @@ mod tests {
             pane_generation: Some(1),
             pane_birth_ts: None,
             source_event_id: Some(id.to_owned()),
-            event_type: "activity.running".to_owned(),
+            event_type: sync_v2_compat::activity_event_type(ActivityState::Running).to_owned(),
             payload: serde_json::json!({"line_type": "tool_use"}),
             confidence: 1.0,
             is_heartbeat: false,

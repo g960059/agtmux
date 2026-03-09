@@ -1,6 +1,9 @@
 //! Event translation from Claude hooks format to [`SourceEventV2`].
 
-use agtmux_core_v5::types::{EvidenceTier, Provider, SourceEventV2, SourceKind};
+use agtmux_core_v5::{
+    sync_v2_compat,
+    types::{EvidenceTier, Provider, SourceEventV2, SourceKind},
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -45,20 +48,7 @@ pub fn translate(raw: &ClaudeHookEvent) -> SourceEventV2 {
 
 /// Map Claude hook types to normalized event_type strings.
 fn normalize_event_type(hook_type: &str) -> String {
-    match hook_type {
-        "session_start" | "SessionStart" => "lifecycle.start".to_owned(),
-        "session_end" | "SessionEnd" => "lifecycle.end".to_owned(),
-        "tool_start" | "thinking" => "lifecycle.running".to_owned(),
-        "tool_end" | "idle" => "lifecycle.idle".to_owned(),
-        "error" => "lifecycle.error".to_owned(),
-        "PermissionRequest" => "activity.waiting_approval".to_owned(),
-        "UserPromptSubmit" => "activity.user_input".to_owned(),
-        "PostToolUseFailure" => "lifecycle.error".to_owned(),
-        "PreCompact" => "lifecycle.compacting".to_owned(),
-        "Stop" | "SubagentStop" => "activity.waiting_input".to_owned(),
-        "PreToolUse" | "PostToolUse" => "activity.running".to_owned(),
-        _ => "lifecycle.unknown".to_owned(),
-    }
+    sync_v2_compat::claude_hook_event_type(hook_type).to_owned()
 }
 
 /// Resolve event_type, taking hook payload into account for hooks that
@@ -67,12 +57,11 @@ fn normalize_event_type(hook_type: &str) -> String {
 /// For all other hook types the call is forwarded to [`normalize_event_type`].
 fn resolve_event_type(hook_type: &str, data: &serde_json::Value) -> String {
     if hook_type == "Notification" {
-        match data.get("notification_type").and_then(|v| v.as_str()) {
-            Some("idle_prompt") => "activity.waiting_input".to_owned(),
-            Some("permission_prompt") => "activity.waiting_approval".to_owned(),
-            Some(_) => "lifecycle.notification".to_owned(),
-            None => "lifecycle.notification".to_owned(),
-        }
+        sync_v2_compat::claude_notification_event_type(
+            data.get("notification_type")
+                .and_then(serde_json::Value::as_str),
+        )
+        .to_owned()
     } else {
         normalize_event_type(hook_type)
     }

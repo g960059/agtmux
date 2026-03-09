@@ -775,3 +775,19 @@ Phase 7 (Distribution) と独立して実施可能。
   - Notes:
     - sync-v2 transport / replay payloads are still present for compatibility
     - no `ui.bootstrap.v3` / `ui.changes.v3` semantic changes in this slice
+
+- [x] T-SYNCV3-CLEANUP-SOURCE-V2-EVENT-TYPES (P1) Source cleanup: extract sync-v2 compat `event_type` mapping behind shared helpers — DONE (2026-03-09)
+  - 目的: source modules を v3-payload-first な読み味に保ちつつ、legacy `activity.*` / `tool_complete` / `user_input` / `lifecycle.*` string generation を explicit な sync-v2 compatibility layer に閉じ込める
+  - Deliverables:
+    - `agtmux-core-v5` に shared `sync_v2_compat` helper module を追加し、poller / Claude hooks / Claude JSONL で使う legacy `event_type` mapping を一箇所に集約する
+    - `agtmux-source-poller` と touched translators (`agtmux-source-claude-hooks`, `agtmux-source-claude-jsonl`, `agtmux-source-codex-jsonl`) が inline string tables を持たずに compat helper を呼ぶ形へ整理する
+    - Claude/Codex idle bootstrap/heartbeat path でも raw compat string を helper 経由に寄せ、emitted strings と source behavior は unchanged のまま維持する
+  - Evidence:
+    - `cargo test -p agtmux-core-v5 sync_v2_compat -- --nocapture` PASS
+    - `cargo test -p agtmux-source-poller sync_v2_compat_activity_state_mapping_to_event_type -- --nocapture` PASS
+    - `cargo test -p agtmux-source-claude-hooks event_type_normalization -- --nocapture` PASS
+    - `cargo test -p agtmux-source-claude-jsonl translate::tests -- --nocapture` PASS
+    - `cargo test -p agtmux-source-codex-jsonl translate::tests -- --nocapture` PASS
+  - Notes:
+    - sync-v2 transport / replay / legacy `event_type` fields are still present for compatibility
+    - this slice does not change v3 reducer truth or source-native payload contents

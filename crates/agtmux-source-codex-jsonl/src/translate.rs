@@ -1,6 +1,9 @@
 //! Translation from Codex JSONL FSM state to SourceEventV2.
 
-use agtmux_core_v5::types::{EvidenceTier, Provider, SourceEventV2, SourceKind};
+use agtmux_core_v5::{
+    sync_v2_compat,
+    types::{ActivityState, EvidenceTier, Provider, SourceEventV2, SourceKind},
+};
 use chrono::{DateTime, Utc};
 
 use crate::fsm::{CodexJsonlEvent, CodexSessionState};
@@ -93,7 +96,7 @@ pub fn idle_heartbeat(
         pane_generation,
         pane_birth_ts,
         source_event_id: None,
-        event_type: "activity.idle".to_owned(),
+        event_type: sync_v2_compat::activity_event_type(ActivityState::Idle).to_owned(),
         payload: serde_json::json!({}),
         confidence: 1.0,
         is_heartbeat: true,
@@ -106,10 +109,15 @@ pub fn idle_heartbeat(
 /// Returns `None` for states that don't produce events.
 fn state_to_event_type(state: CodexSessionState) -> Option<&'static str> {
     match state {
-        CodexSessionState::Running => Some("activity.running"),
-        CodexSessionState::ToolExecuting => Some("activity.running"),
-        CodexSessionState::WaitingApproval => Some("activity.waiting_approval"),
-        CodexSessionState::WaitingInput => Some("activity.waiting_input"),
+        CodexSessionState::Running | CodexSessionState::ToolExecuting => {
+            Some(sync_v2_compat::activity_event_type(ActivityState::Running))
+        }
+        CodexSessionState::WaitingApproval => Some(sync_v2_compat::activity_event_type(
+            ActivityState::WaitingApproval,
+        )),
+        CodexSessionState::WaitingInput => Some(sync_v2_compat::activity_event_type(
+            ActivityState::WaitingInput,
+        )),
         CodexSessionState::Ended => None,
         CodexSessionState::Init => None,
     }
