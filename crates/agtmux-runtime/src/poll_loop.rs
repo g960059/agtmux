@@ -1540,7 +1540,7 @@ mod tests {
     async fn poll_tick_pulls_from_claude_source() {
         use agtmux_source_claude_hooks::translate::ClaudeHookEvent;
 
-        let backend = Arc::new(FakeTmuxBackend::new().with_pane("%0", "main", "zsh", "$ ls"));
+        let backend = Arc::new(FakeTmuxBackend::new().with_pane("%0", "main", "node", "$ ls"));
         let state = new_state();
 
         // Pre-ingest a Claude hook event (use Utc::now() so resolver sees it as fresh)
@@ -1571,7 +1571,7 @@ mod tests {
     async fn poll_tick_pulls_from_codex_jsonl_source() {
         use agtmux_core_v5::types::{EvidenceTier, Provider, SourceEventV2, SourceKind};
 
-        let backend = Arc::new(FakeTmuxBackend::new().with_pane("%0", "main", "zsh", "$ ls"));
+        let backend = Arc::new(FakeTmuxBackend::new().with_pane("%0", "main", "node", "$ ls"));
         let state = new_state();
 
         // Pre-ingest a Codex JSONL event directly into the codex_jsonl_source
@@ -1613,7 +1613,7 @@ mod tests {
         let backend = Arc::new(
             FakeTmuxBackend::new()
                 .with_pane("%0", "main", "claude", "╭ Claude Code") // detected by poller
-                .with_pane("%1", "main", "zsh", "$ ls"), // only via hooks
+                .with_pane("%1", "main", "node", "$ ls"), // only via hooks
         );
         let state = new_state();
 

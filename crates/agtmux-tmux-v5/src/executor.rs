@@ -103,10 +103,9 @@ where
         .get("TMUX_BIN")
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())
+        .filter(|value| is_executable(value))
     {
-        if is_executable(explicit) {
-            return explicit.to_string();
-        }
+        return explicit.to_string();
     }
 
     if let Some(path) = env
