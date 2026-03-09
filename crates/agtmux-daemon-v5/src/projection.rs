@@ -771,6 +771,72 @@ impl DaemonProjection {
         self.panes.get(pane_id)
     }
 
+    /// Demote exact pane rows back to unmanaged truth by removing managed state.
+    ///
+    /// Used when live tmux inventory proves that a pane has already returned to a
+    /// plain shell. This exact-row shell truth must override any stale managed
+    /// heuristic/deterministic state still retained in the projection.
+    ///
+    /// Returns the number of change-log entries recorded.
+    pub fn demote_panes_to_unmanaged(&mut self, pane_ids: &[String], now: DateTime<Utc>) -> usize {
+        let mut change_count = 0usize;
+
+        for pane_id in pane_ids {
+            let Some(pane) = self.panes.remove(pane_id) else {
+                continue;
+            };
+
+            self.resolver_states.remove(pane_id);
+            self.last_real_activity.remove(pane_id);
+
+            let mut affected_sessions: Vec<String> = self
+                .session_to_pane
+                .iter()
+                .filter(|(_, mapped_pane_id)| *mapped_pane_id == pane_id)
+                .map(|(session_key, _)| session_key.clone())
+                .collect();
+            self.session_to_pane
+                .retain(|_, mapped_pane_id| mapped_pane_id != pane_id);
+
+            if !affected_sessions
+                .iter()
+                .any(|session_key| session_key == &pane.session_key)
+            {
+                affected_sessions.push(pane.session_key.clone());
+            }
+            affected_sessions.sort();
+            affected_sessions.dedup();
+
+            self.version += 1;
+            self.record_change(StateChange {
+                version: self.version,
+                session_key: pane.session_key.clone(),
+                pane_id: Some(pane_id.clone()),
+                timestamp: now,
+                session_state: None,
+                pane_state: None,
+            });
+            change_count += 1;
+
+            for session_key in affected_sessions {
+                if self.sessions.remove(&session_key).is_some() {
+                    self.version += 1;
+                    self.record_change(StateChange {
+                        version: self.version,
+                        session_key,
+                        pane_id: None,
+                        timestamp: now,
+                        session_state: None,
+                        pane_state: None,
+                    });
+                    change_count += 1;
+                }
+            }
+        }
+
+        change_count
+    }
+
     fn resync_required(&self, reason: &'static str) -> ResyncRequired {
         ResyncRequired {
             current_epoch: self.epoch,
@@ -1262,6 +1328,46 @@ mod tests {
         assert_eq!(result.sessions_changed, 0);
         assert_eq!(result.panes_changed, 0);
         assert_eq!(proj.version(), v1);
+    }
+
+    #[test]
+    fn demote_panes_to_unmanaged_removes_exact_row_and_session_state() {
+        let mut proj = DaemonProjection::new();
+        let t = t0();
+
+        proj.apply_events(vec![det_event("e1", "s1", "%1", "activity.running", t)], t);
+        let before = proj.version();
+
+        let changed =
+            proj.demote_panes_to_unmanaged(&["%1".to_string()], t + TimeDelta::seconds(1));
+
+        assert_eq!(
+            changed, 2,
+            "pane removal + session removal should be recorded"
+        );
+        assert!(
+            proj.get_pane("%1").is_none(),
+            "managed pane must be removed"
+        );
+        assert!(
+            proj.get_session("s1").is_none(),
+            "session state must not survive exact-row shell demotion"
+        );
+        assert!(
+            !proj.session_to_pane.contains_key("s1"),
+            "session-to-pane link must be cleared"
+        );
+        assert!(
+            !proj.resolver_states.contains_key("%1"),
+            "resolver state must be cleared so stale freshness cannot resurrect the row"
+        );
+
+        let changes = proj.changes_since(before);
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[0].pane_id.as_deref(), Some("%1"));
+        assert!(changes[0].pane_state.is_none(), "pane removal change");
+        assert!(changes[1].pane_id.is_none(), "session removal change");
+        assert!(changes[1].session_state.is_none(), "session removal change");
     }
 
     // ── 8. State change detection ──────────────────────────────────

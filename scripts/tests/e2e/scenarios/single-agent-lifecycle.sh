@@ -56,8 +56,8 @@ pass "Scenario 1: $PROVIDER detected as running (deterministic)"
 # Provider-side: wait until provider has finished (adapter-specific)
 wait_until_provider_idle "$PANE_ID" 30 || log "WARN: provider-side idle check timed out (non-fatal)"
 
-# agtmux-side: provider finished and is no longer running
-wait_for_agtmux_state_any "$SOCKET" "$PANE_ID" "activity_state" "waiting_input idle" 60
+# agtmux-side: provider either completed in-pane or the row demoted back to shell truth.
+wait_for_completion_or_shell_demotion "$SOCKET" "$PANE_ID" 60 >/dev/null
 
 pass "Scenario 2: $PROVIDER detected as completed after completion"
 

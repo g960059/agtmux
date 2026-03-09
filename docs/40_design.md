@@ -289,7 +289,9 @@ pub struct SourceCursorState {
 - `TmuxCommandRunner` trait: mock injection 可能なテスト境界（v4 パターンを移植）
 - `TmuxExecutor`: sync `std::process::Command` wrapper（`TmuxCommandRunner` を実装）
   - Socket targeting 優先順: `--tmux-socket` > `AGTMUX_TMUX_SOCKET_PATH` > `AGTMUX_TMUX_SOCKET_NAME` > `TMUX` env > default
-- `list_panes()`: `tmux list-panes -a -F` を v4 format string で parse
+  - `--tmux-socket` が指定された場合、daemon は launch context（shell / app child / XCUITest）に依存せず同じ tmux universe を inventory しなければならない。context-specific empty bootstrap は設計違反。
+- `list_panes()`: `tmux list-panes -a -F` を parse
+  - delimiter は printable literal (`|`) を使う。tab (`\t`) は app-like sanitized env (`env -i` / child daemon) で `_` に化ける実測があり、launch context 依存の parser breakage を起こすため禁止。
   - `Vec<TmuxPaneInfo>` を返す（session_name, window_id, window_name, current_path, width, height, active 等の full metadata）
 - `capture_pane()`: `tmux capture-pane -p -t {pane_id} -S -{lines}` を wrap
 - `inspect_pane_processes()`: ps ベースの provider hint 抽出（claude/codex in argv）

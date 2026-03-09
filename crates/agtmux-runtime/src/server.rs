@@ -637,10 +637,20 @@ fn build_resync_required(
     })
 }
 
+fn sync_v2_pane_session_key(pane_id: &str) -> String {
+    format!("poller-{pane_id}")
+}
+
 fn build_change_entry(change: &agtmux_daemon_v5::projection::StateChange) -> serde_json::Value {
+    let sync_session_key = change
+        .pane_id
+        .as_deref()
+        .map(sync_v2_pane_session_key)
+        .unwrap_or_else(|| change.session_key.clone());
+
     let mut entry = serde_json::json!({
         "seq": change.version,
-        "session_key": change.session_key,
+        "session_key": sync_session_key,
         "timestamp": change.timestamp,
     });
 
@@ -648,7 +658,16 @@ fn build_change_entry(change: &agtmux_daemon_v5::projection::StateChange) -> ser
         entry["pane_id"] = serde_json::Value::String(pane_id.clone());
     }
     if let Some(ref pane_state) = change.pane_state {
-        entry["pane"] = serde_json::to_value(pane_state).unwrap_or(serde_json::Value::Null);
+        let mut pane_value = serde_json::to_value(pane_state).unwrap_or(serde_json::Value::Null);
+        if let Some(pane_id) = change.pane_id.as_deref()
+            && let Some(pane_obj) = pane_value.as_object_mut()
+        {
+            pane_obj.insert(
+                "session_key".to_string(),
+                serde_json::Value::String(sync_v2_pane_session_key(pane_id)),
+            );
+        }
+        entry["pane"] = pane_value;
     }
     if let Some(ref session_state) = change.session_state {
         entry["session"] = serde_json::to_value(session_state).unwrap_or(serde_json::Value::Null);
@@ -664,6 +683,10 @@ fn build_change_entry(change: &agtmux_daemon_v5::projection::StateChange) -> ser
 /// Only fields required or explicitly allowed by FR-065 are emitted here.
 fn build_sync_v2_pane_list(state: &DaemonState) -> serde_json::Value {
     let managed_panes = state.daemon.list_panes();
+    let managed_ids: std::collections::HashSet<&str> = managed_panes
+        .iter()
+        .map(|p| p.pane_instance_id.pane_id.as_str())
+        .collect();
     let now = chrono::Utc::now();
     let mut result: Vec<serde_json::Value> = Vec::new();
 
@@ -686,7 +709,7 @@ fn build_sync_v2_pane_list(state: &DaemonState) -> serde_json::Value {
             // Required identity fields (FR-065)
             "pane_id": pane.pane_instance_id.pane_id,
             "session_name": tmux_info.session_name.as_str(),
-            "session_key": pane.session_key,
+            "session_key": sync_v2_pane_session_key(&pane.pane_instance_id.pane_id),
             "window_id": tmux_info.window_id.as_str(),
             "pane_instance_id": {
                 "pane_id": pane.pane_instance_id.pane_id,
@@ -710,9 +733,42 @@ fn build_sync_v2_pane_list(state: &DaemonState) -> serde_json::Value {
         }));
     }
 
-    // Unmanaged panes are excluded from sync-v2: they lack `session_key` and `pane_instance_id`,
-    // which are required non-null fields per the strict AgtmuxSyncV2RawPane consumer contract.
-    // The human-facing `build_pane_list()` continues to include unmanaged panes for CLI surfaces.
+    // Unmanaged panes: emit exact tmux identity so sync-v2 consumers can align bootstrap
+    // rows with inventory before managed promotion appears.
+    for tmux_pane in &state.last_panes {
+        if managed_ids.contains(tmux_pane.pane_id.as_str()) {
+            continue;
+        }
+
+        let (generation, birth_ts) = state
+            .generation_tracker
+            .get(&tmux_pane.pane_id)
+            .unwrap_or((0, now));
+
+        result.push(serde_json::json!({
+            "pane_id": tmux_pane.pane_id.as_str(),
+            "session_name": tmux_pane.session_name.as_str(),
+            "session_key": sync_v2_pane_session_key(&tmux_pane.pane_id),
+            "window_id": tmux_pane.window_id.as_str(),
+            "pane_instance_id": {
+                "pane_id": tmux_pane.pane_id.as_str(),
+                "generation": generation,
+                "birth_ts": birth_ts,
+            },
+            "window_name": tmux_pane.window_name.as_str(),
+            "session_group": serde_json::Value::Null,
+            "presence": PanePresence::Unmanaged,
+            "evidence_mode": EvidenceMode::None,
+            "activity_state": "Unknown",
+            "provider": serde_json::Value::Null,
+            "conversation_title": serde_json::Value::Null,
+            "current_path": tmux_pane.current_path.as_str(),
+            "git_branch": serde_json::Value::Null,
+            "current_cmd": tmux_pane.current_cmd.as_str(),
+            "updated_at": now,
+            "age_secs": 0,
+        }));
+    }
 
     serde_json::Value::Array(result)
 }
@@ -1420,13 +1476,38 @@ mod tests {
                 pane["pane_id"]
             );
         }
+    }
 
-        // Unmanaged pane (%99) must be excluded: lacks required session_key/pane_instance_id.
-        let unmanaged_in_v2 = panes.iter().any(|p| p["pane_id"] == "%99");
-        assert!(
-            !unmanaged_in_v2,
-            "sync-v2 must not include unmanaged panes that lack required identity fields"
-        );
+    #[test]
+    fn ui_bootstrap_v2_includes_unmanaged_pane_with_exact_identity() {
+        let mut state = make_state();
+        let now = Utc::now();
+        state.last_panes.push(TmuxPaneInfo {
+            pane_id: "%99".to_string(),
+            session_name: "other".to_string(),
+            window_id: "@99".to_string(),
+            window_name: "misc".to_string(),
+            current_cmd: "zsh".to_string(),
+            current_path: "/tmp".to_string(),
+            ..Default::default()
+        });
+        state.generation_tracker.update(&["%99"], now);
+
+        let result = build_ui_bootstrap_v2(&state);
+        let panes = result["panes"].as_array().expect("panes array");
+        let unmanaged = panes
+            .iter()
+            .find(|pane| pane["pane_id"] == "%99")
+            .expect("unmanaged pane in bootstrap");
+
+        assert_eq!(unmanaged["presence"], "unmanaged");
+        assert_eq!(unmanaged["session_name"], "other");
+        assert_eq!(unmanaged["window_id"], "@99");
+        assert_eq!(unmanaged["session_key"], "poller-%99");
+        assert_eq!(unmanaged["pane_instance_id"]["pane_id"], "%99");
+        assert!(unmanaged["pane_instance_id"]["generation"].is_number());
+        assert!(unmanaged["pane_instance_id"]["birth_ts"].is_string());
+        assert_eq!(unmanaged["current_cmd"], "zsh");
     }
 
     // FR-065 regression: managed pane in sync-v2 bootstrap must carry all required identity fields.
@@ -1473,6 +1554,10 @@ mod tests {
         assert!(
             managed["pane_instance_id"].get("birth_ts").is_some(),
             "pane_instance_id.birth_ts required"
+        );
+        assert_eq!(
+            managed["session_key"], "poller-%0",
+            "sync-v2 managed pane session_key must stay pane-stable across source transitions"
         );
     }
 
@@ -1531,6 +1616,22 @@ mod tests {
         assert_eq!(changes[1]["seq"], 2);
         assert!(changes[0]["session"].is_object());
         assert!(changes[1]["pane"].is_object());
+    }
+
+    #[test]
+    fn ui_changes_v2_pane_change_uses_pane_stable_session_key() {
+        let mut state = make_managed_state();
+
+        let result = build_ui_changes_v2(&mut state, Some(ReplayCursor { epoch: 1, seq: 0 }), 10);
+        let changes = result["changes"].as_array().expect("changes array");
+        let pane_change = changes
+            .iter()
+            .find(|c| c.get("pane").is_some())
+            .expect("pane change present");
+
+        assert_eq!(pane_change["pane_id"], "%0");
+        assert_eq!(pane_change["session_key"], "poller-%0");
+        assert_eq!(pane_change["pane"]["session_key"], "poller-%0");
     }
 
     #[test]

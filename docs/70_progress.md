@@ -2502,3 +2502,266 @@ JSONL スキャナーなし) を発見 → デーモンが stale binary で起�
 ### 残り
 - dirty persistent app-managed socket での cross-repo live smoke
 - 必要なら online/e2e に dirty-state bootstrap exact-location scenario を追加
+
+## 2026-03-08 — T-XTERM-A5 opened on managed-exit semantic truth drift
+
+### Fresh cross-repo repro
+- agtmux-term side reran a fresh real tmux + real Codex repro against a temp daemon socket:
+  - launched `codex exec` from a plain `zsh -l` pane
+  - force-terminated the pane child processes
+  - verified the pane had already returned to `current_cmd=zsh`
+- producer truth still remained stale on that exact row:
+  - `presence=managed`
+  - `provider=codex`
+  - `activity_state=waiting_input`
+  - `evidence_mode=heuristic`
+
+### Why current producer suite missed it
+- current online/e2e validates semantic truth for entry, running/completion, waiting states, title, and no-bleed
+- it does not yet force a managed pane back to a plain shell and require exact-row demotion to `presence=unmanaged`
+- current confirmed evidence is Codex-only; Claude remains a follow-up validation item rather than a proven repro for this slice
+
+### docs反映
+- `docs/20_spec.md`
+  - FR-068 added: stale managed/provider truth must not survive once a pane has returned to shell
+- `docs/60_tasks.md`
+  - `T-XTERM-A5` added for producer-side managed-exit semantic truth recovery
+  - scratch handover path recorded as `/tmp/agtmux-managed-exit-semantic-truth-handover-20260308.md`
+
+### Next
+- add a failing producer-side managed-exit regression first
+- make the semantic truth reducer demote exact rows back to unmanaged shell truth after agent exit / forced termination
+- rerun producer online/e2e plus cross-repo smoke from agtmux-term
+- after the generic demotion path is fixed, add the same follow-up validation for Claude
+
+## 2026-03-08 — T-XTERM-A5 producer-side shell demotion fix landed
+
+### 実装
+- `crates/agtmux-daemon-v5/src/projection.rs`
+  - added `demote_panes_to_unmanaged()` so an exact pane row can be removed from managed projection state once live tmux truth has returned to a plain shell
+  - pane/session removal now clears resolver state, session-to-pane links, and records explicit change-log removals
+- `crates/agtmux-runtime/src/poll_loop.rs`
+  - after freshness downgrade, shell rows (`zsh`, `bash`, `fish`, `sh`, `csh`, `tcsh`, `ksh`, `dash`, `nu`, `pwsh`) now win over stale heuristic managed truth
+  - when tmux reports a shell row and the projection has already fallen back to heuristic evidence, the pane is demoted back to unmanaged shell truth and transcript hints are cleared
+- producer regression and live coverage added:
+  - `demote_panes_to_unmanaged_removes_exact_row_and_session_state`
+  - `poll_tick_demotes_managed_pane_after_return_to_shell`
+  - `poll_tick_demotes_stale_deterministic_pane_after_return_to_shell`
+  - new real-CLI scenario `scripts/tests/e2e/scenarios/managed-exit.sh`
+- online/e2e completion/title scenarios were updated to accept both valid post-completion outcomes:
+  - managed completion (`waiting_input` / `idle`)
+  - exact shell demotion (`presence=unmanaged`, `provider=null`, `activity_state=null`)
+- `scripts/tests/e2e/harness/daemon.sh`
+  - fixed stale local binary reuse so repo-local `target/debug/agtmux` / `target/release/agtmux` is rebuilt before daemon launch unless `AGTMUX_SKIP_BUILD=1`
+
+### 検証
+- `cargo test -p agtmux-daemon-v5`
+- `cargo test -p agtmux`
+- `PROVIDER=codex bash scripts/tests/e2e/online/run-all.sh`
+- `swift test -q --filter AppViewModelA0Tests/testManagedExitChangeClearsStaleProviderActivityAndTitleOnNextPublish` in `agtmux-term`
+- `AGTMUX_LIVE_TEST_BIN=/Users/virtualmachine/ghq/github.com/g960059/agtmux/target/debug/agtmux swift test -q --filter AppViewModelLiveManagedAgentTests` in `agtmux-term`
+
+### 残り
+- Claude real-CLI managed-exit follow-up validation
+
+## 2026-03-08 — T-XTERM-A5 Claude follow-up validation completed
+
+### 実装
+- `scripts/tests/e2e/scenarios/managed-exit.sh`
+  - provider-specific sourcing was removed; the scenario now runs with `PROVIDER=claude` and `PROVIDER=codex`
+  - phase-1 entry gate now requires `presence=managed` plus a live child process under the pane shell, which matches the forced-termination seam better than a provider-specific `activity_state=running` requirement
+- `scripts/tests/e2e/online/run-all.sh`
+  - Claude lane now includes `managed-exit`
+
+### 検証
+- `PROVIDER=claude bash scripts/tests/e2e/scenarios/managed-exit.sh`
+- `PROVIDER=codex bash scripts/tests/e2e/scenarios/managed-exit.sh`
+- `PROVIDER=claude bash scripts/tests/e2e/online/run-all.sh`
+
+### 結果
+- Claude real-CLI lane also demotes the exact row back to shell truth after forced termination:
+  - `presence=unmanaged`
+  - `provider=null`
+  - `activity_state=null`
+- `PROVIDER=claude bash scripts/tests/e2e/online/run-all.sh` → 7 passed, 0 failed
+
+### 残り
+- この slice に関する producer-side follow-up validation はなし
+
+## 2026-03-08 — T-XTERM-A6 opened on app-launched explicit --tmux-socket drift
+
+### Fresh cross-repo evidence from `agtmux-term`
+- term-side metadata-enabled XCUITest now proves the remaining failure is not stale daemon reuse and not socket-name resolution:
+  - the app launches:
+    - `/Users/virtualmachine/ghq/github.com/g960059/agtmux/target/debug/agtmux --socket-path /Users/virtualmachine/.agt/uit-<token>.sock daemon --tmux-socket /private/tmp/tmux-501/agtmux-managed-<token>`
+  - `UITestTmuxBridge` capture-pane proves a real Codex run completed in the target plain `zsh` pane on that isolated tmux server
+  - same app process probing the custom daemon socket still gets:
+    - `ui.bootstrap.v2 total=0 managed=0`
+    - `probeTarget=nil`
+    - daemon stderr empty
+- standalone shell repro with the same local binary and exact daemon args sees the managed pane within 3 seconds
+
+### Conclusion
+- the remaining drift is producer-side and launch-context-specific:
+  - explicit `--tmux-socket` works from a normal shell
+  - explicit `--tmux-socket` fails when the daemon is spawned from the codesigned app/XCUITest path
+- this opens `T-XTERM-A6`
+- scratch handover published: `/tmp/agtmux-app-launched-explicit-tmux-socket-handover-20260308.md`
+
+### Next
+- add a failing producer-side repro for app-like explicit-`--tmux-socket` launch context
+- fix the daemon so explicit `--tmux-socket` remains authoritative across shell and app-owned launches
+
+## 2026-03-08 — T-XTERM-A6 refined after stripped-PATH fix and downstream env hardening
+
+### What is now ruled out
+- producer-side stripped-PATH drift is fixed:
+  - `cargo build -p agtmux`
+  - `cargo test -p agtmux-tmux-v5`
+  - `bash scripts/tests/e2e/scenarios/explicit-tmux-socket-sanitized-path.sh`
+  - `cargo test -p agtmux`
+  - all green
+- term-side child-daemon env hardening is also in place on the current downstream worktree:
+  - `TMUX_BIN=/opt/homebrew/bin/tmux`
+  - normalized `HOME`, `USER`, `LOGNAME`, `XDG_CONFIG_HOME`, `CODEX_HOME`, `PATH`
+
+### Fresh downstream evidence
+- rerun of the focused metadata-enabled UI lane still fails with the same producer-visible shape:
+  - `capture-pane` proves the real Codex run completed in the target app-driven pane
+  - same app process probing the custom daemon socket still gets:
+    - `ui.bootstrap.v2 total=0 managed=0`
+    - `probeTarget=nil`
+    - daemon stderr empty
+- downstream failure summary now explicitly shows the normalized child-daemon env, so the remaining drift is not explained by sparse PATH/user env alone
+
+### Interpretation correction
+- `ui.bootstrap.v2 total=0` here means sync-v2 emitted zero managed rows
+- it does not, by itself, prove the daemon's tmux inventory is empty
+- likely remaining surface is managed promotion / detection in the app-launched context, not raw tmux socket reachability alone
+
+### Conclusion
+- `T-XTERM-A6` remains open, but its scope is narrower:
+  - explicit `--tmux-socket` works from shell repro
+  - explicit `--tmux-socket` works under stripped PATH
+  - explicit `--tmux-socket` still fails when the daemon is launched from the agtmux-term metadata-enabled app/XCUITest lane even after downstream env normalization
+- next producer-side step should be a higher-fidelity app-launched repro or launch-context instrumentation, not more generic PATH hardening
+
+## 2026-03-08 — T-XTERM-A6 Phase 1 landed as a failing higher-fidelity producer repro
+
+### Implementation
+- added `scripts/tests/e2e/scenarios/explicit-tmux-socket-app-child-late-server.sh`
+  - daemon starts first under app-like normalized env with explicit `--tmux-socket <path>`
+  - tmux server/session/pane are created only after daemon launch
+  - the scenario fails unless the daemon later inventories the late-started pane on that explicit socket
+- wired the new scenario into `scripts/tests/e2e/contract/run-all.sh`
+
+### Verification
+- `bash scripts/tests/e2e/scenarios/explicit-tmux-socket-app-child-late-server.sh`
+- `bash scripts/tests/e2e/contract/run-all.sh`
+
+### Result
+- the new repro is intentionally red and captures the producer bug directly:
+  - tmux side shows the late-started pane (`%0 zsh`)
+  - daemon side still inventories `[]`
+- contract suite result:
+  - `11 passed, 1 failed`
+  - only `explicit-tmux-socket-app-child-late-server.sh` is red
+
+### Meaning
+- `T-XTERM-A6` Phase 1 is now satisfied:
+  - higher-fidelity producer-side repro exists
+  - it fails without depending on online auth or downstream UI harness
+- next step is producer-side fix / instrumentation against this new red
+
+## 2026-03-09 — T-XTERM-A6 narrowed again: downstream fixed launch/daemon blockers and still gets zero managed rows
+
+### Fresh downstream evidence
+- rerun of the focused `agtmux-term` plain-zsh Codex UI lane now proves the downstream harness is no longer the blocker:
+  - inventory-only launch no longer fails at `Running Background`
+  - delayed metadata enable does spawn the isolated daemon on the custom socket
+  - downstream failure summary now includes:
+    - `daemonLaunch=spawned:/Users/virtualmachine/ghq/github.com/g960059/agtmux/target/debug/agtmux:--socket-path,/Users/virtualmachine/.agt/uit-<token>.sock,daemon,--tmux-socket,/private/tmp/tmux-501/agtmux-managed-<token>`
+    - `daemonEnv=... TMUX_BIN=/opt/homebrew/bin/tmux ...`
+    - `probe=ok total=0 managed=0`
+    - `probeTarget=nil`
+- the same downstream capture still proves a real Codex run completed inside the target plain `zsh` pane on that isolated tmux server
+
+### Interpretation
+- this is stronger than the earlier empty-socket hypothesis:
+  - explicit `--tmux-socket` daemon startup succeeded
+  - the custom daemon socket is reachable
+  - the issue is that the daemon still promotes zero managed sync-v2 rows in that app-child explicit-socket context
+- likely remaining producer-side surface:
+  - plain `zsh` pane child-process discovery / promotion
+  - specifically, `crates/agtmux-tmux-v5/src/capture.rs` currently returns early for `process_hint="shell"` and may never inspect the pane's child process tree in the explicit-socket app-child lane
+
+### Conclusion
+- `T-XTERM-A6` is now narrowed to producer-side managed promotion, not launch-context wiring
+- next producer step should either:
+  - add a failing producer test for shell-pane child-agent promotion under explicit `--tmux-socket`, or
+  - fix `inspect_pane_processes_deep()` / related promotion code so shell panes can promote to managed when their child process tree clearly contains Codex/Claude
+
+## 2026-03-09 — T-XTERM-A6 root cause tightened to tmux list-panes delimiter drift
+
+### Fresh producer-side evidence
+- `scripts/tests/e2e/scenarios/explicit-tmux-socket-shell-child-promotion.sh` now fails before promotion with:
+  - `inventory fetch failed: failed to parse list-panes line 1: expected at least 11 tab-separated fields, got 1`
+- direct tmux probing isolated the format drift:
+  - normal shell:
+    - `tmux -S <sock> list-panes -a -F "#{session_id}\t..."`
+    - returns actual tab-delimited rows
+  - app-like sanitized env (`env -i HOME=... PATH=... TMUX_BIN=... tmux -S <sock> list-panes -a -F "#{session_id}\t..."`)
+    - returns `_`-delimited rows instead of tab-delimited output
+  - the same sanitized env with a printable pipe delimiter:
+    - `tmux -S <sock> list-panes -a -F "#{session_id}|#{session_name}|..."`
+    - returns pipe-delimited rows unchanged
+
+### Interpretation
+- explicit `--tmux-socket` app-child drift is not only a managed-promotion problem
+- `crates/agtmux-tmux-v5/src/pane_info.rs` relies on a tab-delimited `list-panes -F` contract that is not stable under app-like sanitized env
+- this explains why the daemon can launch successfully yet still publish empty inventory / empty managed bootstrap in the app-child lane
+
+### Next step
+- change `list_panes()` to use a printable literal delimiter (`|`) and update parser/tests accordingly
+- rerun:
+  - `scripts/tests/e2e/scenarios/explicit-tmux-socket-app-child-late-server.sh`
+  - `scripts/tests/e2e/scenarios/explicit-tmux-socket-shell-child-promotion.sh`
+  - cross-repo `agtmux-term` focused metadata-enabled UI lane
+
+## 2026-03-09 — T-XTERM-A6 handback refreshed after downstream empty-bootstrap hardening
+
+### Fresh downstream evidence
+- `agtmux-term` landed a real consumer-side fix:
+  - `inventory present + ui.bootstrap.v2 panes=[]` is no longer treated as a ready sync-v2 epoch
+  - focused integration regression is green on the term side
+- focused downstream UI rerun now fails earlier and more precisely:
+  - it waits for a non-empty isolated bootstrap before launching the live Codex proof
+  - that readiness gate still times out with:
+    - `probe=ok total=0 managed=0`
+    - `probeTarget=nil`
+    - visible app inventory row still present as unmanaged `zsh`
+  - daemon stdout/stderr captured from the app child shows only:
+    - `agtmux daemon starting`
+    - `UDS server listening on /Users/virtualmachine/.agt/uit-<token>.sock`
+  - same-process explicit-socket probe is now also captured:
+    - `appDirectSocketProbe=agtmux-e2e-managed-<token>|@0|%0|zsh`
+    - so the app process itself can run `tmux -S <resolved socket path> list-panes` and see the isolated pane
+    - the divergence is now strictly daemon-side on that same explicit socket path
+
+### Interpretation
+- downstream no longer conflates:
+  - launch activation
+  - stale daemon reuse
+  - empty-bootstrap consumer priming
+- the remaining red is now fully on the producer side again:
+  - same-user app process inventory sees the isolated tmux pane
+  - same-user app process direct `tmux -S <resolved socket path>` probing also sees the isolated tmux pane
+  - app-child daemon starts and listens on the custom socket
+  - app-child daemon still never reaches a non-empty `ui.bootstrap.v2` in that metadata-enabled lane
+
+### Next step
+- add/fix producer instrumentation or repro so the daemon shows why polling never advances past the listen state in the app-child explicit-`--tmux-socket` lane
+- rerun:
+  - `scripts/tests/e2e/scenarios/explicit-tmux-socket-app-child-late-server.sh`
+  - any new higher-fidelity app-child repro
+  - cross-repo `agtmux-term` focused metadata-enabled UI lane

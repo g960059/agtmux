@@ -1,6 +1,6 @@
 //! Pane capture and process inspection.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::error::TmuxError;
 use crate::executor::TmuxCommandRunner;
@@ -21,18 +21,25 @@ pub type ProcessMap = HashMap<u32, ProcessInfo>;
 
 /// Scan all running processes using `ps -eo pid=,ppid=,args=`.
 ///
-/// Called once per tick; returns an empty map on failure (non-fatal).
-pub fn scan_all_processes() -> ProcessMap {
+/// Called once per tick; returns an error string on failure (non-fatal to the daemon).
+pub fn scan_all_processes() -> Result<ProcessMap, String> {
     let output = match std::process::Command::new("ps")
         .args(["-eo", "pid=,ppid=,args="])
         .output()
     {
         Ok(o) => o,
-        Err(_) => return ProcessMap::new(),
+        Err(e) => return Err(format!("failed to spawn ps: {e}")),
     };
+
+    if !output.status.success() {
+        let code = output.status.code().unwrap_or(-1);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("ps exited with {code}: {}", stderr.trim()));
+    }
+
     match String::from_utf8(output.stdout) {
-        Ok(s) => parse_ps_output(&s),
-        Err(_) => ProcessMap::new(),
+        Ok(s) => Ok(parse_ps_output(&s)),
+        Err(e) => Err(format!("ps stdout is not UTF-8: {e}")),
     }
 }
 
@@ -66,38 +73,58 @@ fn parse_ps_line(line: &str) -> Option<ProcessInfo> {
     Some(ProcessInfo { pid, ppid, args })
 }
 
-/// Deep process-tree inspection: examines `pane_pid` and its direct children
-/// to distinguish agents that share the same parent runtime (e.g. `node`).
+/// Collect `root_pid` and every reachable descendant PID from the process map.
+fn collect_process_tree_pids(root_pid: u32, process_map: &ProcessMap) -> Vec<u32> {
+    let mut children_by_parent: HashMap<u32, Vec<u32>> = HashMap::new();
+    for info in process_map.values() {
+        children_by_parent
+            .entry(info.ppid)
+            .or_default()
+            .push(info.pid);
+    }
+
+    let mut stack = vec![root_pid];
+    let mut visited = HashSet::new();
+    let mut subtree = Vec::new();
+
+    while let Some(pid) = stack.pop() {
+        if !visited.insert(pid) {
+            continue;
+        }
+        subtree.push(pid);
+        if let Some(children) = children_by_parent.get(&pid) {
+            stack.extend(children.iter().copied());
+        }
+    }
+
+    subtree
+}
+
+/// Deep process-tree inspection: examines `pane_pid` and its descendant
+/// process tree to distinguish agents that share the same parent runtime or
+/// are launched from a shell pane.
 ///
 /// Returns:
 /// - `Some("claude")`          — a process argv identifies Claude Code
 /// - `Some("codex")`           — a process argv identifies Codex CLI
 /// - `Some("runtime_unknown")` — neutral runtime with unidentifiable children (fail-closed)
 /// - Falls through to `inspect_pane_processes(current_cmd)` when `pane_pid` has no
-///   child processes or the command is directly identifiable (shell / explicit agent)
+///   identifiable descendant agent or the command is directly identifiable
 pub fn inspect_pane_processes_deep(
     current_cmd: &str,
     pane_pid: u32,
     process_map: &ProcessMap,
 ) -> Option<String> {
-    // Fast path: directly identifiable commands skip the process-tree scan.
+    // Fast path: explicit agent commands skip the process-tree scan.
     let shallow = inspect_pane_processes(current_cmd);
     match shallow.as_deref() {
-        Some("shell") | Some("codex") | Some("claude") => return shallow,
+        Some("codex") | Some("claude") => return shallow,
         _ => {}
     }
 
-    // Collect pane_pid itself and its direct children.
-    let pids_to_check: Vec<u32> = std::iter::once(pane_pid)
-        .chain(
-            process_map
-                .values()
-                .filter(|p| p.ppid == pane_pid)
-                .map(|p| p.pid),
-        )
-        .collect();
+    let pids_to_check = collect_process_tree_pids(pane_pid, process_map);
 
-    let mut found_neutral_child = false;
+    let mut found_descendant = false;
     for pid in pids_to_check {
         if let Some(info) = process_map.get(&pid) {
             if is_claude_argv(&info.args) {
@@ -107,13 +134,13 @@ pub fn inspect_pane_processes_deep(
                 return Some("codex".to_string());
             }
             if pid != pane_pid {
-                found_neutral_child = true;
+                found_descendant = true;
             }
         }
     }
 
     // Neutral runtime (node/bun/…) with children that couldn't be identified → fail-closed.
-    if shallow.is_none() && found_neutral_child {
+    if shallow.is_none() && found_descendant {
         return Some("runtime_unknown".to_string());
     }
 
@@ -270,12 +297,41 @@ mod tests {
     }
 
     #[test]
-    fn deep_inspect_shell_fast_path() {
-        // Shell is identified by shallow inspection; process tree not needed
+    fn deep_inspect_shell_without_agent_descendant_stays_shell() {
         let pm = make_pm(&[(50, 1, "zsh"), (51, 50, "something")]);
         assert_eq!(
             inspect_pane_processes_deep("zsh", 50, &pm),
             Some("shell".to_string())
+        );
+    }
+
+    #[test]
+    fn deep_inspect_shell_descendant_codex_promotes_to_codex() {
+        let pm = make_pm(&[
+            (70, 1, "zsh"),
+            (71, 70, "bash -lc codex exec"),
+            (
+                72,
+                71,
+                "node /usr/local/lib/node_modules/@openai/codex/dist/cli.mjs exec",
+            ),
+        ]);
+        assert_eq!(
+            inspect_pane_processes_deep("zsh", 70, &pm),
+            Some("codex".to_string())
+        );
+    }
+
+    #[test]
+    fn deep_inspect_shell_descendant_claude_promotes_to_claude() {
+        let pm = make_pm(&[
+            (80, 1, "zsh"),
+            (81, 80, "bash -lc claude -p"),
+            (82, 81, "node /Users/user/.claude/local/cli.js -p"),
+        ]);
+        assert_eq!(
+            inspect_pane_processes_deep("zsh", 80, &pm),
+            Some("claude".to_string())
         );
     }
 

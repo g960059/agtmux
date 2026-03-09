@@ -125,6 +125,55 @@ wait_for_agtmux_state_any() {
     return 1
 }
 
+is_shell_cmd() {
+    local cmd
+    cmd="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+    case "$cmd" in
+        zsh|bash|fish|sh|csh|tcsh|ksh|dash|nu|pwsh) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# wait_for_completion_or_shell_demotion SOCKET PANE_ID [MAX_WAIT_S]
+# Accepts either:
+#   - managed completion (`activity_state` reached `waiting_input` / `idle`)
+#   - exact-row shell demotion (`presence=unmanaged`, `provider=null`,
+#     `activity_state=null`, `current_cmd` is a plain shell)
+# Prints `managed` or `unmanaged` to stdout for callers that need to branch.
+wait_for_completion_or_shell_demotion() {
+    local socket="$1" pane_id="$2"
+    local max_wait="${3:-60}"
+    local elapsed=0 presence="" provider="" activity="" current_cmd=""
+
+    while [ "$elapsed" -lt "$max_wait" ]; do
+        activity=$(jq_get "$socket" "$pane_id" "activity_state")
+        presence=$(jq_get "$socket" "$pane_id" "presence")
+        if [ "$presence" = "managed" ] && { [ "$activity" = "waiting_input" ] || [ "$activity" = "idle" ]; }; then
+            log "wait_for_completion_or_shell_demotion OK: pane=$pane_id completed as managed (${elapsed}s)"
+            printf 'managed\n'
+            return 0
+        fi
+
+        provider=$(jq_get "$socket" "$pane_id" "provider")
+        current_cmd=$(jq_get "$socket" "$pane_id" "current_cmd")
+        if [ "$presence" = "unmanaged" ] \
+            && [ "$provider" = "null" ] \
+            && [ "$activity" = "null" ] \
+            && is_shell_cmd "$current_cmd"; then
+            log "wait_for_completion_or_shell_demotion OK: pane=$pane_id demoted to shell truth (${elapsed}s)"
+            printf 'unmanaged\n'
+            return 0
+        fi
+
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+
+    echo "[FAIL] timeout(${max_wait}s): pane=$pane_id expected managed completion or shell demotion" >&2
+    "$AGTMUX_BIN" --socket-path "$socket" json 2>/dev/null | jq '.panes' >&2 || true
+    return 1
+}
+
 # wait_for_socket SOCKET [MAX_WAIT_S]
 # Waits until the UDS socket file exists (daemon ready).
 wait_for_socket() {

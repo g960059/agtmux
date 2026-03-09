@@ -56,6 +56,8 @@ echo "════════════════════════�
 SCENARIOS_DIR="$SCRIPT_DIR/../scenarios"
 
 run_scenario "single-agent-lifecycle"   "$SCENARIOS_DIR/single-agent-lifecycle.sh"
+run_scenario "explicit-tmux-socket-shell-child-promotion" \
+    "$SCENARIOS_DIR/explicit-tmux-socket-shell-child-promotion.sh"
 run_scenario "multi-agent-same-session" "$SCENARIOS_DIR/multi-agent-same-session.sh"
 
 # same-cwd-multi-pane: defaults to codex (most relevant for T-124 regression)
@@ -77,8 +79,10 @@ if [ "$PROVIDER" = "claude" ]; then
     run_scenario "claude-title"               "$SCENARIOS_DIR/claude-title.sh"
     run_scenario "claude-summary"             "$SCENARIOS_DIR/claude-summary.sh"
     run_scenario "claude-title-after-restart" "$SCENARIOS_DIR/claude-title-after-restart.sh"
+    run_scenario "managed-exit"               "$SCENARIOS_DIR/managed-exit.sh"
 elif [ "$PROVIDER" = "codex" ]; then
     run_scenario "codex-title" "$SCENARIOS_DIR/codex-title.sh"
+    run_scenario "managed-exit" "$SCENARIOS_DIR/managed-exit.sh"
 fi
 
 echo ""

@@ -55,7 +55,7 @@ wait_for_agtmux_state "$SOCKET" "$PANE_ID" "evidence_mode"  "deterministic" 30
 pass "Phase 1: $PROVIDER_A running (deterministic)"
 
 wait_until_provider_idle "$PANE_ID" 30 || log "WARN: provider_a idle check timed out"
-wait_for_agtmux_state_any "$SOCKET" "$PANE_ID" "activity_state" "waiting_input idle" 60
+wait_for_completion_or_shell_demotion "$SOCKET" "$PANE_ID" 60 >/dev/null
 
 pass "Phase 2: $PROVIDER_A completed"
 
@@ -75,7 +75,7 @@ wait_for_agtmux_state "$SOCKET" "$PANE_ID" "evidence_mode"  "deterministic" 30
 pass "Phase 3: $PROVIDER_B running (provider switched in same pane, deterministic)"
 
 wait_until_provider_idle "$PANE_ID" 30 || log "WARN: provider_b idle check timed out"
-wait_for_agtmux_state_any "$SOCKET" "$PANE_ID" "activity_state" "waiting_input idle" 60
+wait_for_completion_or_shell_demotion "$SOCKET" "$PANE_ID" 60 >/dev/null
 
 pass "Phase 4: $PROVIDER_B completed"
 

@@ -281,6 +281,85 @@ Phase 7 (Distribution) と独立して実施可能。
   - Handover doc: `docs/85_reviews/RP-20260308-agtmux-term-semantic-truth-handover.md`
   - blocked_by: T-XTERM-A3
 
+- [ ] T-XTERM-A5 (P0) Cross-repo: managed-exit semantic truth handback
+  - 目的: confirmed real Codex pane が no-agent shell (`current_cmd=zsh`) に戻ったあとも stale `presence=managed provider=*` を保持する producer-side semantic drift を止める（Claude は follow-up validation）
+  - Fresh cross-repo repro from `agtmux-term`:
+    - temp daemon socket + temp tmux server + real `codex exec`
+    - after pane child processes are terminated and the pane has already returned to `current_cmd=zsh`, `agtmux json` still reports:
+      - `presence=managed`
+      - `provider=codex`
+      - `activity_state=waiting_input`
+      - `evidence_mode=heuristic`
+  - Why current online E2E missed it:
+    - current semantic truth suite validates entry/lifecycle/waiting states but does not force a pane back to a plain shell and require exact-row demotion to `unmanaged`
+    - current concrete evidence is Codex-only; Claude should be validated after the generic demotion path is fixed
+  - Phase 1: add failing producer-side regression/E2E that starts a real agent in tmux, forces the pane back to shell, and requires exact-row demotion (`presence=unmanaged`, `provider=null`)
+  - Phase 2: fix semantic truth reducer so heuristic fallback cannot keep a stale managed/provider/activity row once the pane's live process truth is back to shell
+  - Phase 3: rerun online/e2e plus cross-repo smoke until `agtmux-term` live consumer no longer sees stale managed/provider marks after agent exit
+  - Gate:
+    - failing producer-side managed-exit regression added first
+    - `cargo test -p agtmux` PASS
+    - online/e2e includes the managed-exit scenario
+    - cross-repo smoke no longer reproduces stale managed/provider truth on a shell pane
+  - Scratch handover: `/tmp/agtmux-managed-exit-semantic-truth-handover-20260308.md`
+  - blocked_by: T-XTERM-A4
+
+- [ ] T-XTERM-A6 (P0) Cross-repo: app-launched explicit `--tmux-socket` zero-managed-bootstrap handback
+  - 目的: `agtmux-term` metadata-enabled XCUITest から spawned された daemon が、exact `--tmux-socket /private/tmp/tmux-501/...` を受け取っているにもかかわらず `ui.bootstrap.v2 total=0`（managed sync-v2 rows が 0）を返す drift を止める
+  - Fresh cross-repo repro from `agtmux-term`:
+    - metadata-enabled app-driven tmux lane launches:
+      - `agtmux --socket-path /Users/virtualmachine/.agt/uit-<token>.sock daemon --tmux-socket /private/tmp/tmux-501/agtmux-managed-<token>`
+    - term-side readiness hardening is now landed:
+      - `AppViewModel` no longer primes sync-v2 ownership on `inventory present + bootstrap panes=[]`
+      - metadata-enabled UI lane now waits for non-empty isolated bootstrap before it launches the live Codex proof
+    - latest downstream rerun also proves the app-side harness is no longer the blocker:
+      - inventory-only launch no longer dies at `Running Background`
+      - delayed metadata enable does spawn the isolated daemon on the custom socket
+      - downstream failure summary now shows:
+        - `daemonLaunch=spawned:/Users/virtualmachine/ghq/github.com/g960059/agtmux/target/debug/agtmux:--socket-path,/Users/virtualmachine/.agt/uit-<token>.sock,daemon,--tmux-socket,/private/tmp/tmux-501/agtmux-managed-<token>`
+        - `daemonEnv=... TMUX_BIN=/opt/homebrew/bin/tmux ...`
+        - daemon stdout/stderr only:
+          - `agtmux daemon starting`
+          - `UDS server listening on /Users/virtualmachine/.agt/uit-<token>.sock`
+    - same app process probing the custom daemon socket still sees:
+      - `ui.bootstrap.v2 total=0 managed=0`
+      - `probeTarget=nil`
+      - visible app inventory row still present as unmanaged `zsh`
+    - stronger downstream evidence now proves the app process itself can speak explicit socket truth:
+      - `appDirectSocketProbe=agtmux-e2e-managed-<token>|@0|%0|zsh`
+      - i.e. the same app process can run `tmux -S /private/tmp/tmux-501/agtmux-managed-<token> list-panes` and see the isolated pane
+      - only the app-child daemon remains stuck at empty bootstrap on that same socket path
+    - standalone shell repro with the same local binary and exact daemon args sees the managed pane within 3 seconds
+    - stripped-PATH producer repro is now green, and term-side child-daemon launch env is also normalized with:
+      - `TMUX_BIN=/opt/homebrew/bin/tmux`
+      - normalized `HOME/USER/LOGNAME/XDG_CONFIG_HOME/CODEX_HOME/PATH`
+    - despite those controls, the app-launched daemon still never reaches a non-empty bootstrap, so the remaining drift is narrower than a generic PATH/env issue
+    - fresh producer-side root cause (2026-03-09):
+      - app-like sanitized env causes `tmux list-panes -F` to emit `_`-delimited rows instead of tab-delimited rows
+      - `crates/agtmux-tmux-v5/src/pane_info.rs` still parses tab-delimited output only, so inventory fails before managed promotion runs
+      - explicit `--tmux-socket` app-child zero-bootstrap is therefore currently an inventory format contract bug, not only a shell-child promotion bug
+  - Progress (2026-03-08, Phase 1 landed):
+    - added `scripts/tests/e2e/scenarios/explicit-tmux-socket-app-child-late-server.sh`
+    - wired it into `scripts/tests/e2e/contract/run-all.sh`
+    - current expected-red result:
+      - tmux server/session/pane comes up after daemon launch
+      - tmux side shows `%0 zsh`
+      - daemon side still inventories `[]`
+    - verification:
+      - `bash scripts/tests/e2e/scenarios/explicit-tmux-socket-app-child-late-server.sh` → FAIL (expected Phase 1 repro)
+      - `bash scripts/tests/e2e/contract/run-all.sh` → `11 passed, 1 failed` with only the new A6 scenario red
+  - Phase 1: add a failing producer-side repro that launches the daemon under an app-like/sanitized child-process context with explicit `--tmux-socket` and requires non-empty inventory/bootstrap on the isolated tmux server
+  - Phase 2: replace the tmux `list-panes -F` delimiter contract with a printable literal delimiter (`|`) that survives sanitized env, then rerun explicit-socket producer repros
+  - Phase 3: rerun the higher-fidelity app-launched / shell-child promotion repros and confirm non-empty managed bootstrap
+  - Phase 4: rerun cross-repo UI smoke until the isolated app-child daemon reaches a non-empty bootstrap and `agtmux-term` metadata-enabled plain-zsh Codex lane surfaces the managed row
+  - Gate:
+    - failing producer-side repro added first
+    - `cargo test -p agtmux` PASS
+    - explicit-`--tmux-socket` app-launched repro no longer returns empty bootstrap
+    - cross-repo `agtmux-term` targeted metadata-enabled UI smoke passes
+  - Scratch handover: `/tmp/agtmux-app-launched-normalized-env-still-empty-bootstrap-handover-20260308.md`
+  - blocked_by: T-XTERM-A5
+
 ### Phase 9 — Waiting State Detection Improvements
 
 - [ ] T-codex03a (P3) test-claude-approval.sh Phase 3 に明示的 sleep 追加 — follow-up from RP review

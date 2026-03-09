@@ -67,7 +67,13 @@ pub fn mvp_provider_defs() -> Vec<ProviderDetectDef> {
             process_hint: "codex",
             cmd_tokens: &["codex"],
             title_tokens: &["codex", "openai codex"],
-            capture_tokens: &["codex>"],
+            capture_tokens: &[
+                "codex>",
+                "\"type\":\"thread.started\"",
+                "\"type\":\"turn.started\"",
+                "\"type\":\"item.started\"",
+                "\"status\":\"in_progress\"",
+            ],
             wrapper_cmd: true,
         },
     ]
@@ -80,13 +86,7 @@ pub fn mvp_provider_defs() -> Vec<ProviderDetectDef> {
 /// Returns `Some(DetectResult)` if at least one signal matches,
 /// or `None` if no signals match.
 pub fn detect(meta: &PaneMeta, def: &ProviderDetectDef) -> Option<DetectResult> {
-    // Shell panes (zsh/bash/…) must never be attributed to any agent provider.
-    // process_hint="shell" is set by inspect_pane_processes for SHELL_CMDS.
-    // Even if the terminal buffer contains stale agent output, a shell pane
-    // cannot be running an agent — the agent process has already exited.
-    if meta.process_hint.as_deref() == Some("shell") {
-        return None;
-    }
+    let shell_hint = meta.process_hint.as_deref() == Some("shell");
 
     let mut confidence: f64 = 0.0;
     let mut provider_hint = false;
@@ -148,6 +148,25 @@ pub fn detect(meta: &PaneMeta, def: &ProviderDetectDef) -> Option<DetectResult> 
         return None;
     }
 
+    // 6b. Shell pane guard:
+    // - Default fail-closed: shell panes are not attributed.
+    // - Narrow exception for Codex JSON streaming output while the shell prompt
+    //   has not returned yet (app-child runtime may hide descendant process hints).
+    if shell_hint {
+        if def.provider != Provider::Codex {
+            return None;
+        }
+        if !capture_match {
+            return None;
+        }
+        if !has_live_codex_json_signal(&meta.capture_lines) {
+            return None;
+        }
+        if tail_has_shell_prompt(&meta.capture_lines) {
+            return None;
+        }
+    }
+
     // 7. Return DetectResult
     Some(DetectResult {
         provider: def.provider,
@@ -206,6 +225,40 @@ pub fn detect_best(meta: &PaneMeta) -> Option<DetectResult> {
 /// f64 does not implement Ord, so we provide a simple max helper.
 fn f64_max(a: f64, b: f64) -> f64 {
     if a >= b { a } else { b }
+}
+
+fn has_live_codex_json_signal(capture_lines: &[String]) -> bool {
+    const TOKENS: &[&str] = &[
+        "\"type\":\"thread.started\"",
+        "\"type\":\"turn.started\"",
+        "\"type\":\"item.started\"",
+        "\"status\":\"in_progress\"",
+    ];
+
+    capture_lines.iter().rev().take(16).any(|line| {
+        let lower = line.to_ascii_lowercase();
+        TOKENS.iter().any(|token| lower.contains(token))
+    })
+}
+
+fn tail_has_shell_prompt(capture_lines: &[String]) -> bool {
+    capture_lines
+        .iter()
+        .rev()
+        .find_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        })
+        .is_some_and(|trimmed| {
+            trimmed.ends_with("❯")
+                || trimmed.ends_with('$')
+                || trimmed.ends_with('%')
+                || trimmed.ends_with('#')
+        })
 }
 
 // ─── Tests ──────────────────────────────────────────────────────
@@ -586,6 +639,46 @@ mod tests {
         assert!(
             result.is_none(),
             "shell pane must never be assigned to Codex"
+        );
+    }
+
+    #[test]
+    fn detect_shell_pane_codex_json_running_allowed() {
+        let codex_def = &mvp_provider_defs()[1];
+        let meta = PaneMeta {
+            pane_title: "openai codex".to_string(),
+            current_cmd: "zsh".to_string(),
+            process_hint: Some("shell".to_string()),
+            capture_lines: vec![
+                "{\"type\":\"thread.started\",\"thread_id\":\"abc\"}".to_string(),
+                "{\"type\":\"turn.started\"}".to_string(),
+                "{\"type\":\"item.started\",\"status\":\"in_progress\"}".to_string(),
+            ],
+        };
+        let result = detect(&meta, codex_def);
+        assert!(
+            result.is_some(),
+            "shell pane should allow codex detection while live JSON stream is active"
+        );
+    }
+
+    #[test]
+    fn detect_shell_pane_codex_json_suppressed_after_prompt_returns() {
+        let codex_def = &mvp_provider_defs()[1];
+        let meta = PaneMeta {
+            pane_title: "openai codex".to_string(),
+            current_cmd: "zsh".to_string(),
+            process_hint: Some("shell".to_string()),
+            capture_lines: vec![
+                "{\"type\":\"thread.started\",\"thread_id\":\"abc\"}".to_string(),
+                "{\"type\":\"turn.started\"}".to_string(),
+                "❯".to_string(),
+            ],
+        };
+        let result = detect(&meta, codex_def);
+        assert!(
+            result.is_none(),
+            "shell prompt at tail must suppress stale codex attribution"
         );
     }
 }

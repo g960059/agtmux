@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # scenarios/codex-title.sh — conversation_title from Codex App Server thread/list
 #
-# Verifies: After a Codex session completes, the thread name/preview returned by
-# the App Server thread/list endpoint is exposed as conversation_title in JSON.
+# Verifies: The thread name/preview returned by the Codex App Server thread/list
+# endpoint is exposed as conversation_title while the pane is managed, and exact
+# shell demotion clears that title if Codex exits back to the shell.
 #
 # Note: Codex does not support in-session rename like Claude's /rename.
 # The title (name/preview) is set by the App Server from the thread metadata.
@@ -41,8 +42,9 @@ sleep 1
 
 # ── Phase 1: Launch Codex and wait for provider + managed presence ────────
 #
-# This scenario's primary oracle is conversation_title after completion.
-# Running/deterministic coverage is owned by the lifecycle / multi-pane scenarios.
+# This scenario's primary oracle is conversation_title while the pane is still
+# managed. Running/deterministic coverage is owned by the lifecycle / multi-pane
+# scenarios.
 
 TASK="Step 1: use bash to run 'sleep 10'. Step 2: use bash to count lines in /etc/hosts. Write the count to result.txt"
 log "launching codex in pane $PANE_ID (workdir=$WORKDIR)"
@@ -54,18 +56,10 @@ wait_for_agtmux_state_any "$SOCKET" "$PANE_ID" "activity_state" "running waiting
 
 pass "Phase 1: Codex pane managed (provider=codex)"
 
-# ── Phase 2: Wait for Codex to complete ──────────────────────────────────
-
-wait_until_provider_idle "$PANE_ID" 90 || log "WARN: provider-side idle check timed out"
-wait_for_agtmux_state "$SOCKET" "$PANE_ID" "activity_state" "waiting_input" 90
-
-pass "Phase 2: Codex completed task"
-
-# ── Phase 3: Verify conversation_title from App Server ────────────────────
+# ── Phase 2: Verify conversation_title from App Server while managed ──────
 #
-# After completion, App Server thread/list returns the thread with name/preview fields.
-# Allow up to 30s for the App Server to report the completed thread and for
-# the daemon to extract and expose it.
+# Allow up to 30s for the App Server to report the thread and for the daemon to
+# extract and expose it on the managed pane row.
 
 log "waiting for conversation_title from App Server thread/list..."
 actual_title="null"
@@ -85,6 +79,25 @@ if [ "$actual_title" = "null" ] || [ -z "$actual_title" ]; then
     fail "conversation_title is null/empty for Codex pane — App Server thread/list may not return name/preview fields"
 fi
 
-pass "Phase 3: conversation_title='$actual_title' (non-empty, from App Server)"
+pass "Phase 2: conversation_title='$actual_title' (non-empty, from App Server)"
+
+# ── Phase 3: Completion may stay managed or demote back to shell ──────────
+
+wait_until_provider_idle "$PANE_ID" 90 || log "WARN: provider-side idle check timed out"
+completion_mode=$(wait_for_completion_or_shell_demotion "$SOCKET" "$PANE_ID" 90)
+
+if [ "$completion_mode" = "managed" ]; then
+    final_title=$(jq_get "$SOCKET" "$PANE_ID" "conversation_title")
+    if [ "$final_title" = "null" ] || [ -z "$final_title" ]; then
+        fail "conversation_title cleared unexpectedly while Codex pane remained managed"
+    fi
+    pass "Phase 3: managed completion preserved conversation_title"
+else
+    wait_for_agtmux_state "$SOCKET" "$PANE_ID" "presence" "unmanaged" 5
+    wait_for_agtmux_state "$SOCKET" "$PANE_ID" "provider" "null" 5
+    wait_for_agtmux_state "$SOCKET" "$PANE_ID" "activity_state" "null" 5
+    wait_for_agtmux_state "$SOCKET" "$PANE_ID" "conversation_title" "null" 5
+    pass "Phase 3: shell demotion cleared conversation_title with managed state"
+fi
 
 echo "=== codex-title.sh PASS ==="

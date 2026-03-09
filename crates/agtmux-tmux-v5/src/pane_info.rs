@@ -4,8 +4,14 @@ use crate::error::TmuxError;
 use crate::executor::TmuxCommandRunner;
 use serde::{Deserialize, Serialize};
 
-/// Tab-delimited format string for `tmux list-panes -a -F`.
-pub const LIST_PANES_FORMAT: &str = "#{session_id}\t#{session_name}\t#{window_id}\t#{window_name}\t#{pane_id}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_title}\t#{pane_width}\t#{pane_height}\t#{pane_active}\t#{session_attached}\t#{pane_pid}";
+/// Printable delimiter for `tmux list-panes -a -F`.
+///
+/// Literal tabs are not stable across launch contexts on macOS: in app-like
+/// sanitized env they can come back as `_`, which breaks inventory parsing.
+const LIST_PANES_DELIMITER: char = '|';
+
+/// Pipe-delimited format string for `tmux list-panes -a -F`.
+pub const LIST_PANES_FORMAT: &str = "#{session_id}|#{session_name}|#{window_id}|#{window_name}|#{pane_id}|#{pane_current_command}|#{pane_current_path}|#{pane_title}|#{pane_width}|#{pane_height}|#{pane_active}|#{session_attached}|#{pane_pid}";
 
 /// Full metadata for a tmux pane.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -48,12 +54,15 @@ pub fn parse_list_panes_output(output: &str) -> Result<Vec<TmuxPaneInfo>, TmuxEr
 }
 
 fn parse_line(line: &str, line_num: usize) -> Result<TmuxPaneInfo, TmuxError> {
-    let parts: Vec<&str> = line.split('\t').collect();
+    let mut parts: Vec<&str> = line.split(LIST_PANES_DELIMITER).collect();
+    if parts.len() < 11 {
+        parts = line.split('\t').collect();
+    }
     if parts.len() < 11 {
         return Err(TmuxError::ParseError {
             line_num,
             detail: format!(
-                "expected at least 11 tab-separated fields, got {}",
+                "expected at least 11 pipe- or tab-separated fields, got {}",
                 parts.len()
             ),
         });
@@ -96,7 +105,7 @@ mod tests {
 
     #[test]
     fn parse_single_line() {
-        let line = "$0\tmain\t@0\tdev\t%0\tzsh\t/home/user\tpane-title\t200\t50\t1\t1";
+        let line = "$0|main|@0|dev|%0|zsh|/home/user|pane-title|200|50|1|1";
         let pane = parse_line(line, 1).expect("should parse");
         assert_eq!(pane.session_id, "$0");
         assert_eq!(pane.session_name, "main");
@@ -114,7 +123,7 @@ mod tests {
 
     #[test]
     fn parse_inactive_detached() {
-        let line = "$1\twork\t@1\teditor\t%1\tvim\t/tmp\ttitle\t80\t24\t0\t0";
+        let line = "$1|work|@1|editor|%1|vim|/tmp|title|80|24|0|0";
         let pane = parse_line(line, 1).expect("should parse");
         assert!(!pane.active);
         assert!(!pane.session_attached);
@@ -123,8 +132,8 @@ mod tests {
     #[test]
     fn parse_multiple_panes() {
         let output = [
-            "$0\tmain\t@0\tdev\t%0\tzsh\t/home\ttitle0\t200\t50\t1\t1",
-            "$0\tmain\t@0\tdev\t%1\tclaude\t/home\tclaude code\t200\t50\t0\t1",
+            "$0|main|@0|dev|%0|zsh|/home|title0|200|50|1|1",
+            "$0|main|@0|dev|%1|claude|/home|claude code|200|50|0|1",
         ]
         .join("\n");
         let panes = parse_list_panes_output(&output).expect("should parse");
@@ -142,7 +151,7 @@ mod tests {
 
     #[test]
     fn parse_legacy_11_fields() {
-        let line = "$0\tmain\t@0\tdev\t%0\tzsh\t/home\ttitle\t80\t24\t1";
+        let line = "$0|main|@0|dev|%0|zsh|/home|title|80|24|1";
         let pane = parse_line(line, 1).expect("should parse");
         assert_eq!(pane.pane_id, "%0");
         assert!(!pane.session_attached);
@@ -150,13 +159,13 @@ mod tests {
 
     #[test]
     fn parse_too_few_fields_error() {
-        let result = parse_line("$0\tmain\t@0", 1);
+        let result = parse_line("$0|main|@0", 1);
         assert!(result.is_err());
     }
 
     #[test]
     fn parse_invalid_width_defaults() {
-        let line = "$0\tmain\t@0\tdev\t%0\tzsh\t/home\ttitle\tXX\tYY\t1\t1";
+        let line = "$0|main|@0|dev|%0|zsh|/home|title|XX|YY|1|1";
         let pane = parse_line(line, 1).expect("should parse");
         assert_eq!(pane.width, 80);
         assert_eq!(pane.height, 24);
@@ -169,7 +178,7 @@ mod tests {
             fn run(&self, args: &[&str]) -> Result<String, TmuxError> {
                 assert!(args.contains(&"list-panes"));
                 Ok(
-                    "$0\tmain\t@0\tdev\t%0\tclaude\t/home\tclaude code\t200\t50\t1\t1\n"
+                    "$0|main|@0|dev|%0|claude|/home|claude code|200|50|1|1\n"
                         .to_string(),
                 )
             }
@@ -190,14 +199,14 @@ mod tests {
 
     #[test]
     fn pane_title_with_spaces() {
-        let line = "$0\tmain\t@0\tdev\t%0\tclaude\t/home\tmy cool pane title\t80\t24\t1\t1";
+        let line = "$0|main|@0|dev|%0|claude|/home|my cool pane title|80|24|1|1";
         let pane = parse_line(line, 1).expect("should parse");
         assert_eq!(pane.pane_title, "my cool pane title");
     }
 
     #[test]
     fn parse_with_pane_pid() {
-        let line = "$0\tmain\t@0\tdev\t%0\tnode\t/home\ttitle\t80\t24\t1\t1\t12345";
+        let line = "$0|main|@0|dev|%0|node|/home|title|80|24|1|1|12345";
         let pane = parse_line(line, 1).expect("should parse");
         assert_eq!(pane.pane_pid, Some(12345));
     }
@@ -205,7 +214,7 @@ mod tests {
     #[test]
     fn parse_without_pane_pid_defaults_to_none() {
         // 12-field format (legacy, no pane_pid column) → pane_pid = None
-        let line = "$0\tmain\t@0\tdev\t%0\tnode\t/home\ttitle\t80\t24\t1\t1";
+        let line = "$0|main|@0|dev|%0|node|/home|title|80|24|1|1";
         let pane = parse_line(line, 1).expect("should parse");
         assert_eq!(pane.pane_pid, None);
     }
@@ -213,8 +222,22 @@ mod tests {
     #[test]
     fn parse_pane_pid_invalid_value_defaults_to_none() {
         // Non-numeric pane_pid (e.g., empty string from tmux formatting edge case)
-        let line = "$0\tmain\t@0\tdev\t%0\tnode\t/home\ttitle\t80\t24\t1\t1\t";
+        let line = "$0|main|@0|dev|%0|node|/home|title|80|24|1|1|";
         let pane = parse_line(line, 1).expect("should parse");
         assert_eq!(pane.pane_pid, None);
+    }
+
+    #[test]
+    fn list_panes_format_uses_printable_pipe_delimiter() {
+        assert!(LIST_PANES_FORMAT.contains('|'));
+        assert!(!LIST_PANES_FORMAT.contains('\t'));
+    }
+
+    #[test]
+    fn parse_line_accepts_legacy_tab_delimiter() {
+        let line = "$0\tmain\t@0\tdev\t%0\tzsh\t/home/user\tpane-title\t200\t50\t1\t1";
+        let pane = parse_line(line, 1).expect("should parse legacy tab fixture");
+        assert_eq!(pane.session_name, "main");
+        assert_eq!(pane.pane_id, "%0");
     }
 }

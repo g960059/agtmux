@@ -2,6 +2,8 @@
 //! Ported from v4 pattern for mock-injectable testing.
 
 use crate::error::TmuxError;
+use std::collections::HashMap;
+use std::path::Path;
 
 /// Trait for executing tmux commands. Enables mock injection for testing.
 pub trait TmuxCommandRunner: Send + Sync {
@@ -41,11 +43,27 @@ impl TmuxExecutor {
         self.socket_name = Some(name.into());
         self
     }
+
+    #[must_use]
+    pub fn tmux_bin_path(&self) -> &str {
+        &self.tmux_bin
+    }
+
+    #[must_use]
+    pub fn target_description(&self) -> String {
+        if let Some(ref path) = self.socket_path {
+            format!("-S {path}")
+        } else if let Some(ref name) = self.socket_name {
+            format!("-L {name}")
+        } else {
+            "default".to_string()
+        }
+    }
 }
 
 impl Default for TmuxExecutor {
     fn default() -> Self {
-        Self::new("tmux")
+        Self::new(resolve_tmux_bin())
     }
 }
 
@@ -72,14 +90,74 @@ impl TmuxCommandRunner for TmuxExecutor {
     }
 }
 
+fn resolve_tmux_bin() -> String {
+    let env = std::env::vars().collect::<HashMap<_, _>>();
+    resolve_tmux_bin_from_env_with(&env, is_executable_path)
+}
+
+fn resolve_tmux_bin_from_env_with<F>(env: &HashMap<String, String>, is_executable: F) -> String
+where
+    F: Fn(&str) -> bool,
+{
+    if let Some(explicit) = env.get("TMUX_BIN").map(|value| value.trim()).filter(|value| !value.is_empty()) {
+        if is_executable(explicit) {
+            return explicit.to_string();
+        }
+    }
+
+    if let Some(path) = env.get("PATH").map(|value| value.trim()).filter(|value| !value.is_empty()) {
+        for dir in path.split(':').filter(|segment| !segment.is_empty()) {
+            let candidate = format!("{dir}/tmux");
+            if is_executable(&candidate) {
+                return candidate;
+            }
+        }
+    }
+
+    for candidate in [
+        "/opt/homebrew/bin/tmux",
+        "/usr/local/bin/tmux",
+        "/usr/bin/tmux",
+        "/bin/tmux",
+    ] {
+        if is_executable(candidate) {
+            return candidate.to_string();
+        }
+    }
+
+    "tmux".to_string()
+}
+
+fn is_executable_path(path: &str) -> bool {
+    let path = Path::new(path);
+    if !path.is_file() {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(metadata) = std::fs::metadata(path) {
+            return metadata.permissions().mode() & 0o111 != 0;
+        }
+        false
+    }
+
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn default_executor() {
         let exec = TmuxExecutor::default();
-        assert_eq!(exec.tmux_bin, "tmux");
+        assert!(!exec.tmux_bin.is_empty());
         assert!(exec.socket_path.is_none());
         assert!(exec.socket_name.is_none());
     }
@@ -107,5 +185,43 @@ mod tests {
         let mock = Mock;
         let r: &Mock = &mock;
         assert_eq!(r.run(&[]).expect("ok"), "ok");
+    }
+
+    #[test]
+    fn resolve_tmux_bin_prefers_explicit_tmux_bin() {
+        let env = HashMap::from([
+            ("TMUX_BIN".to_string(), "/custom/tmux".to_string()),
+            ("PATH".to_string(), "/usr/bin:/bin".to_string()),
+        ]);
+
+        let resolved = resolve_tmux_bin_from_env_with(&env, |candidate| candidate == "/custom/tmux");
+        assert_eq!(resolved, "/custom/tmux");
+    }
+
+    #[test]
+    fn resolve_tmux_bin_falls_back_to_path_lookup() {
+        let env = HashMap::from([("PATH".to_string(), "/usr/bin:/opt/homebrew/bin:/bin".to_string())]);
+
+        let resolved = resolve_tmux_bin_from_env_with(&env, |candidate| {
+            candidate == "/opt/homebrew/bin/tmux"
+        });
+        assert_eq!(resolved, "/opt/homebrew/bin/tmux");
+    }
+
+    #[test]
+    fn resolve_tmux_bin_falls_back_to_standard_locations_when_path_is_stripped() {
+        let env = HashMap::from([("PATH".to_string(), "/usr/bin:/bin:/usr/sbin:/sbin".to_string())]);
+
+        let resolved = resolve_tmux_bin_from_env_with(&env, |candidate| {
+            candidate == "/opt/homebrew/bin/tmux"
+        });
+        assert_eq!(resolved, "/opt/homebrew/bin/tmux");
+    }
+
+    #[test]
+    fn resolve_tmux_bin_returns_tmux_when_no_candidate_is_executable() {
+        let env = HashMap::new();
+        let resolved = resolve_tmux_bin_from_env_with(&env, |_| false);
+        assert_eq!(resolved, "tmux");
     }
 }

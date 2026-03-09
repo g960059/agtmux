@@ -71,8 +71,8 @@ pass "Scenario 1: Both $PROVIDER agents managed independently in same session (d
 wait_until_provider_idle "$PANE1" 30 || log "WARN: pane1 idle check timed out"
 wait_until_provider_idle "$PANE2" 30 || log "WARN: pane2 idle check timed out"
 
-wait_for_agtmux_state_any "$SOCKET" "$PANE1" "activity_state" "waiting_input idle" 60
-wait_for_agtmux_state_any "$SOCKET" "$PANE2" "activity_state" "waiting_input idle" 60
+wait_for_completion_or_shell_demotion "$SOCKET" "$PANE1" 60 >/dev/null
+wait_for_completion_or_shell_demotion "$SOCKET" "$PANE2" 60 >/dev/null
 
 pass "Scenario 2: Both $PROVIDER agents completed after completion"
 

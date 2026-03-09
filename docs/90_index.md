@@ -19,6 +19,16 @@
 - Source of truth: `docs/20_spec.md` (FR-067), `docs/60_tasks.md` (`T-XTERM-A4`)
 - Docs-first handover: `docs/85_reviews/RP-20260308-agtmux-term-semantic-truth-handover.md`
 
+## Cross-Repo V2 A5
+- Source of truth: `docs/20_spec.md` (FR-068), `docs/60_tasks.md` (`T-XTERM-A5`)
+- Scratch handover: `/tmp/agtmux-managed-exit-semantic-truth-handover-20260308.md`
+- Current scope: Codex repro confirmed; Claude validation is follow-up after the generic managed-exit demotion fix
+
+## Cross-Repo V2 A6
+- Source of truth: `docs/20_spec.md` (FR-069), `docs/60_tasks.md` (`T-XTERM-A6`)
+- Scratch handover: `/tmp/agtmux-app-child-bootstrap-still-empty-after-term-hardening-20260309.md`
+- Current scope: explicit `--tmux-socket` works from shell repro and stripped-PATH repro, downstream no longer primes on empty bootstrap, and the same app process can directly see the isolated pane via `tmux -S <resolved socket path>`; only the daemon spawned from the agtmux-term metadata-enabled app/XCUITest lane still never reaches a non-empty bootstrap after it starts listening on the custom socket
+
 ## Phase 3 Hardening (COMPLETE — 585 tests)
 - `docs/50_plan.md` (Phase 3 section)
 - `docs/60_tasks.md` (T-115〜T-118 DONE)

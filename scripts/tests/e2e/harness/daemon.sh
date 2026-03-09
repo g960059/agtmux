@@ -18,6 +18,11 @@ E2E_SOCKET_DIR=""
 daemon_start() {
     local socket="$1"
     local poll_ms="${2:-500}"
+    local _repo_root _built_bin _release_bin _daemon_bin _local_repo_bin
+
+    _repo_root="$(git rev-parse --show-toplevel 2>/dev/null || echo ".")"
+    _built_bin="${_repo_root}/target/debug/agtmux"
+    _release_bin="${_repo_root}/target/release/agtmux"
 
     E2E_SOCKET_DIR="$(dirname "$socket")"
     mkdir -p "$E2E_SOCKET_DIR"
@@ -29,20 +34,22 @@ daemon_start() {
     # This prevents accidentally using a globally-installed (potentially stale) agtmux.
     # After resolution, AGTMUX_BIN is updated so client helpers (jq_get, wait_for_agtmux_state)
     # use the same binary version as the daemon.
-    local _daemon_bin="${AGTMUX_BIN:-}"
+    _daemon_bin="${AGTMUX_BIN:-}"
+    _local_repo_bin=0
+    if [ "$_daemon_bin" = "$_built_bin" ] || [ "$_daemon_bin" = "$_release_bin" ]; then
+        _local_repo_bin=1
+    fi
+
+    if [ "${AGTMUX_SKIP_BUILD:-0}" = "0" ] && { [ -z "$_daemon_bin" ] || [ "$_daemon_bin" = "agtmux" ] || [ "$_local_repo_bin" = "1" ] || [[ "$_daemon_bin" != /* ]]; }; then
+        cargo build -p agtmux --quiet 2>/dev/null
+    fi
+
     if [ -n "$_daemon_bin" ] && [[ "$_daemon_bin" == /* ]] && command -v "$_daemon_bin" >/dev/null 2>&1; then
         "$_daemon_bin" --socket-path "$socket" daemon --poll-interval-ms "$poll_ms" \
             >/tmp/agtmux-e2e-daemon-$$.log 2>&1 &
         AGTMUX_BIN="$_daemon_bin"
     else
-        # Build the latest binary, then run it directly (avoids cargo startup overhead).
-        if [ "${AGTMUX_SKIP_BUILD:-0}" = "0" ]; then
-            cargo build -p agtmux --quiet 2>/dev/null
-        fi
-        # Find the cargo-built binary relative to the repo root.
-        local _repo_root
-        _repo_root="$(git rev-parse --show-toplevel 2>/dev/null || echo ".")"
-        local _built_bin="${_repo_root}/target/debug/agtmux"
+        # Use the repo-local cargo-built binary when available.
         if [ -x "$_built_bin" ]; then
             "$_built_bin" --socket-path "$socket" daemon --poll-interval-ms "$poll_ms" \
                 >/tmp/agtmux-e2e-daemon-$$.log 2>&1 &

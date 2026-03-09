@@ -105,9 +105,17 @@ pass "Phase 3: conversation_title='$TITLE2' (back-to-back injection, last wins)"
 # ── Phase 4: Wait for idle + verify title persists ────────────────────────
 
 wait_until_provider_idle "$PANE_ID" 90 || log "WARN: provider-side idle check timed out (non-fatal)"
-wait_for_agtmux_state_any "$SOCKET" "$PANE_ID" "activity_state" "waiting_input idle" 90
+completion_mode=$(wait_for_completion_or_shell_demotion "$SOCKET" "$PANE_ID" 90)
 
-actual_title=$(jq_get "$SOCKET" "$PANE_ID" "conversation_title")
-assert_eq "Phase 4: conversation_title persists after idle" "$TITLE2" "$actual_title"
+if [ "$completion_mode" = "managed" ]; then
+    actual_title=$(jq_get "$SOCKET" "$PANE_ID" "conversation_title")
+    assert_eq "Phase 4: conversation_title persists after idle" "$TITLE2" "$actual_title"
+else
+    wait_for_agtmux_state "$SOCKET" "$PANE_ID" "presence" "unmanaged" 5
+    wait_for_agtmux_state "$SOCKET" "$PANE_ID" "provider" "null" 5
+    wait_for_agtmux_state "$SOCKET" "$PANE_ID" "activity_state" "null" 5
+    wait_for_agtmux_state "$SOCKET" "$PANE_ID" "conversation_title" "null" 5
+    pass "Phase 4: shell demotion cleared conversation_title with managed state"
+fi
 
 echo "=== claude-title.sh PASS ==="

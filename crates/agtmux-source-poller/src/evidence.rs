@@ -78,7 +78,15 @@ pub fn codex_activity_signals() -> Vec<ActivitySignalDef> {
                 "Running".to_string(),
                 "Processing".to_string(),
                 "Thinking".to_string(),
+                "\"type\":\"thread.started\"".to_string(),
+                "\"type\":\"turn.started\"".to_string(),
+                "\"type\":\"item.started\"".to_string(),
+                "\"status\":\"in_progress\"".to_string(),
             ],
+        },
+        ActivitySignalDef {
+            state: ActivityState::WaitingInput,
+            patterns: vec!["\"type\":\"turn.completed\"".to_string()],
         },
         ActivitySignalDef {
             state: ActivityState::Idle,

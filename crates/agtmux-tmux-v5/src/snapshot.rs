@@ -3,7 +3,7 @@
 use agtmux_source_poller::source::PaneSnapshot;
 use chrono::{DateTime, Utc};
 
-use crate::capture::{ProcessMap, inspect_pane_processes, inspect_pane_processes_deep};
+use crate::capture::{inspect_pane_processes, inspect_pane_processes_deep, ProcessMap};
 use crate::generation::PaneGenerationTracker;
 use crate::pane_info::TmuxPaneInfo;
 
@@ -152,6 +152,47 @@ mod tests {
             pane_id: "%6".to_string(),
             current_cmd: "node".to_string(),
             pane_pid: Some(20),
+            ..Default::default()
+        };
+        let tracker = PaneGenerationTracker::new();
+        let now = ts("2026-02-25T12:00:00Z");
+        let snapshot = to_pane_snapshot(&pane, vec![], &tracker, now, Some(&pm));
+        assert_eq!(snapshot.process_hint, Some("codex".to_string()));
+    }
+
+    #[test]
+    fn snapshot_deep_inspection_shell_descendant_codex() {
+        use crate::capture::{ProcessInfo, ProcessMap};
+        let mut pm: ProcessMap = ProcessMap::new();
+        pm.insert(
+            25,
+            ProcessInfo {
+                pid: 25,
+                ppid: 1,
+                args: "zsh".to_string(),
+            },
+        );
+        pm.insert(
+            26,
+            ProcessInfo {
+                pid: 26,
+                ppid: 25,
+                args: "bash -lc codex exec".to_string(),
+            },
+        );
+        pm.insert(
+            27,
+            ProcessInfo {
+                pid: 27,
+                ppid: 26,
+                args: "node /usr/local/lib/node_modules/@openai/codex/dist/cli.mjs exec"
+                    .to_string(),
+            },
+        );
+        let pane = TmuxPaneInfo {
+            pane_id: "%6a".to_string(),
+            current_cmd: "zsh".to_string(),
+            pane_pid: Some(25),
             ..Default::default()
         };
         let tracker = PaneGenerationTracker::new();

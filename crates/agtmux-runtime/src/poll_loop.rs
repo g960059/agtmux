@@ -8,7 +8,7 @@ use chrono::{TimeDelta, Utc};
 use tokio::sync::Mutex;
 use tokio::time::{Duration, interval};
 
-use agtmux_core_v5::types::{GatewayPullRequest, PullEventsRequest, SourceKind};
+use agtmux_core_v5::types::{EvidenceMode, GatewayPullRequest, PullEventsRequest, SourceKind};
 use agtmux_daemon_v5::projection::DaemonProjection;
 use agtmux_gateway::cursor_hardening::{
     CursorRecoveryAction, CursorWatermarks, InvalidCursorTracker,
@@ -232,15 +232,25 @@ pub async fn run_daemon(opts: DaemonOpts, socket_path: &str) -> anyhow::Result<(
 
 fn build_executor(opts: &DaemonOpts) -> TmuxExecutor {
     let mut executor = TmuxExecutor::default();
+    let mut target_source = "default";
 
     // Socket targeting: --tmux-socket > AGTMUX_TMUX_SOCKET_PATH > AGTMUX_TMUX_SOCKET_NAME
     if let Some(ref socket) = opts.tmux_socket {
         executor = executor.with_socket_path(socket.clone());
+        target_source = "--tmux-socket";
     } else if let Ok(path) = std::env::var("AGTMUX_TMUX_SOCKET_PATH") {
         executor = executor.with_socket_path(path);
+        target_source = "AGTMUX_TMUX_SOCKET_PATH";
     } else if let Ok(name) = std::env::var("AGTMUX_TMUX_SOCKET_NAME") {
         executor = executor.with_socket_name(name);
+        target_source = "AGTMUX_TMUX_SOCKET_NAME";
     }
+
+    tracing::info!(
+        "tmux executor configured: bin={} target={} source={target_source}",
+        executor.tmux_bin_path(),
+        executor.target_description()
+    );
 
     executor
 }
@@ -351,6 +361,7 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
         match tokio::task::spawn_blocking(move || list_panes(&*exec)).await {
             Ok(Ok(panes)) => panes,
             Ok(Err(e)) => {
+                tracing::warn!("tmux list-panes failed: {e}");
                 let mut st = state.lock().await;
                 st.metadata_stale = true;
                 let detail = format!("inventory fetch failed: {e}");
@@ -360,6 +371,7 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
                 return Ok(());
             }
             Err(e) => {
+                tracing::warn!("tmux inventory task failed: {e}");
                 let mut st = state.lock().await;
                 st.metadata_stale = true;
                 let detail = format!("inventory task failed: {e}");
@@ -403,13 +415,26 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
         )
         .await
         {
-            Ok(Ok(map)) => map,
+            Ok(Ok(Ok(map))) => {
+                if map.is_empty() {
+                    metadata_failure_reason = Some("process scan returned no processes".to_string());
+                    tracing::warn!("process scan returned no processes");
+                }
+                map
+            }
+            Ok(Ok(Err(e))) => {
+                metadata_failure_reason = Some(format!("process scan failed: {e}"));
+                tracing::warn!("process scan failed: {e}");
+                std::collections::HashMap::new()
+            }
             Ok(Err(e)) => {
-                metadata_failure_reason = Some(format!("process scan task failed: {e}"));
+                metadata_failure_reason = Some(format!("process scan task join failed: {e}"));
+                tracing::warn!("process scan task join failed: {e}");
                 std::collections::HashMap::new()
             }
             Err(_) => {
                 metadata_failure_reason = Some("process scan timeout".to_string());
+                tracing::warn!("process scan timeout");
                 std::collections::HashMap::new()
             }
         }
@@ -469,6 +494,10 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
             "pane capture degraded: {capture_failures}/{}",
             panes.len()
         ));
+        tracing::warn!(
+            "pane capture degraded: {capture_failures}/{}",
+            panes.len()
+        );
     }
 
     // 4. Process through pipeline
@@ -863,16 +892,57 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
         st.gateway_cursor.clone_from(&gw_response.next_cursor);
     }
 
-    // 10. Apply to daemon
-    if !gw_response.events.is_empty() {
-        tracing::debug!("applying {} events to daemon", gw_response.events.len());
-        st.daemon.apply_events(gw_response.events, now);
+    // 10. Apply to daemon.
+    let mut gw_events = gw_response.events;
+    for event in &mut gw_events {
+        // Poller events always target the live pane; stamp generation identity from
+        // the current tracker so sync-v2 exact-row matching stays stable.
+        if event.source_kind == SourceKind::Poller
+            && (event.pane_generation.is_none() || event.pane_birth_ts.is_none())
+            && let Some(pane_id) = event.pane_id.as_deref()
+            && let Some((generation, birth_ts)) = st.generation_tracker.get(pane_id)
+        {
+            event.pane_generation.get_or_insert(generation);
+            event.pane_birth_ts.get_or_insert(birth_ts);
+        }
+    }
+    if !gw_events.is_empty() {
+        tracing::debug!("applying {} events to daemon", gw_events.len());
+        st.daemon.apply_events(gw_events, now);
     }
 
     // 10b. Tick freshness: downgrade stale deterministic panes to heuristic.
     // This ensures panes whose deterministic source stopped emitting events
     // (e.g. Codex exited, Claude idle) correctly fall back to heuristic.
     st.daemon.tick_freshness(now);
+
+    // 10c. Exact-row shell truth beats stale heuristic managed state.
+    // If tmux now reports that a pane is back to a plain shell and the
+    // projected row has already fallen back to heuristic evidence, remove the
+    // lingering managed row so CLI/UI surfaces fall back to unmanaged truth.
+    const SHELL_CMDS: &[&str] = &[
+        "zsh", "bash", "fish", "sh", "csh", "tcsh", "ksh", "dash", "nu", "pwsh",
+    ];
+    let shell_pane_ids: Vec<String> = snapshots
+        .iter()
+        .filter(|snapshot| {
+            let cmd = snapshot.current_cmd.to_ascii_lowercase();
+            SHELL_CMDS.contains(&cmd.as_str())
+        })
+        .filter(|snapshot| !agent_pane_ids.contains(&snapshot.pane_id))
+        .filter(|snapshot| {
+            st.daemon
+                .get_pane(&snapshot.pane_id)
+                .is_some_and(|pane| pane.evidence_mode == EvidenceMode::Heuristic)
+        })
+        .map(|snapshot| snapshot.pane_id.clone())
+        .collect();
+    if !shell_pane_ids.is_empty() {
+        st.daemon.demote_panes_to_unmanaged(&shell_pane_ids, now);
+        for pane_id in &shell_pane_ids {
+            st.transcript_path_hints.remove(pane_id);
+        }
+    }
 
     // 11. Compact consumed events to prevent unbounded memory growth.
     // Poller: trim events up to the gateway's source cursor.
@@ -952,6 +1022,12 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
         st.metadata_last_error = Some(reason);
         let delay_ms = metadata_backoff_delay_ms(st.metadata_failure_streak);
         st.metadata_backoff_until = Some(now + TimeDelta::milliseconds(delay_ms));
+        tracing::warn!(
+            "metadata degraded: streak={} backoff_ms={} reason={}",
+            st.metadata_failure_streak,
+            delay_ms,
+            st.metadata_last_error.as_deref().unwrap_or("unknown")
+        );
     } else {
         st.metadata_stale = false;
         st.metadata_last_success_at = Some(now);
@@ -1105,6 +1181,45 @@ mod tests {
         let st = state.lock().await;
         let managed = st.daemon.list_panes();
         assert_eq!(managed.len(), 1, "codex pane should be managed");
+    }
+
+    #[tokio::test]
+    async fn poll_tick_shell_pane_with_live_codex_json_promotes_managed() {
+        let backend = Arc::new(FakeTmuxBackend::new().with_pane(
+            "%0",
+            "main",
+            "zsh",
+            "{\"type\":\"thread.started\"}\n{\"type\":\"turn.started\"}\n{\"type\":\"item.started\",\"status\":\"in_progress\"}",
+        ));
+        let state = new_state();
+
+        poll_tick(&backend, &state)
+            .await
+            .expect("tick should succeed");
+
+        let st = state.lock().await;
+        let managed = st.daemon.list_panes();
+        assert_eq!(managed.len(), 1, "live codex JSON stream should promote shell pane");
+        assert_eq!(managed[0].provider.map(|p| p.as_str()), Some("codex"));
+    }
+
+    #[tokio::test]
+    async fn poll_tick_shell_pane_with_prompt_tail_stays_unmanaged() {
+        let backend = Arc::new(FakeTmuxBackend::new().with_pane(
+            "%0",
+            "main",
+            "zsh",
+            "{\"type\":\"thread.started\"}\n{\"type\":\"turn.started\"}\n❯",
+        ));
+        let state = new_state();
+
+        poll_tick(&backend, &state)
+            .await
+            .expect("tick should succeed");
+
+        let st = state.lock().await;
+        let managed = st.daemon.list_panes();
+        assert!(managed.is_empty(), "prompt tail should suppress stale shell attribution");
     }
 
     #[tokio::test]
@@ -1279,6 +1394,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn poll_tick_poller_events_use_generation_tracker_identity() {
+        let backend = Arc::new(
+            FakeTmuxBackend::new().with_pane("%0", "main", "claude", "╭ Claude Code"),
+        );
+        let state = new_state();
+
+        poll_tick(&backend, &state).await.expect("tick");
+
+        let st = state.lock().await;
+        let (expected_generation, expected_birth_ts) =
+            st.generation_tracker.get("%0").expect("generation tracked");
+        let managed = st.daemon.get_pane("%0").expect("managed pane");
+
+        assert_eq!(managed.pane_instance_id.generation, expected_generation);
+        assert_eq!(managed.pane_instance_id.birth_ts, expected_birth_ts);
+    }
+
+    #[tokio::test]
     async fn poll_tick_large_batch() {
         let mut backend = FakeTmuxBackend::new();
         for i in 0..20 {
@@ -1312,6 +1445,91 @@ mod tests {
         let st = state.lock().await;
         let managed = st.daemon.list_panes();
         assert_eq!(managed.len(), 2, "agents from both sessions managed");
+    }
+
+    #[tokio::test]
+    async fn poll_tick_demotes_managed_pane_after_return_to_shell() {
+        let state = new_state();
+
+        let codex_backend = Arc::new(FakeTmuxBackend::new().with_pane(
+            "%0",
+            "work",
+            "codex --model o3",
+            "Codex is thinking...",
+        ));
+        poll_tick(&codex_backend, &state).await.expect("codex tick");
+
+        {
+            let st = state.lock().await;
+            let pane = st.daemon.get_pane("%0").expect("managed codex pane");
+            assert_eq!(pane.provider, Some(agtmux_core_v5::types::Provider::Codex));
+        }
+
+        let shell_backend =
+            Arc::new(FakeTmuxBackend::new().with_pane("%0", "work", "zsh", "$ echo done"));
+        poll_tick(&shell_backend, &state).await.expect("shell tick");
+
+        let st = state.lock().await;
+        assert!(
+            st.daemon.get_pane("%0").is_none(),
+            "pane should be demoted out of managed state once tmux truth is back to shell"
+        );
+        assert!(
+            st.daemon.list_sessions().is_empty(),
+            "managed session state should not survive after exact-row return to shell"
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_tick_demotes_stale_deterministic_pane_after_return_to_shell() {
+        use agtmux_core_v5::types::{EvidenceTier, Provider, SourceEventV2, SourceKind};
+
+        let state = new_state();
+        let codex_backend = Arc::new(FakeTmuxBackend::new().with_pane(
+            "%0",
+            "work",
+            "codex --model o3",
+            "Codex is thinking...",
+        ));
+
+        {
+            let mut st = state.lock().await;
+            st.codex_jsonl_source.ingest(SourceEventV2 {
+                event_id: "codex-jsonl-det-1".to_string(),
+                provider: Provider::Codex,
+                source_kind: SourceKind::CodexJsonl,
+                tier: EvidenceTier::Deterministic,
+                observed_at: Utc::now(),
+                session_key: "codex-sess-live-like".to_string(),
+                pane_id: Some("%0".to_string()),
+                pane_generation: None,
+                pane_birth_ts: None,
+                source_event_id: None,
+                event_type: "activity.running".to_string(),
+                payload: serde_json::json!({}),
+                confidence: 1.0,
+                is_heartbeat: false,
+                actual_activity_at: None,
+            });
+        }
+
+        poll_tick(&codex_backend, &state)
+            .await
+            .expect("deterministic codex tick");
+
+        tokio::time::sleep(Duration::from_secs(4)).await;
+
+        let shell_backend =
+            Arc::new(FakeTmuxBackend::new().with_pane("%0", "work", "zsh", "$ echo done"));
+        poll_tick(&shell_backend, &state)
+            .await
+            .expect("shell demotion tick");
+
+        let st = state.lock().await;
+        assert!(
+            st.daemon.get_pane("%0").is_none(),
+            "stale deterministic pane should demote once it has fallen back to heuristic on a shell row"
+        );
     }
 
     // ── Deterministic source integration tests ──────────────────────
