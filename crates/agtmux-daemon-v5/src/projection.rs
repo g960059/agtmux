@@ -17,8 +17,8 @@ use agtmux_core_v5::resolver::{self, ResolverState, SourceRank};
 use agtmux_core_v5::signature::{self, SignatureInputs};
 use agtmux_core_v5::sync_v2_compat;
 use agtmux_core_v5::types::{
-    ActivityState, EvidenceMode, EvidenceTier, PaneInstanceId, PanePresence, PaneRuntimeState,
-    PaneSignatureClass, Provider, SessionRuntimeState, SignatureInputsCompact, SourceEventV2,
+    EvidenceMode, EvidenceTier, PaneInstanceId, PanePresence, PaneRuntimeState, PaneSignatureClass,
+    Provider, SessionRuntimeState, SignatureInputsCompact, SourceEventV2,
 };
 
 /// Monotonic version counter for change tracking.
@@ -1014,7 +1014,7 @@ fn extract_signature_inputs(payload: &serde_json::Value) -> SignatureInputsCompa
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agtmux_core_v5::types::SourceKind;
+    use agtmux_core_v5::types::{ActivityState, SourceKind};
     use chrono::TimeDelta;
 
     fn t0() -> DateTime<Utc> {

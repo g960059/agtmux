@@ -3109,3 +3109,39 @@ JSONL スキャナーなし) を発見 → デーモンが stale binary で起�
 ### Intentional deferrals
 - sync-v2 transport / replay deletion remains deferred
 - no sync-v3 semantic path changed in this slice
+
+## 2026-03-09 — T-SYNCV3-CODEX-WAITING-INPUT-PROOF done: Codex `task_complete` mismatch is intentional producer contract divergence
+
+### Summary
+- Investigated the live T-119 blocker where the same interactive Codex pane stayed `waiting_input` in `agtmux json` while `ui.bootstrap.v3` surfaced the row as `completed_idle`.
+- The mismatch is by design in producer code, not consumer reinterpretation:
+  - the legacy sync-v2 projection/json path still consumes Codex source `event_type = activity.waiting_input`
+  - the sync-v3 reducer intentionally normalizes the same `payload.codex_jsonl.inner_type = task_complete` event to `thread.lifecycle = idle`, `thread.blocking = none`, `turn.outcome = completed`
+- This follows the frozen v3 contract: `task_complete` must not automatically become `waiting_user_input` unless there is an explicit unresolved input request entity.
+
+### Source proof
+- `crates/agtmux-source-codex-jsonl/src/fsm.rs`
+  - `task_complete` still transitions the legacy source FSM to `WaitingInput`
+- `crates/agtmux-source-codex-jsonl/src/source.rs`
+  - Codex JSONL source still emits a non-heartbeat `activity.waiting_input` compat event for `task_complete`
+- `crates/agtmux-daemon-v5/src/codex_v3.rs`
+  - `task_complete` explicitly calls `finish_turn(..., ThreadLifecycleV3::Idle, TurnOutcomeV3::Completed)` and does not create a user-input request
+- `/tmp/agtmux-status-v3-final-design-20260309.md`
+  - explicitly says `task_complete` does not automatically imply `waiting_user_input`
+
+### Implementation notes
+- Added a focused runtime proof test in `crates/agtmux-runtime/src/server.rs` that feeds the exact same Codex `task_complete` source event into:
+  - the sync-v2/list/json path, which stays `presence=managed provider=codex activity_state=WaitingInput current_cmd=node`
+  - the sync-v3 bootstrap path, which returns the same pane identity as `presence=managed provider=codex thread.lifecycle=idle turn.outcome=completed`
+- No producer semantics changed in this slice; the test and docs make the intended divergence explicit for downstream consumers.
+
+### Gate
+- `cargo fmt --all` PASS
+- `cargo test -p agtmux codex_task_complete_intentionally_diverges_between_sync_v2_and_v3_surfaces -- --nocapture` PASS
+- `cargo test -p agtmux ui_bootstrap_v3_emits_strict_identity_and_normalized_codex_truth -- --nocapture` PASS
+- `cargo test -p agtmux-daemon-v5 task_complete_normalizes_to_idle_completion_without_blocking -- --nocapture` PASS
+- `cargo test -p agtmux-source-codex-jsonl poll_files_emits_waiting_input_on_task_complete -- --nocapture` PASS
+
+### Consumer implication
+- term cannot rely on `waiting_user_input` for Codex rows in sync-v3 unless producer truth includes an explicit pending input request
+- `completed_idle` for Codex after `task_complete` is the canonical v3 truth, even when sync-v2/json still shows `waiting_input`

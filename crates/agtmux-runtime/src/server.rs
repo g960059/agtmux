@@ -1760,6 +1760,72 @@ mod tests {
     }
 
     #[test]
+    fn codex_task_complete_intentionally_diverges_between_sync_v2_and_v3_surfaces() {
+        let mut state = make_state();
+        let now = Utc::now();
+        state.last_panes = vec![TmuxPaneInfo {
+            pane_id: "%1".to_string(),
+            session_id: "$1".to_string(),
+            session_name: "workbench".to_string(),
+            window_id: "@1".to_string(),
+            window_name: "main".to_string(),
+            current_cmd: "node".to_string(),
+            ..Default::default()
+        }];
+        state.generation_tracker.update(&["%1"], now);
+
+        let mut event = codex_v3_event("%1", "task_complete", now);
+        event.event_type = "activity.waiting_input".to_string();
+
+        state.daemon.apply_events(vec![event.clone()], now);
+        state
+            .sync_v3
+            .apply_events(&[event], &state.last_panes, &state.generation_tracker);
+
+        let panes = build_pane_list(&state)
+            .as_array()
+            .expect("pane list should be array")
+            .clone();
+        let sync_v2_row = panes
+            .iter()
+            .find(|pane| pane["pane_id"] == "%1")
+            .expect("sync-v2 row");
+        assert_eq!(sync_v2_row["presence"], "managed");
+        assert_eq!(sync_v2_row["provider"], "codex");
+        assert_eq!(sync_v2_row["activity_state"], "WaitingInput");
+        assert_eq!(sync_v2_row["current_cmd"], "node");
+
+        let payload: UiBootstrapV3 = serde_json::from_value(build_ui_bootstrap_v3(&mut state))
+            .expect("ui.bootstrap.v3 should parse");
+        payload.validate().expect("ui.bootstrap.v3 should validate");
+
+        let sync_v3_row = payload
+            .panes
+            .iter()
+            .find(|pane| pane.pane_id == "%1")
+            .expect("sync-v3 row");
+        assert_eq!(sync_v3_row.session_name, "workbench");
+        assert_eq!(sync_v3_row.window_id, "@1");
+        assert_eq!(
+            sync_v3_row.presence,
+            agtmux_core_v5::sync_v3::PresenceV3::Managed
+        );
+        assert_eq!(sync_v3_row.provider, Some(Provider::Codex));
+        assert_eq!(
+            sync_v3_row.thread.lifecycle,
+            agtmux_core_v5::sync_v3::ThreadLifecycleV3::Idle
+        );
+        assert_eq!(
+            sync_v3_row.thread.blocking,
+            agtmux_core_v5::sync_v3::ThreadBlockingV3::None
+        );
+        assert_eq!(
+            sync_v3_row.thread.turn.outcome,
+            agtmux_core_v5::sync_v3::TurnOutcomeV3::Completed
+        );
+    }
+
+    #[test]
     fn ui_bootstrap_v3_emits_unmanaged_row_when_no_semantic_truth_exists() {
         let mut state = make_state();
         let now = Utc::now();

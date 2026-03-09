@@ -806,3 +806,17 @@ Phase 7 (Distribution) と独立して実施可能。
   - Notes:
     - no sync-v3 reducer/runtime semantics changed in this slice
     - broader `ActivityState` deletion remains deferred
+
+- [x] T-SYNCV3-CODEX-WAITING-INPUT-PROOF (P1) Producer proof: Codex `task_complete` intentionally diverges between sync-v2 and sync-v3 surfaces — DONE (2026-03-09)
+  - 目的: live Codex lane で `agtmux json` が `waiting_input` を示しつつ `ui.bootstrap.v3` が `completed_idle` を返す件について、consumer reinterpretation ではなく producer-owned contract divergence であることを source/runtime path から明示する
+  - Deliverables:
+    - same exact Codex `task_complete` source event を projection と sync-v3 runtime の両方へ流し、sync-v2/list/json path は `activity_state=WaitingInput` を保持しつつ `ui.bootstrap.v3` は `thread.lifecycle=idle + turn.outcome=completed` を返す focused proof test を追加する
+    - docs に `task_complete` は `waiting_user_input` を発明しないという frozen v3 contract を term blocker 向けに明記する
+  - Evidence:
+    - `cargo test -p agtmux codex_task_complete_intentionally_diverges_between_sync_v2_and_v3_surfaces -- --nocapture` PASS
+    - `cargo test -p agtmux ui_bootstrap_v3_emits_strict_identity_and_normalized_codex_truth -- --nocapture` PASS
+    - `cargo test -p agtmux-daemon-v5 task_complete_normalizes_to_idle_completion_without_blocking -- --nocapture` PASS
+    - `cargo test -p agtmux-source-codex-jsonl poll_files_emits_waiting_input_on_task_complete -- --nocapture` PASS
+  - Notes:
+    - by design, `task_complete` does not imply `waiting_user_input` in sync-v3 without an explicit unresolved input request entity
+    - term must not infer `waiting_user_input` from Codex `completed_idle` rows alone
