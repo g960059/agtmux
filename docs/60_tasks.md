@@ -704,3 +704,16 @@ Phase 7 (Distribution) と独立して実施可能。
   - Notes:
     - Claude v3 truth でも `pending_requests[].request_id` が request identity の唯一の truth
     - live `ui.bootstrap.v3` RPC はこの slice でも未接続
+
+- [x] T-SYNCV3-P3-BOOTSTRAP (P0) Cross-repo: additive `ui.bootstrap.v3` wire from daemon truth — DONE (2026-03-09)
+  - 目的: frozen sync-v3 canonical snapshot truth を additive `ui.bootstrap.v3` RPC として公開し、term 側が v2 payload を再解釈せずに bootstrap できるようにする
+  - Deliverables:
+    - `agtmux-runtime` に live sync-v3 bootstrap builder を追加し、Codex/Claude normalized truth をそのまま `version=3` payload に載せる
+    - exact identity fields (`session_name`, `window_id`, `session_key`, `pane_id`, `pane_instance_id`) を strict に維持し、tmux exact identity を解決できない row は v3 output から除外する
+    - semantic truth が未ロードの managed pane でも v2 collapsed activity は再利用せず、`managed + unknown/not_loaded` fallback row を daemon 側で生成する
+    - `ui.bootstrap.v3` handler を追加し、`ui.changes.v3` は未実装のまま据え置く
+  - Evidence:
+    - `cargo test -p agtmux` PASS
+  - Notes:
+    - `ui.bootstrap.v2` / `ui.changes.v2` は未変更
+    - live freshness は bootstrap では row-age based summary を使用し、 field-group differential freshness は後続 sliceに deferred

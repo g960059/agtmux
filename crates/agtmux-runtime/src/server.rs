@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use agtmux_core_v5::sync_v3::UiBootstrapV3;
 use serde::Serialize;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
@@ -273,6 +274,10 @@ async fn handle_connection(
             let replay_cursor = st.daemon.replay_cursor();
             st.daemon.acknowledge_replay_cursor(replay_cursor);
             build_ui_bootstrap_v2(&st)
+        }
+        "ui.bootstrap.v3" => {
+            let st = state.lock().await;
+            build_ui_bootstrap_v3(&st)
         }
         "ui.changes.v2" => {
             let params = &request["params"];
@@ -788,6 +793,36 @@ pub(crate) fn build_ui_bootstrap_v2(state: &DaemonState) -> serde_json::Value {
     })
 }
 
+pub(crate) fn build_ui_bootstrap_v3(state: &DaemonState) -> serde_json::Value {
+    let managed = state.daemon.list_panes();
+    let payload = state.sync_v3.build_bootstrap(
+        &managed,
+        &state.last_panes,
+        &state.generation_tracker,
+        chrono::Utc::now(),
+    );
+
+    if let Err(err) = payload.validate() {
+        tracing::warn!("ui.bootstrap.v3 validation error: {err}");
+        let fallback = UiBootstrapV3::new(payload.generated_at, Vec::new());
+        return serde_json::to_value(fallback).unwrap_or_else(|_| {
+            serde_json::json!({
+                "version": agtmux_core_v5::sync_v3::UI_BOOTSTRAP_V3_VERSION,
+                "generated_at": chrono::Utc::now(),
+                "panes": [],
+            })
+        });
+    }
+
+    serde_json::to_value(payload).unwrap_or_else(|_| {
+        serde_json::json!({
+            "version": agtmux_core_v5::sync_v3::UI_BOOTSTRAP_V3_VERSION,
+            "generated_at": chrono::Utc::now(),
+            "panes": [],
+        })
+    })
+}
+
 pub(crate) fn build_ui_changes_v2(
     state: &mut DaemonState,
     cursor: Option<ReplayCursor>,
@@ -1044,12 +1079,47 @@ pub(crate) fn build_summary_changed(state: &DaemonState, since_version: u64) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agtmux_core_v5::types::SourceKind;
+    use agtmux_core_v5::types::{EvidenceTier, Provider, SourceEventV2, SourceKind};
     use agtmux_tmux_v5::TmuxPaneInfo;
     use chrono::Utc;
 
     fn make_state() -> DaemonState {
         DaemonState::new()
+    }
+
+    fn codex_v3_event(
+        pane_id: &str,
+        inner_type: &str,
+        observed_at: chrono::DateTime<Utc>,
+    ) -> SourceEventV2 {
+        SourceEventV2 {
+            event_id: format!("codex-{inner_type}-{}", observed_at.timestamp()),
+            provider: Provider::Codex,
+            source_kind: SourceKind::CodexJsonl,
+            tier: EvidenceTier::Deterministic,
+            observed_at,
+            session_key: "thr-bootstrap-v3".to_string(),
+            pane_id: Some(pane_id.to_string()),
+            pane_generation: None,
+            pane_birth_ts: None,
+            source_event_id: None,
+            event_type: match inner_type {
+                "task_complete" => "activity.waiting_input",
+                "function_call" => "activity.running",
+                _ => "activity.idle",
+            }
+            .to_string(),
+            payload: serde_json::json!({
+                "codex_jsonl": {
+                    "top_type": "event_msg",
+                    "inner_type": inner_type,
+                    "bootstrap": false
+                }
+            }),
+            confidence: 1.0,
+            is_heartbeat: false,
+            actual_activity_at: Some(observed_at),
+        }
     }
 
     fn tmux_pane(pane_id: &str, session: &str, cmd: &str) -> TmuxPaneInfo {
@@ -1353,6 +1423,27 @@ mod tests {
         let gw_resp = state.gateway.pull_events(&gw_req);
         state.daemon.apply_events(gw_resp.events, now);
         state.last_panes = vec![tmux_pane("%0", "main", "claude")];
+        state
+    }
+
+    fn make_bootstrap_v3_codex_completed_state() -> DaemonState {
+        let mut state = make_state();
+        let now = Utc::now();
+        state.last_panes = vec![TmuxPaneInfo {
+            pane_id: "%12".to_string(),
+            session_id: "$5".to_string(),
+            session_name: "workbench".to_string(),
+            window_id: "@5".to_string(),
+            window_name: "main".to_string(),
+            current_cmd: "codex".to_string(),
+            ..Default::default()
+        }];
+        state.generation_tracker.update(&["%12"], now);
+        state.sync_v3.apply_events(
+            &[codex_v3_event("%12", "task_complete", now)],
+            &state.last_panes,
+            &state.generation_tracker,
+        );
         state
     }
 
@@ -1761,6 +1852,122 @@ mod tests {
         assert_eq!(resp["result"]["epoch"], 1);
         assert!(resp["result"]["panes"].is_array());
         assert!(resp["result"]["sessions"].is_array());
+    }
+
+    #[test]
+    fn ui_bootstrap_v3_emits_strict_identity_and_normalized_codex_truth() {
+        let state = make_bootstrap_v3_codex_completed_state();
+
+        let result = build_ui_bootstrap_v3(&state);
+        let payload: UiBootstrapV3 =
+            serde_json::from_value(result).expect("ui.bootstrap.v3 should parse");
+        payload.validate().expect("ui.bootstrap.v3 should validate");
+
+        assert_eq!(payload.version, 3);
+        assert_eq!(payload.panes.len(), 1);
+        let pane = &payload.panes[0];
+        assert_eq!(pane.session_name, "workbench");
+        assert_eq!(pane.window_id, "@5");
+        assert_eq!(pane.session_key, "codex:%12");
+        assert_eq!(pane.pane_id, "%12");
+        assert_eq!(pane.pane_instance_id.pane_id, "%12");
+        assert_eq!(
+            pane.thread.lifecycle,
+            agtmux_core_v5::sync_v3::ThreadLifecycleV3::Idle
+        );
+        assert_eq!(
+            pane.thread.blocking,
+            agtmux_core_v5::sync_v3::ThreadBlockingV3::None
+        );
+        assert_eq!(
+            pane.thread.turn.outcome,
+            agtmux_core_v5::sync_v3::TurnOutcomeV3::Completed
+        );
+    }
+
+    #[test]
+    fn ui_bootstrap_v3_emits_unmanaged_row_when_no_semantic_truth_exists() {
+        let mut state = make_state();
+        let now = Utc::now();
+        state.last_panes = vec![TmuxPaneInfo {
+            pane_id: "%99".to_string(),
+            session_id: "$9".to_string(),
+            session_name: "shells".to_string(),
+            window_id: "@9".to_string(),
+            window_name: "misc".to_string(),
+            current_cmd: "zsh".to_string(),
+            ..Default::default()
+        }];
+        state.generation_tracker.update(&["%99"], now);
+
+        let result = build_ui_bootstrap_v3(&state);
+        let payload: UiBootstrapV3 =
+            serde_json::from_value(result).expect("ui.bootstrap.v3 should parse");
+        payload.validate().expect("ui.bootstrap.v3 should validate");
+
+        assert_eq!(payload.panes.len(), 1);
+        let pane = &payload.panes[0];
+        assert_eq!(pane.session_key, "shell:%99");
+        assert_eq!(
+            pane.presence,
+            agtmux_core_v5::sync_v3::PresenceV3::Unmanaged
+        );
+        assert!(pane.provider.is_none());
+        assert_eq!(
+            pane.freshness.snapshot,
+            agtmux_core_v5::types::FreshnessState::Down
+        );
+    }
+
+    #[tokio::test]
+    async fn ui_bootstrap_v3_handler_does_not_compact_sync_v2_log() {
+        let state = Arc::new(Mutex::new(make_bootstrap_v3_codex_completed_state()));
+        {
+            let mut st = state.lock().await;
+            let now = Utc::now();
+            let snapshot = agtmux_source_poller::source::PaneSnapshot {
+                pane_id: "%0".to_string(),
+                pane_title: "claude code".to_string(),
+                current_cmd: "claude".to_string(),
+                process_hint: Some("claude".to_string()),
+                capture_lines: vec!["\u{256D} Claude Code".to_string()],
+                captured_at: now,
+            };
+            st.poller.poll_batch(&[snapshot]);
+            let pull_req = agtmux_core_v5::types::PullEventsRequest {
+                cursor: None,
+                limit: 100,
+            };
+            let poller_resp = st.poller.pull_events(&pull_req, now);
+            st.gateway
+                .ingest_source_response(SourceKind::Poller, poller_resp);
+            let gw_req = agtmux_core_v5::types::GatewayPullRequest {
+                cursor: None,
+                limit: 100,
+            };
+            let gw_resp = st.gateway.pull_events(&gw_req);
+            st.daemon.apply_events(gw_resp.events, now);
+            assert!(
+                st.daemon.replay_len() > 0,
+                "sync-v2 replay log should be populated"
+            );
+        }
+
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "ui.bootstrap.v3",
+            "id": 192,
+            "params": {}
+        });
+
+        let resp = call_handler(Arc::clone(&state), request).await;
+        assert_eq!(resp["result"]["version"], 3);
+
+        let st = state.lock().await;
+        assert!(
+            st.daemon.replay_len() > 0,
+            "ui.bootstrap.v3 must not compact sync-v2 replay state"
+        );
     }
 
     #[tokio::test]

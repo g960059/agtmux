@@ -32,6 +32,7 @@ use agtmux_tmux_v5::{
 
 use crate::cli::DaemonOpts;
 use crate::server;
+use crate::sync_v3_runtime::SyncV3LiveState;
 
 /// Shared daemon state protected by a mutex.
 pub struct DaemonState {
@@ -87,6 +88,8 @@ pub struct DaemonState {
     pub focus_mismatch_count: u64,
     /// Last time focus reflection was internally consistent.
     pub focus_last_sync_at: Option<chrono::DateTime<Utc>>,
+    /// Canonical live sync-v3 semantic truth keyed by pane_id.
+    pub sync_v3: SyncV3LiveState,
 }
 
 impl DaemonState {
@@ -158,6 +161,7 @@ impl DaemonState {
             focused_pane_id: None,
             focus_mismatch_count: 0,
             focus_last_sync_at: None,
+            sync_v3: SyncV3LiveState::default(),
         }
     }
 }
@@ -390,6 +394,7 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
         let pane_ids: Vec<&str> = panes.iter().map(|p| p.pane_id.as_str()).collect();
         st.generation_tracker.update(&pane_ids, now);
         st.last_panes = panes.clone();
+        st.sync_v3.retain_inventory(&panes);
         update_focus_state(&mut st, now);
         server::refresh_pane_cache(pane_cache, &st, now);
         st.generation_tracker.clone()
@@ -897,10 +902,10 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
     // 10. Apply to daemon.
     let mut gw_events = gw_response.events;
     for event in &mut gw_events {
-        // Poller events always target the live pane; stamp generation identity from
-        // the current tracker so sync-v2 exact-row matching stays stable.
-        if event.source_kind == SourceKind::Poller
-            && (event.pane_generation.is_none() || event.pane_birth_ts.is_none())
+        // Source adapters do not all carry tmux generation identity.
+        // Stamp any pane-targeted event from the current inventory tracker so
+        // sync-v2/v3 exact-row matching stays pane-instance stable.
+        if (event.pane_generation.is_none() || event.pane_birth_ts.is_none())
             && let Some(pane_id) = event.pane_id.as_deref()
             && let Some((generation, birth_ts)) = st.generation_tracker.get(pane_id)
         {
@@ -910,6 +915,10 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
     }
     if !gw_events.is_empty() {
         tracing::debug!("applying {} events to daemon", gw_events.len());
+        let last_panes = st.last_panes.clone();
+        let generation_tracker = st.generation_tracker.clone();
+        st.sync_v3
+            .apply_events(&gw_events, &last_panes, &generation_tracker);
         st.daemon.apply_events(gw_events, now);
     }
 
@@ -937,6 +946,7 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
         .collect();
     if !shell_pane_ids.is_empty() {
         st.daemon.demote_panes_to_unmanaged(&shell_pane_ids, now);
+        st.sync_v3.demote_panes_to_unmanaged(&shell_pane_ids);
         for pane_id in &shell_pane_ids {
             st.transcript_path_hints.remove(pane_id);
         }

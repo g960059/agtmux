@@ -2884,3 +2884,38 @@ JSONL スキャナーなし) を発見 → デーモンが stale binary で起�
 
 ### Gate
 - `cargo test -p agtmux-source-claude-hooks -p agtmux-source-claude-jsonl -p agtmux-daemon-v5` PASS
+
+## 2026-03-09 — T-SYNCV3-P3-BOOTSTRAP done: additive `ui.bootstrap.v3` wired from daemon truth
+
+### Summary
+- `agtmux-runtime` now exposes `ui.bootstrap.v3` as a live additive RPC alongside the existing v2 wire.
+- The handler returns frozen `version = 3` payloads built from live daemon-side sync-v3 truth, not from term-side reinterpretation of v2 activity fields.
+- Codex/Claude semantic rows come from the existing sync-v3 reducer path; panes without loaded v3 semantics still get daemon-owned fallback rows instead of leaking collapsed `ActivityState` meanings into v3.
+
+### Behavior in this slice
+- `ui.bootstrap.v3` now emits:
+  - strict exact identity fields
+  - normalized sync-v3 pane snapshots
+  - unmanaged shell rows with `session_key = shell:%pane_id`
+  - managed fallback rows with `agent.lifecycle = unknown` and `thread.lifecycle = not_loaded` when the pane is managed in runtime truth but no provider semantic snapshot is loaded yet
+- The live bootstrap path preserves the Phase 2 corrections:
+  - Codex `task_complete` stays `idle + completed`
+  - Claude approval/stop semantics stay request-truth / idle-completed
+  - no re-collapse back to `waiting_input` / `waiting_approval` from v2 activity strings
+- `ui.bootstrap.v3` does not touch the sync-v2 replay cursor/log and does not imply any `ui.changes.v3` support yet.
+
+### Implementation notes
+- Added a runtime-side `SyncV3LiveState` that:
+  - consumes live Codex/Claude source events after gateway pull
+  - keeps per-pane sync-v3 reducers for supported semantic providers
+  - overlays strict tmux identity at bootstrap build time
+  - drops managed rows when exact tmux identity cannot be resolved
+- Poll loop now stamps any pane-targeted event with generation/birth identity from the live tracker when the source omitted it, so v3 rows stay exact-row stable.
+
+### Gate
+- `cargo fmt --all` PASS
+- `cargo test -p agtmux` PASS
+
+### Intentional deferrals
+- `ui.changes.v3` remains unimplemented
+- bootstrap freshness currently uses row-age summary rather than separate blocking/execution freshness clocks
