@@ -8,7 +8,7 @@ use chrono::{TimeDelta, Utc};
 use tokio::sync::Mutex;
 use tokio::time::{Duration, interval};
 
-use agtmux_core_v5::types::{EvidenceMode, GatewayPullRequest, PullEventsRequest, SourceKind};
+use agtmux_core_v5::types::{GatewayPullRequest, PullEventsRequest, SourceKind};
 use agtmux_daemon_v5::projection::DaemonProjection;
 use agtmux_gateway::cursor_hardening::{
     CursorRecoveryAction, CursorWatermarks, InvalidCursorTracker,
@@ -417,7 +417,8 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
         {
             Ok(Ok(Ok(map))) => {
                 if map.is_empty() {
-                    metadata_failure_reason = Some("process scan returned no processes".to_string());
+                    metadata_failure_reason =
+                        Some("process scan returned no processes".to_string());
                     tracing::warn!("process scan returned no processes");
                 }
                 map
@@ -494,10 +495,7 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
             "pane capture degraded: {capture_failures}/{}",
             panes.len()
         ));
-        tracing::warn!(
-            "pane capture degraded: {capture_failures}/{}",
-            panes.len()
-        );
+        tracing::warn!("pane capture degraded: {capture_failures}/{}", panes.len());
     }
 
     // 4. Process through pipeline
@@ -547,6 +545,10 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
                     pane_id: p.pane_id.clone(),
                     pane_pid: p.pane_pid,
                     cwd: p.current_path.clone(),
+                    existing_jsonl_path: st
+                        .codex_jsonl_watchers
+                        .get(&p.pane_id)
+                        .map(|watcher| watcher.path().to_path_buf()),
                     pane_generation: pane_gen,
                     pane_birth_ts: pane_birth,
                 }
@@ -916,10 +918,10 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
     // (e.g. Codex exited, Claude idle) correctly fall back to heuristic.
     st.daemon.tick_freshness(now);
 
-    // 10c. Exact-row shell truth beats stale heuristic managed state.
+    // 10c. Exact-row shell truth beats stale managed state.
     // If tmux now reports that a pane is back to a plain shell and the
-    // projected row has already fallen back to heuristic evidence, remove the
-    // lingering managed row so CLI/UI surfaces fall back to unmanaged truth.
+    // projected row is not backed by a live agent process, remove the lingering
+    // managed row so CLI/UI surfaces fall back to unmanaged truth immediately.
     const SHELL_CMDS: &[&str] = &[
         "zsh", "bash", "fish", "sh", "csh", "tcsh", "ksh", "dash", "nu", "pwsh",
     ];
@@ -930,11 +932,7 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
             SHELL_CMDS.contains(&cmd.as_str())
         })
         .filter(|snapshot| !agent_pane_ids.contains(&snapshot.pane_id))
-        .filter(|snapshot| {
-            st.daemon
-                .get_pane(&snapshot.pane_id)
-                .is_some_and(|pane| pane.evidence_mode == EvidenceMode::Heuristic)
-        })
+        .filter(|snapshot| st.daemon.get_pane(&snapshot.pane_id).is_some())
         .map(|snapshot| snapshot.pane_id.clone())
         .collect();
     if !shell_pane_ids.is_empty() {
@@ -1199,7 +1197,11 @@ mod tests {
 
         let st = state.lock().await;
         let managed = st.daemon.list_panes();
-        assert_eq!(managed.len(), 1, "live codex JSON stream should promote shell pane");
+        assert_eq!(
+            managed.len(),
+            1,
+            "live codex JSON stream should promote shell pane"
+        );
         assert_eq!(managed[0].provider.map(|p| p.as_str()), Some("codex"));
     }
 
@@ -1219,7 +1221,10 @@ mod tests {
 
         let st = state.lock().await;
         let managed = st.daemon.list_panes();
-        assert!(managed.is_empty(), "prompt tail should suppress stale shell attribution");
+        assert!(
+            managed.is_empty(),
+            "prompt tail should suppress stale shell attribution"
+        );
     }
 
     #[tokio::test]
@@ -1395,9 +1400,8 @@ mod tests {
 
     #[tokio::test]
     async fn poll_tick_poller_events_use_generation_tracker_identity() {
-        let backend = Arc::new(
-            FakeTmuxBackend::new().with_pane("%0", "main", "claude", "╭ Claude Code"),
-        );
+        let backend =
+            Arc::new(FakeTmuxBackend::new().with_pane("%0", "main", "claude", "╭ Claude Code"));
         let state = new_state();
 
         poll_tick(&backend, &state).await.expect("tick");
@@ -1481,7 +1485,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn poll_tick_demotes_stale_deterministic_pane_after_return_to_shell() {
+    async fn poll_tick_demotes_deterministic_pane_immediately_after_return_to_shell() {
         use agtmux_core_v5::types::{EvidenceTier, Provider, SourceEventV2, SourceKind};
 
         let state = new_state();
@@ -1517,8 +1521,6 @@ mod tests {
             .await
             .expect("deterministic codex tick");
 
-        tokio::time::sleep(Duration::from_secs(4)).await;
-
         let shell_backend =
             Arc::new(FakeTmuxBackend::new().with_pane("%0", "work", "zsh", "$ echo done"));
         poll_tick(&shell_backend, &state)
@@ -1528,7 +1530,7 @@ mod tests {
         let st = state.lock().await;
         assert!(
             st.daemon.get_pane("%0").is_none(),
-            "stale deterministic pane should demote once it has fallen back to heuristic on a shell row"
+            "deterministic pane should demote as soon as tmux reports an exact shell row with no live agent"
         );
     }
 

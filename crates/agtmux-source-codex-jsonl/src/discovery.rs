@@ -2,7 +2,11 @@
 //!
 //! Uses lsof to get the pane's CWD (timing-independent via cwd fd),
 //! then scans ~/.codex/sessions/**/*.jsonl matching by session_meta CWD.
+//!
+//! When multiple panes share the same CWD, discovery must assign distinct JSONL
+//! sessions per pane instead of letting every pane claim the newest transcript.
 
+use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -18,6 +22,9 @@ pub struct CodexPaneHint {
     pub pane_pid: Option<u32>,
     /// Fallback CWD from tmux (used if lsof fails).
     pub cwd: String,
+    /// Previously assigned JSONL path for this pane, if any.
+    /// Discovery keeps this ownership stable while the file still matches.
+    pub existing_jsonl_path: Option<PathBuf>,
     pub pane_generation: Option<u64>,
     pub pane_birth_ts: Option<chrono::DateTime<chrono::Utc>>,
 }
@@ -50,30 +57,78 @@ pub fn discover_sessions_in_dir(
     hints: &[CodexPaneHint],
     codex_sessions_dir: &Path,
 ) -> Vec<CodexSessionDiscovery> {
-    // Build index: Vec<(session_cwd, jsonl_path, mtime)>
-    let index = build_session_index(codex_sessions_dir);
+    // Build index: canonical_cwd -> newest-first candidate sessions.
+    let mut index_by_cwd: BTreeMap<String, Vec<(PathBuf, SystemTime)>> = BTreeMap::new();
+    for (session_cwd, path, mtime) in build_session_index(codex_sessions_dir) {
+        index_by_cwd
+            .entry(canonicalize_path(&session_cwd))
+            .or_default()
+            .push((path, mtime));
+    }
+    for sessions in index_by_cwd.values_mut() {
+        sessions.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    }
 
-    let mut results = Vec::new();
-
+    // Resolve pane CWDs first so multiple same-CWD panes can share a unique assignment pass.
+    let mut hints_by_cwd: BTreeMap<String, Vec<&CodexPaneHint>> = BTreeMap::new();
     for hint in hints {
         let cwd = if let Some(pid) = hint.pane_pid {
             get_cwd_via_lsof(pid).unwrap_or_else(|| hint.cwd.clone())
         } else {
             hint.cwd.clone()
         };
+        hints_by_cwd
+            .entry(canonicalize_path(&cwd))
+            .or_default()
+            .push(hint);
+    }
 
-        let canonical_cwd = canonicalize_path(&cwd);
+    let mut results = Vec::new();
 
-        // Find best matching JSONL (most recently modified for this CWD)
-        if let Some((_, best_path, _)) = index
-            .iter()
-            .filter(|(session_cwd, _, _)| canonicalize_path(session_cwd) == canonical_cwd)
-            .max_by_key(|(_, _, mtime)| *mtime)
-        {
+    for (canonical_cwd, cwd_hints) in hints_by_cwd {
+        let Some(candidates) = index_by_cwd.get(&canonical_cwd) else {
+            continue;
+        };
+
+        let mut used_paths: HashSet<PathBuf> = HashSet::new();
+        let mut pending_hints = Vec::new();
+
+        // First preserve any live ownership so an older pane does not get rebound
+        // to a sibling's newer session file on the next discovery tick.
+        for hint in cwd_hints {
+            let Some(existing_path) = hint.existing_jsonl_path.as_ref() else {
+                pending_hints.push(hint);
+                continue;
+            };
+
+            if candidates.iter().any(|(path, _)| path == existing_path)
+                && used_paths.insert(existing_path.clone())
+            {
+                results.push(CodexSessionDiscovery {
+                    pane_id: hint.pane_id.clone(),
+                    session_key: session_key_from_path(existing_path),
+                    jsonl_path: existing_path.clone(),
+                    pane_generation: hint.pane_generation,
+                    pane_birth_ts: hint.pane_birth_ts,
+                });
+            } else {
+                pending_hints.push(hint);
+            }
+        }
+
+        // Then assign remaining panes to the next-unused newest sessions.
+        for hint in pending_hints {
+            let Some((path, _)) = candidates
+                .iter()
+                .find(|(path, _)| !used_paths.contains(path))
+            else {
+                continue;
+            };
+            used_paths.insert(path.clone());
             results.push(CodexSessionDiscovery {
                 pane_id: hint.pane_id.clone(),
-                session_key: session_key_from_path(best_path),
-                jsonl_path: best_path.clone(),
+                session_key: session_key_from_path(path),
+                jsonl_path: path.clone(),
                 pane_generation: hint.pane_generation,
                 pane_birth_ts: hint.pane_birth_ts,
             });
@@ -292,6 +347,7 @@ mod tests {
             pane_id: "%5".to_owned(),
             pane_pid: None,
             cwd: cwd.to_owned(),
+            existing_jsonl_path: None,
             pane_generation: Some(1),
             pane_birth_ts: None,
         }];
@@ -322,6 +378,7 @@ mod tests {
             pane_id: "%3".to_owned(),
             pane_pid: None,
             cwd: cwd.to_owned(),
+            existing_jsonl_path: None,
             pane_generation: None,
             pane_birth_ts: None,
         }];
@@ -351,6 +408,7 @@ mod tests {
             pane_id: "%9".to_owned(),
             pane_pid: None,
             cwd: "/Users/vm/my-project".to_owned(),
+            existing_jsonl_path: None,
             pane_generation: None,
             pane_birth_ts: None,
         }];
@@ -380,6 +438,7 @@ mod tests {
             pane_id: "%1".to_owned(),
             pane_pid: None,
             cwd: cwd.to_owned(),
+            existing_jsonl_path: None,
             pane_generation: None,
             pane_birth_ts: None,
         }];
@@ -399,6 +458,141 @@ mod tests {
         // PID 999999999 is almost certainly invalid
         let result = get_cwd_via_lsof(999999999);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn discover_sessions_assigns_distinct_sessions_to_same_cwd_panes() {
+        let tmp = temp_sessions_dir("discover-unique-same-cwd");
+        let sessions_dir = tmp.join("sessions");
+        let day_dir = sessions_dir.join("2026").join("03").join("01");
+        fs::create_dir_all(&day_dir).expect("test");
+
+        let cwd = "/Users/vm/project";
+        let old_path = write_session_meta(&day_dir, "rollout-old.jsonl", cwd);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let new_path = write_session_meta(&day_dir, "rollout-new.jsonl", cwd);
+
+        let hints = vec![
+            CodexPaneHint {
+                pane_id: "%1".to_owned(),
+                pane_pid: None,
+                cwd: cwd.to_owned(),
+                existing_jsonl_path: None,
+                pane_generation: None,
+                pane_birth_ts: None,
+            },
+            CodexPaneHint {
+                pane_id: "%2".to_owned(),
+                pane_pid: None,
+                cwd: cwd.to_owned(),
+                existing_jsonl_path: None,
+                pane_generation: None,
+                pane_birth_ts: None,
+            },
+        ];
+
+        let discoveries = discover_sessions_in_dir(&hints, &sessions_dir);
+        assert_eq!(discoveries.len(), 2);
+
+        let assigned_paths: HashSet<PathBuf> =
+            discoveries.iter().map(|d| d.jsonl_path.clone()).collect();
+        assert_eq!(
+            assigned_paths.len(),
+            2,
+            "each pane should get a unique JSONL path"
+        );
+        assert!(assigned_paths.contains(&old_path));
+        assert!(assigned_paths.contains(&new_path));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn discover_sessions_reuses_existing_assignment_before_claiming_newer_file() {
+        let tmp = temp_sessions_dir("discover-reuse-existing");
+        let sessions_dir = tmp.join("sessions");
+        let day_dir = sessions_dir.join("2026").join("03").join("01");
+        fs::create_dir_all(&day_dir).expect("test");
+
+        let cwd = "/Users/vm/project";
+        let old_path = write_session_meta(&day_dir, "rollout-old.jsonl", cwd);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let new_path = write_session_meta(&day_dir, "rollout-new.jsonl", cwd);
+
+        let hints = vec![
+            CodexPaneHint {
+                pane_id: "%1".to_owned(),
+                pane_pid: None,
+                cwd: cwd.to_owned(),
+                existing_jsonl_path: Some(old_path.clone()),
+                pane_generation: None,
+                pane_birth_ts: None,
+            },
+            CodexPaneHint {
+                pane_id: "%2".to_owned(),
+                pane_pid: None,
+                cwd: cwd.to_owned(),
+                existing_jsonl_path: None,
+                pane_generation: None,
+                pane_birth_ts: None,
+            },
+        ];
+
+        let discoveries = discover_sessions_in_dir(&hints, &sessions_dir);
+        assert_eq!(discoveries.len(), 2);
+
+        let pane1 = discoveries
+            .iter()
+            .find(|d| d.pane_id == "%1")
+            .expect("pane1 discovery");
+        let pane2 = discoveries
+            .iter()
+            .find(|d| d.pane_id == "%2")
+            .expect("pane2 discovery");
+
+        assert_eq!(pane1.jsonl_path, old_path);
+        assert_eq!(pane2.jsonl_path, new_path);
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn discover_sessions_does_not_duplicate_one_session_across_same_cwd_panes() {
+        let tmp = temp_sessions_dir("discover-no-dup");
+        let sessions_dir = tmp.join("sessions");
+        let day_dir = sessions_dir.join("2026").join("03").join("01");
+        fs::create_dir_all(&day_dir).expect("test");
+
+        let cwd = "/Users/vm/project";
+        write_session_meta(&day_dir, "rollout-only.jsonl", cwd);
+
+        let hints = vec![
+            CodexPaneHint {
+                pane_id: "%1".to_owned(),
+                pane_pid: None,
+                cwd: cwd.to_owned(),
+                existing_jsonl_path: None,
+                pane_generation: None,
+                pane_birth_ts: None,
+            },
+            CodexPaneHint {
+                pane_id: "%2".to_owned(),
+                pane_pid: None,
+                cwd: cwd.to_owned(),
+                existing_jsonl_path: None,
+                pane_generation: None,
+                pane_birth_ts: None,
+            },
+        ];
+
+        let discoveries = discover_sessions_in_dir(&hints, &sessions_dir);
+        assert_eq!(
+            discoveries.len(),
+            1,
+            "one transcript must not be bound to multiple same-CWD panes"
+        );
+
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]

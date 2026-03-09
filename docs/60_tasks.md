@@ -632,3 +632,21 @@ Phase 7 (Distribution) と独立して実施可能。
     - agtmux-term 側 `ui.health.v1` consumer と接続して UI surfacing を確認
   - Scratch handover: `/tmp/agtmux-v2-a2-cross-repo-handover-20260306.md`
   - blocked_by: T-XTERM-A1, T-XTERM-A3
+
+- [ ] T-XTERM-A7 (P0) Cross-repo: exact-row managed demotion and same-session same-provider no-bleed
+  - 目的: direct `ui.bootstrap.v2` truth で、agent exit 後の shell demotion を exact row に反映し、同一 session 内の sibling Codex pane へ `running` を bleed させない
+  - Fresh downstream evidence (2026-03-09):
+    - app-owned daemon socket direct probe shows `vm agtmux-term %6` as `presence=managed provider=codex activity=Running current_cmd=zsh`
+    - the same session surfaces `%2`, `%5`, and `%6` all as `provider=codex activity=Running`
+    - this is producer truth before `agtmux-term` renders it
+  - Deliverables:
+    - exact pane row demotes to `presence=unmanaged provider=null activity_state=null|unknown` once the pane has returned to shell after agent exit / `Ctrl-C`
+    - one Codex pane becoming `running` does not relabel sibling Codex panes in the same session unless their own exact row truth also changed
+    - online E2E exists for:
+      - same-session multi-Codex no-bleed
+      - managed-exit shell demotion for both Codex and Claude
+  - Acceptance:
+    - direct `ui.bootstrap.v2` never reports `presence=managed` for a pane whose `current_cmd` is already `zsh` after agent termination
+    - direct `ui.bootstrap.v2` can represent one running Codex pane while sibling Codex panes in the same session remain `idle` or `unmanaged`
+  - Scratch handover: `/tmp/agtmux-a7-managed-demotion-and-same-session-codex-bleed-20260309.md`
+  - blocked_by: T-XTERM-A5

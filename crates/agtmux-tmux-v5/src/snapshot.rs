@@ -3,7 +3,7 @@
 use agtmux_source_poller::source::PaneSnapshot;
 use chrono::{DateTime, Utc};
 
-use crate::capture::{inspect_pane_processes, inspect_pane_processes_deep, ProcessMap};
+use crate::capture::{ProcessMap, inspect_pane_processes, inspect_pane_processes_deep};
 use crate::generation::PaneGenerationTracker;
 use crate::pane_info::TmuxPaneInfo;
 

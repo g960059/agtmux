@@ -177,10 +177,7 @@ mod tests {
         impl TmuxCommandRunner for MockRunner {
             fn run(&self, args: &[&str]) -> Result<String, TmuxError> {
                 assert!(args.contains(&"list-panes"));
-                Ok(
-                    "$0|main|@0|dev|%0|claude|/home|claude code|200|50|1|1\n"
-                        .to_string(),
-                )
+                Ok("$0|main|@0|dev|%0|claude|/home|claude code|200|50|1|1\n".to_string())
             }
         }
         let panes = list_panes(&MockRunner).expect("should list");

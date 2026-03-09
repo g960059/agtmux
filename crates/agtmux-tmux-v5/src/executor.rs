@@ -99,13 +99,21 @@ fn resolve_tmux_bin_from_env_with<F>(env: &HashMap<String, String>, is_executabl
 where
     F: Fn(&str) -> bool,
 {
-    if let Some(explicit) = env.get("TMUX_BIN").map(|value| value.trim()).filter(|value| !value.is_empty()) {
+    if let Some(explicit) = env
+        .get("TMUX_BIN")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
         if is_executable(explicit) {
             return explicit.to_string();
         }
     }
 
-    if let Some(path) = env.get("PATH").map(|value| value.trim()).filter(|value| !value.is_empty()) {
+    if let Some(path) = env
+        .get("PATH")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
         for dir in path.split(':').filter(|segment| !segment.is_empty()) {
             let candidate = format!("{dir}/tmux");
             if is_executable(&candidate) {
@@ -194,27 +202,32 @@ mod tests {
             ("PATH".to_string(), "/usr/bin:/bin".to_string()),
         ]);
 
-        let resolved = resolve_tmux_bin_from_env_with(&env, |candidate| candidate == "/custom/tmux");
+        let resolved =
+            resolve_tmux_bin_from_env_with(&env, |candidate| candidate == "/custom/tmux");
         assert_eq!(resolved, "/custom/tmux");
     }
 
     #[test]
     fn resolve_tmux_bin_falls_back_to_path_lookup() {
-        let env = HashMap::from([("PATH".to_string(), "/usr/bin:/opt/homebrew/bin:/bin".to_string())]);
+        let env = HashMap::from([(
+            "PATH".to_string(),
+            "/usr/bin:/opt/homebrew/bin:/bin".to_string(),
+        )]);
 
-        let resolved = resolve_tmux_bin_from_env_with(&env, |candidate| {
-            candidate == "/opt/homebrew/bin/tmux"
-        });
+        let resolved =
+            resolve_tmux_bin_from_env_with(&env, |candidate| candidate == "/opt/homebrew/bin/tmux");
         assert_eq!(resolved, "/opt/homebrew/bin/tmux");
     }
 
     #[test]
     fn resolve_tmux_bin_falls_back_to_standard_locations_when_path_is_stripped() {
-        let env = HashMap::from([("PATH".to_string(), "/usr/bin:/bin:/usr/sbin:/sbin".to_string())]);
+        let env = HashMap::from([(
+            "PATH".to_string(),
+            "/usr/bin:/bin:/usr/sbin:/sbin".to_string(),
+        )]);
 
-        let resolved = resolve_tmux_bin_from_env_with(&env, |candidate| {
-            candidate == "/opt/homebrew/bin/tmux"
-        });
+        let resolved =
+            resolve_tmux_bin_from_env_with(&env, |candidate| candidate == "/opt/homebrew/bin/tmux");
         assert_eq!(resolved, "/opt/homebrew/bin/tmux");
     }
 

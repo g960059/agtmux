@@ -2765,3 +2765,25 @@ JSONL スキャナーなし) を発見 → デーモンが stale binary で起�
   - `scripts/tests/e2e/scenarios/explicit-tmux-socket-app-child-late-server.sh`
   - any new higher-fidelity app-child repro
   - cross-repo `agtmux-term` focused metadata-enabled UI lane
+
+## 2026-03-09 — T-XTERM-A7 opened: direct daemon truth still keeps stale managed Codex rows and same-session running bleed
+
+### Fresh downstream evidence
+- direct probe against the app-owned daemon socket shows producer truth is still wrong even before `agtmux-term` renders it
+- current rows on the live socket include:
+  - `vm agtmux-term %6` -> `presence=managed provider=codex activity=Running current_cmd=zsh`
+  - same session `vm agtmux-term` -> `%2`, `%5`, `%6` all surface as `provider=codex activity=Running`
+- this reproduces two user-visible symptoms as daemon truth:
+  - shell demotion after `Ctrl-C` does not clear managed/provider/activity on the exact row
+  - one running Codex pane can bleed `running` to sibling Codex panes in the same session
+
+### Coverage gap
+- existing coverage is not sufficient for this exact shape:
+  - `managed-exit.sh` exists upstream, but it does not yet prove the live session/sibling no-bleed shape now reported
+  - no upstream online E2E currently fixes the case “multiple Codex panes in one session, only one running, siblings remain idle/unmanaged”
+
+### Next step
+- add/repair producer-side tests for:
+  - shell demotion on exact pane row after agent termination / `Ctrl-C`
+  - same-session same-provider no-bleed with multiple Codex panes
+- then rerun downstream direct bootstrap probe and the thin `agtmux-term` live canaries

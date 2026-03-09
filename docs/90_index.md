@@ -29,6 +29,11 @@
 - Scratch handover: `/tmp/agtmux-app-child-bootstrap-still-empty-after-term-hardening-20260309.md`
 - Current scope: explicit `--tmux-socket` works from shell repro and stripped-PATH repro, downstream no longer primes on empty bootstrap, and the same app process can directly see the isolated pane via `tmux -S <resolved socket path>`; only the daemon spawned from the agtmux-term metadata-enabled app/XCUITest lane still never reaches a non-empty bootstrap after it starts listening on the custom socket
 
+## Cross-Repo V2 A7
+- Source of truth: `docs/60_tasks.md` (`T-XTERM-A7`)
+- Scratch handover: `/tmp/agtmux-a7-managed-demotion-and-same-session-codex-bleed-20260309.md`
+- Current scope: direct app-owned daemon probing shows stale managed Codex truth after shell demotion (`current_cmd=zsh`) and same-session running bleed across sibling Codex panes
+
 ## Phase 3 Hardening (COMPLETE — 585 tests)
 - `docs/50_plan.md` (Phase 3 section)
 - `docs/60_tasks.md` (T-115〜T-118 DONE)
