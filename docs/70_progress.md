@@ -2854,3 +2854,33 @@ JSONL スキャナーなし) を発見 → デーモンが stale binary で起�
 
 ### Gate
 - `cargo test -p agtmux-source-codex-jsonl -p agtmux-daemon-v5` PASS
+
+## 2026-03-09 — T-SYNCV3-P2-CLAUDE done: Claude field-group authority merge landed in the v3 daemon truth path
+
+### Summary
+- `agtmux-source-claude-hooks` now preserves hook-native identity inside `SourceEventV2.payload.claude_hook` and carries the real hook timestamp in `actual_activity_at`, so the v3 reducer can distinguish `PermissionRequest`, `Stop`, and `SubagentStop` without trusting collapsed `event_type`.
+- `agtmux-source-claude-jsonl` now preserves `payload.claude_jsonl.line_type` plus timestamp/uuid/session metadata and forwards real transcript timestamps into `actual_activity_at`.
+- `agtmux-daemon-v5` now has a dedicated `claude_v3` normalizer that merges Claude by field group instead of selecting a single collapsed activity winner.
+
+### Authority split fixed in this slice
+- Hooks are now authoritative for approval request truth:
+  - `PermissionRequest` opens a pending approval request entity
+  - `thread.blocking = waiting_approval` and `attention = approval` are derived from that request entity
+- Hooks are now authoritative for explicit stop/completion truth:
+  - `Stop` / `SubagentStop` resolve hook-owned pending requests
+  - `thread.lifecycle = idle`
+  - `turn.outcome = completed`
+  - no synthetic `waiting_user_input`
+- JSONL is now authoritative for execution/lifecycle hints only:
+  - `tool_use` / `progress` -> `thread.execution = tool_running`
+  - `tool_result` -> `thread.execution = thinking`
+  - `assistant` -> `thread.lifecycle = idle`, `thread.execution = none`
+  - JSONL updates do not clear hooks-derived blocking truth
+
+### Implementation notes
+- Added `crates/agtmux-daemon-v5/src/claude_v3.rs` as the Claude-side v3 normalizer.
+- Extended `SyncV3Reducer` with Claude `provider_raw` merge support so hook and JSONL hints coexist in `provider_raw.claude`.
+- Kept v2 projection behavior untouched; live `ui.bootstrap.v3` / `ui.changes.v3` wiring remains deferred until the full provider truth path is clean.
+
+### Gate
+- `cargo test -p agtmux-source-claude-hooks -p agtmux-source-claude-jsonl -p agtmux-daemon-v5` PASS

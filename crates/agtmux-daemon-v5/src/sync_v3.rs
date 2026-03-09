@@ -233,6 +233,22 @@ impl SyncV3Reducer {
         self.snapshot.updated_at = updated_at;
     }
 
+    pub fn merge_provider_raw_claude(
+        &mut self,
+        patch: serde_json::Value,
+        updated_at: DateTime<Utc>,
+    ) {
+        let merged = merge_provider_raw_slot(self.snapshot.provider_raw.claude.clone(), patch);
+        if self.snapshot.provider_raw.claude.as_ref() == Some(&merged)
+            && self.snapshot.updated_at == updated_at
+        {
+            return;
+        }
+
+        self.snapshot.provider_raw.claude = Some(merged);
+        self.snapshot.updated_at = updated_at;
+    }
+
     pub fn set_turn(&mut self, turn: TurnStateV3, updated_at: DateTime<Utc>) {
         self.snapshot.thread.turn = turn;
         self.snapshot.updated_at = updated_at;
@@ -329,6 +345,21 @@ fn worst_freshness(left: FreshnessState, right: FreshnessState) -> FreshnessStat
         left
     } else {
         right
+    }
+}
+
+fn merge_provider_raw_slot(
+    existing: Option<serde_json::Value>,
+    patch: serde_json::Value,
+) -> serde_json::Value {
+    match (existing, patch) {
+        (Some(serde_json::Value::Object(mut current)), serde_json::Value::Object(update)) => {
+            for (key, value) in update {
+                current.insert(key, value);
+            }
+            serde_json::Value::Object(current)
+        }
+        (_, replacement) => replacement,
     }
 }
 
@@ -511,6 +542,34 @@ mod tests {
         assert_eq!(
             reducer.snapshot().attention.highest_priority,
             AttentionPriorityV3::Completion
+        );
+    }
+
+    #[test]
+    fn reducer_merges_provider_raw_claude_without_dropping_existing_fields() {
+        let mut reducer = SyncV3Reducer::new(base_snapshot());
+
+        reducer.merge_provider_raw_claude(
+            serde_json::json!({
+                "hook_event": "PermissionRequest",
+                "hook_source": "claude_hooks"
+            }),
+            ts(50),
+        );
+        reducer.merge_provider_raw_claude(
+            serde_json::json!({
+                "jsonl_hint": "tool_use"
+            }),
+            ts(51),
+        );
+
+        assert_eq!(
+            reducer.snapshot().provider_raw.claude,
+            Some(serde_json::json!({
+                "hook_event": "PermissionRequest",
+                "hook_source": "claude_hooks",
+                "jsonl_hint": "tool_use"
+            }))
         );
     }
 }

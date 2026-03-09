@@ -46,7 +46,7 @@
 - Research inputs:
   - `docs/research/20260309-status-notification-comparison.md`
   - `docs/research/claude-jsonl-waiting-states.md`
-- Current scope: fixture-first `sync-v3` contract freeze, canonical Rust v3 types, daemon-side request/attention/freshness scaffolding, and Codex Phase 2 semantic normalization for `task_complete`, review mode, request truth, and `tool_running`
+- Current scope: fixture-first `sync-v3` contract freeze, canonical Rust v3 types, daemon-side request/attention/freshness scaffolding, Codex Phase 2 semantic normalization, and Claude Phase 2 field-group authority merge for hooks-vs-JSONL truth
 - Still deferred: live `ui.bootstrap.v3` / `ui.changes.v3` wire exposure until the v3 truth path is clean across providers
 
 ## Phase 3 Hardening (COMPLETE — 585 tests)

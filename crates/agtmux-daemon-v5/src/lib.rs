@@ -6,6 +6,7 @@
 
 pub mod alert_routing;
 pub mod binding_projection;
+pub mod claude_v3;
 pub mod codex_v3;
 pub mod projection;
 pub mod snapshot;

@@ -63,10 +63,16 @@ pub fn translate(line: &ClaudeJsonlLine, ctx: &TranslateContext) -> Option<Sourc
         event_type,
         payload: serde_json::json!({
             "line_type": line.line_type,
+            "claude_jsonl": {
+                "line_type": line.line_type,
+                "timestamp": line.timestamp,
+                "uuid": line.uuid,
+                "session_id": line.session_id,
+            }
         }),
         confidence: 1.0,
         is_heartbeat: false, // JSONL lines are always real activity (not periodic keep-alive)
-        actual_activity_at: None,
+        actual_activity_at: line.timestamp,
     })
 }
 
@@ -136,6 +142,12 @@ mod tests {
         assert_eq!(ev.session_key, "c4c0766e-test");
         assert_eq!(ev.pane_id, Some("%3".to_owned()));
         assert_eq!(ev.pane_generation, Some(1));
+        assert_eq!(ev.payload["claude_jsonl"]["line_type"], "user");
+        assert_eq!(ev.payload["claude_jsonl"]["uuid"], "uuid-001");
+        assert_eq!(
+            ev.actual_activity_at, line.timestamp,
+            "real JSONL timestamp should be preserved for v3 truth"
+        );
         assert!((ev.confidence - 1.0).abs() < f64::EPSILON);
     }
 
@@ -185,6 +197,18 @@ mod tests {
         let ev = translate(&line, &ctx()).expect("user should produce an event");
         assert_eq!(ev.event_id, "claude-jsonl-unknown");
         assert!(ev.source_event_id.is_none());
+    }
+
+    #[test]
+    fn translate_missing_timestamp_uses_observed_at_only() {
+        let mut line = sample_line("assistant");
+        line.timestamp = None;
+
+        let ev = translate(&line, &ctx()).expect("assistant should produce an event");
+
+        assert!(ev.actual_activity_at.is_none());
+        assert!(ev.observed_at <= Utc::now());
+        assert!(ev.payload["claude_jsonl"]["timestamp"].is_null());
     }
 
     #[test]

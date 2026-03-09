@@ -691,3 +691,16 @@ Phase 7 (Distribution) と独立して実施可能。
   - Notes:
     - v2 projection / `ActivityState` は未削除
     - live `ui.bootstrap.v3` RPC はこの slice では未接続
+
+- [x] T-SYNCV3-P2-CLAUDE (P0) Cross-repo: v3 Claude field-group authority merge in daemon truth path — DONE (2026-03-09)
+  - 目的: Claude hooks/JSONL を frozen sync-v3 contract に合わせて field-group authority split で正規化し、旧 collapsed `ActivityState` semantics を v3 truth path に持ち込まない
+  - Deliverables:
+    - `agtmux-source-claude-hooks` が `claude_hook` nested payload と actual activity timestamp を保持し、v3 reducer が `PermissionRequest` / `Stop` / `SubagentStop` を識別できる
+    - `agtmux-source-claude-jsonl` が `claude_jsonl` nested payload と actual activity timestamp を保持し、JSONL line type を execution/lifecycle hint として扱える
+    - `agtmux-daemon-v5` に Claude v3 normalizer を追加し、`PermissionRequest -> pending approval request + waiting_approval`、`Stop/SubagentStop -> idle + completed`、`tool_use/progress -> execution=tool_running` を実装
+    - hooks-derived blocking truth が JSONL execution update で上書きされないことと、`Notification(idle_prompt)` が `waiting_user_input` を発明しないことをテストで固定
+  - Evidence:
+    - `cargo test -p agtmux-source-claude-hooks -p agtmux-source-claude-jsonl -p agtmux-daemon-v5` PASS
+  - Notes:
+    - Claude v3 truth でも `pending_requests[].request_id` が request identity の唯一の truth
+    - live `ui.bootstrap.v3` RPC はこの slice でも未接続

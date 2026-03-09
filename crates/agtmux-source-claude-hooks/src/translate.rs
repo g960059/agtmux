@@ -36,10 +36,10 @@ pub fn translate(raw: &ClaudeHookEvent) -> SourceEventV2 {
         pane_birth_ts: None,
         source_event_id: Some(raw.hook_id.clone()),
         event_type: resolve_event_type(&raw.hook_type, &raw.data),
-        payload: raw.data.clone(),
+        payload: build_payload(raw),
         confidence: 1.0,
         is_heartbeat: false, // Claude hooks are always real activity (not periodic keep-alive)
-        actual_activity_at: None,
+        actual_activity_at: Some(raw.timestamp),
     }
 }
 
@@ -78,6 +78,33 @@ fn resolve_event_type(hook_type: &str, data: &serde_json::Value) -> String {
     }
 }
 
+fn build_payload(raw: &ClaudeHookEvent) -> serde_json::Value {
+    let mut payload = match raw.data.clone() {
+        serde_json::Value::Object(map) => serde_json::Value::Object(map),
+        other => serde_json::json!({ "raw_data": other }),
+    };
+
+    payload["claude_hook"] = serde_json::json!({
+        "hook_id": raw.hook_id,
+        "hook_type": raw.hook_type,
+        "session_id": raw.session_id,
+        "timestamp": raw.timestamp,
+        "notification_type": raw.data.get("notification_type").and_then(serde_json::Value::as_str),
+        "tool_name": extract_string_field(&raw.data, &["tool_name", "toolName", "tool"]),
+        "request_id": extract_string_field(
+            &raw.data,
+            &["request_id", "requestId", "tool_use_id", "toolUseId", "permission_request_id"]
+        )
+    });
+
+    payload
+}
+
+fn extract_string_field<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(serde_json::Value::as_str))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,11 +137,14 @@ mod tests {
         assert_eq!(ev.session_key, "sess-abc");
         assert_eq!(ev.pane_id, Some("%3".to_owned()));
         assert_eq!(ev.event_type, "lifecycle.running");
-        assert_eq!(ev.payload, serde_json::json!({"tool": "bash"}));
+        assert_eq!(ev.payload["tool"], "bash");
+        assert_eq!(ev.payload["claude_hook"]["hook_type"], "tool_start");
+        assert_eq!(ev.payload["claude_hook"]["tool_name"], "bash");
         assert!((ev.confidence - 1.0).abs() < f64::EPSILON);
         assert_eq!(ev.source_event_id, Some("h-001".to_owned()));
         assert!(ev.pane_generation.is_none());
         assert!(ev.pane_birth_ts.is_none());
+        assert_eq!(ev.actual_activity_at, Some(raw.timestamp));
     }
 
     #[test]
@@ -206,6 +236,10 @@ mod tests {
         let raw = notification_event(Some("permission_prompt"));
         let ev = translate(&raw);
         assert_eq!(ev.event_type, "activity.waiting_approval");
+        assert_eq!(
+            ev.payload["claude_hook"]["notification_type"],
+            "permission_prompt"
+        );
     }
 
     #[test]
@@ -248,6 +282,7 @@ mod tests {
         let raw = sample_event("PreToolUse", None);
         let ev = translate(&raw);
         assert_eq!(ev.event_type, "activity.running");
+        assert_eq!(ev.payload["claude_hook"]["hook_type"], "PreToolUse");
     }
 
     #[test]
@@ -255,5 +290,30 @@ mod tests {
         let raw = sample_event("PostToolUse", None);
         let ev = translate(&raw);
         assert_eq!(ev.event_type, "activity.running");
+        assert_eq!(ev.payload["claude_hook"]["hook_type"], "PostToolUse");
+    }
+
+    #[test]
+    fn permission_request_payload_preserves_hook_metadata() {
+        let mut raw = sample_event("PermissionRequest", Some("%4"));
+        raw.data = serde_json::json!({
+            "tool_name": "Bash",
+            "request_id": "req-123",
+            "description": "Run npm install"
+        });
+        let ev = translate(&raw);
+        assert_eq!(ev.event_type, "activity.waiting_approval");
+        assert_eq!(ev.payload["claude_hook"]["hook_type"], "PermissionRequest");
+        assert_eq!(ev.payload["claude_hook"]["tool_name"], "Bash");
+        assert_eq!(ev.payload["claude_hook"]["request_id"], "req-123");
+        assert_eq!(ev.payload["description"], "Run npm install");
+    }
+
+    #[test]
+    fn stop_payload_preserves_hook_type_for_v3_normalization() {
+        let raw = sample_event("Stop", Some("%4"));
+        let ev = translate(&raw);
+        assert_eq!(ev.event_type, "activity.waiting_input");
+        assert_eq!(ev.payload["claude_hook"]["hook_type"], "Stop");
     }
 }
