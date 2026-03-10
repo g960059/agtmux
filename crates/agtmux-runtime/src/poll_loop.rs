@@ -1756,6 +1756,59 @@ mod tests {
         let _ = fs::remove_dir_all(temp);
     }
 
+    #[tokio::test]
+    async fn poll_tick_discovers_codex_jsonl_via_home_dot_codex_fallback() {
+        let _env_lock = ENV_LOCK.lock().expect("env lock");
+        let temp = temp_dir("codex-home-fallback");
+        let home_dir = temp.join("home");
+        let codex_home = home_dir.join(".codex");
+        let project_dir = temp.join("project");
+        fs::create_dir_all(&project_dir).expect("project dir");
+        let _session_path = write_codex_session_file(
+            &codex_home,
+            &project_dir,
+            &[r#"{"type":"event_msg","payload":{"type":"task_started"}}"#],
+        );
+
+        let _home = TestEnvGuard::set("HOME", home_dir.to_str().expect("utf8 path"));
+        let _codex_home = TestEnvGuard::set("CODEX_HOME", "");
+        let backend = Arc::new(FakeTmuxBackend::new().with_pane_cwd(
+            "%0",
+            "main",
+            "node",
+            "$ ls",
+            project_dir.to_str().expect("utf8 path"),
+        ));
+        let state = new_state();
+
+        poll_tick(&backend, &state).await.expect("tick");
+
+        let st = state.lock().await;
+        let managed = st.daemon.list_panes();
+        assert_eq!(
+            managed.len(),
+            1,
+            "HOME fallback should discover Codex JSONL"
+        );
+        assert_eq!(managed[0].provider.map(|p| p.as_str()), Some("codex"));
+
+        let payload = st.sync_v3.build_bootstrap(Utc::now());
+        let pane = payload
+            .panes
+            .iter()
+            .find(|pane| pane.pane_id == "%0")
+            .expect("sync-v3 pane row");
+        assert_eq!(
+            pane.thread.lifecycle,
+            agtmux_core_v5::sync_v3::ThreadLifecycleV3::Active
+        );
+        assert_eq!(pane.provider, Some(Provider::Codex));
+        assert_eq!(pane.presence, agtmux_core_v5::sync_v3::PresenceV3::Managed);
+
+        drop(st);
+        let _ = fs::remove_dir_all(temp);
+    }
+
     #[test]
     fn codex_jsonl_candidates_include_neutral_node_runtime() {
         assert!(is_codex_jsonl_candidate(Some("codex"), "zsh"));

@@ -927,3 +927,19 @@ Phase 7 (Distribution) と独立して実施可能。
   - Notes:
     - linked-session row fan-out from T-XTERM-A6f remains in place; this slice only changes same-location exact-identity churn behavior in the v3 changes lane
     - provider truth is still driven by `presence` / `provider` / thread fields, not by freshness badges alone
+
+- [x] T-XTERM-A6h (P0) Producer fix: Codex JSONL HOME fallback resolves to `~/.codex` so reducer truth can replace managed fallback inactive — DONE (2026-03-09)
+  - 目的: `CODEX_HOME` unset の live harness でも Codex transcripts を `~/.codex/sessions` から discover し、sync-v3 exact row が `managed/not_loaded` fallback に留まらず reducer-backed running truth へ昇格できるようにする
+  - Fresh producer proof (2026-03-09):
+    - term-like 2-pane interactive repro では exact Codex row が `provider=codex presence=managed` まで surfacing する一方、`list_source_health` の `codex_jsonl` は run 中ずっと `down` のままだった
+    - 同じ run で matching transcript file 自体には `task_started`, `user_message`, `function_call`, `function_call_output`, `task_complete` が存在した
+    - root cause は `agtmux-source-codex-jsonl::discovery::codex_home_dir_from_env()` が `HOME` fallback を `~/sessions` 扱いしており、実際の `~/.codex/sessions` を scan していなかった点
+  - Deliverables:
+    - `codex_home_dir_from_env()` fallback を `HOME/.codex` に修正
+    - source unit test で HOME-only env が `~/.codex` を返すことを固定
+    - runtime poll tick test で `CODEX_HOME` unset + `HOME/.codex/sessions` transcript から Codex pane が sync-v3 `thread.lifecycle=active` に到達することを固定
+  - Evidence:
+    - `cargo test -p agtmux-source-codex-jsonl codex_home_dir_falls_back_to_home_env -- --nocapture` PASS
+    - `cargo test -p agtmux poll_tick_discovers_codex_jsonl_via_home_dot_codex_fallback -- --nocapture` PASS
+  - Notes:
+    - this slice fixes discovery/binding only; Codex FSM semantics stay unchanged because the matched live transcript already contained `task_started` / `function_call` and was simply never discovered

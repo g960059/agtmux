@@ -302,7 +302,7 @@ fn codex_home_dir_from_env(env: &HashMap<String, String>) -> Option<PathBuf> {
     env.get("HOME")
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
+        .map(|home| PathBuf::from(home).join(".codex"))
 }
 
 #[cfg(test)]
@@ -497,7 +497,7 @@ mod tests {
         let env = HashMap::from([("HOME".to_string(), "/Users/vm".to_string())]);
 
         let resolved = codex_home_dir_from_env(&env);
-        assert_eq!(resolved, Some(PathBuf::from("/Users/vm")));
+        assert_eq!(resolved, Some(PathBuf::from("/Users/vm/.codex")));
     }
 
     #[test]

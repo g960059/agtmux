@@ -6,6 +6,47 @@
 
 ---
 
+## 2026-03-09 — Codex strict running-state contradiction: source discovery bug isolated and fixed
+
+### Summary
+
+- Term-like live repro no longer pointed at timing. Interactive Codex runs produced exact-row `provider=codex presence=managed`, but `PanePresentationState` stayed `inactive`.
+- Repo-owned 2-pane proof then showed the missing seam directly:
+  - `ui.bootstrap.v3` for the exact Codex pane stayed `thread.lifecycle=not_loaded`
+  - `list_source_health` kept `codex_jsonl=status=down` for the entire run
+  - the matched transcript under `~/.codex/sessions/...jsonl` already contained `task_started`, `user_message`, `function_call`, `function_call_output`, and `task_complete`
+- Conclusion: this was not a Codex FSM / reducer mapping bug. The reducer never came alive because discovery never scanned the real transcript directory when `CODEX_HOME` was unset.
+
+### Root Cause
+
+- `crates/agtmux-source-codex-jsonl/src/discovery.rs`
+  - `codex_home_dir_from_env()` returned `HOME` instead of `HOME/.codex`
+  - downstream `discover_sessions()` therefore scanned `~/sessions`, while real Codex CLI transcripts lived in `~/.codex/sessions`
+- That left sync-v3 on the managed fallback row:
+  - `provider=codex`
+  - `presence=managed`
+  - `thread.lifecycle=not_loaded`
+  - presentation `primary=inactive`
+
+### Fix
+
+- Fallback path changed from `HOME` to `HOME/.codex`
+- Added focused source/runtime coverage:
+  - HOME-only env resolves to `~/.codex`
+  - poll tick discovers Codex JSONL from `HOME/.codex/sessions` without `CODEX_HOME`
+  - resulting sync-v3 bootstrap row becomes reducer-backed `thread.lifecycle=active`
+
+### Gate
+
+- `cargo fmt --all`
+- `cargo test -p agtmux-source-codex-jsonl codex_home_dir_falls_back_to_home_env -- --nocapture`
+- `cargo test -p agtmux poll_tick_discovers_codex_jsonl_via_home_dot_codex_fallback -- --nocapture`
+- `cargo test -p agtmux poll_tick_discovers_codex_jsonl_from_node_runtime_without_process_hint -- --nocapture`
+- `cargo test -p agtmux-source-codex-jsonl discover_sessions_finds_matching_jsonl -- --nocapture`
+- repo-owned term-like live rerun with fresh `target/debug/agtmux`: exact Codex row reached `provider=codex presence=managed thread.lifecycle=active`, and `codex_jsonl` source health flipped `down -> healthy` on the same path
+
+---
+
 ## 2026-03-03 — Phase 9 完了: Codex JSONL セマンティックソース 実装
 
 ### T-codex01a/b/c 完了 (2026-03-03)
