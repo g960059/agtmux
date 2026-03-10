@@ -62,9 +62,12 @@ run_scenario "multi-agent-same-session" "$SCENARIOS_DIR/multi-agent-same-session
 
 # same-cwd-multi-pane: defaults to codex (most relevant for T-124 regression)
 if [ "$PROVIDER" = "codex" ]; then
+    run_scenario "explicit-tmux-socket-codex-midflight-proof" \
+        "$SCENARIOS_DIR/explicit-tmux-socket-codex-midflight-proof.sh"
     run_scenario "same-cwd-multi-pane" "$SCENARIOS_DIR/same-cwd-multi-pane.sh"
     run_scenario "same-session-codex-no-bleed" "$SCENARIOS_DIR/same-session-codex-no-bleed.sh"
 else
+    echo "[SKIP] explicit-tmux-socket-codex-midflight-proof (codex-specific, PROVIDER=${PROVIDER})"
     echo "[SKIP] same-cwd-multi-pane (codex-specific, PROVIDER=${PROVIDER})"
     echo "[SKIP] same-session-codex-no-bleed (codex-specific, PROVIDER=${PROVIDER})"
 fi

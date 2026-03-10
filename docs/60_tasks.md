@@ -852,3 +852,24 @@ Phase 7 (Distribution) と独立して実施可能。
   - Notes:
     - appDirectSocketProbe proving `tmux -S <socket> list-panes` can see `%0 zsh` is inventory truth only
     - managed/provider truth begins after Codex source semantics arrive, not before `codex exec` is sent
+
+- [x] T-XTERM-A6d (P0) Repo-owned proof: exact-socket Codex mid-flight sync-v3 truth exists before completion — DONE (2026-03-09)
+  - 目的: flaky XCUITest に依存せず、app-like explicit `--tmux-socket` daemon env で長めの real Codex task 中の same-pane truth を repo-owned scenario で固定し、producer miss と post-completion timing/demotion を切り分ける
+  - Deliverables:
+    - codex-specific exact-socket e2e scenario を追加し、5-10 秒の mid-flight 時点で同一 pane について:
+      - tmux exact-socket row (`session|window|pane|pid|current_command`)
+      - daemon `list_panes_snapshot`
+      - daemon `ui.bootstrap.v3`
+      を同時採取する
+    - 同シナリオで completion 後 snapshot も残し、managed-completion or shell-demotion のどちらになったかを明示する
+    - harness に generic daemon JSON-RPC helper を追加して v3 wire proof を shell scenario から直接取得できるようにする
+  - Evidence:
+    - `bash -n scripts/tests/e2e/harness/common.sh` PASS
+    - `bash -n scripts/tests/e2e/scenarios/explicit-tmux-socket-codex-midflight-proof.sh` PASS
+    - `bash -n scripts/tests/e2e/online/run-all.sh` PASS
+    - `PROVIDER=codex bash scripts/tests/e2e/scenarios/explicit-tmux-socket-codex-midflight-proof.sh` PASS
+  - Notes:
+    - observed proof on this machine:
+      - mid-flight @8s: tmux exact-socket row and both daemon surfaces agreed on the same pane identity, with `list_panes_snapshot` + `ui.bootstrap.v3` both `presence=managed provider=codex`
+      - immediate post-completion snapshot still showed managed Codex completion truth (`activity_state=WaitingInput` in sync-v2 compat, `thread.lifecycle=idle + turn.outcome=completed` in sync-v3)
+    - this means the remaining term-side red was not reproduced as a producer miss in repo-owned exact-socket proof

@@ -3219,3 +3219,55 @@ JSONL スキャナーなし) を発見 → デーモンが stale binary で起�
 - `cargo test -p agtmux plain_shell_inventory_remains_unmanaged_in_bootstrap_until_provider_truth_arrives -- --nocapture` PASS
 - `cargo test -p agtmux ui_bootstrap_v3_emits_unmanaged_row_when_no_semantic_truth_exists -- --nocapture` PASS
 - `cargo test -p agtmux ui_bootstrap_v3_emits_strict_identity_and_normalized_codex_truth -- --nocapture` PASS
+
+## 2026-03-09 — T-XTERM-A6d done: repo-owned exact-socket Codex proof shows managed truth mid-flight
+
+### Summary
+- To get out of the flaky XCUITest harness loop, added a repo-owned explicit-socket Codex proof scenario that runs a deliberately long `codex exec` task under the same app-like daemon env shape (`env -i`, explicit `--tmux-socket`, normalized PATH/HOME/USER/etc.).
+- The scenario captures the same pane across three surfaces during the live run:
+  - tmux exact-socket row: `session|window|pane|pid|current_command`
+  - daemon `list_panes_snapshot`
+  - daemon `ui.bootstrap.v3`
+- On this machine the proof is green:
+  - mid-flight at 8 seconds, both daemon surfaces showed `presence=managed provider=codex` for the exact pane
+  - immediate post-completion snapshot still showed managed Codex completion truth
+    - sync-v2 compat row: `activity_state=WaitingInput`
+    - sync-v3 row: `agent.lifecycle=completed`, `thread.lifecycle=idle`, `turn.outcome=completed`
+
+### Concrete observed proof
+- Mid-flight snapshot (`PROVIDER=codex bash scripts/tests/e2e/scenarios/explicit-tmux-socket-codex-midflight-proof.sh`)
+  - tmux exact-socket row:
+    - `e2e-explicit-codex-midflight-<pid>|@0|%0|<pane_pid>|node`
+  - `list_panes_snapshot` target row:
+    - `presence=managed`
+    - `provider=codex`
+    - `current_cmd=node`
+    - `evidence_mode=deterministic`
+  - `ui.bootstrap.v3` target row:
+    - `presence=managed`
+    - `provider=codex`
+    - `thread.lifecycle=active`
+    - `thread.execution=tool_running`
+- Immediate post-completion snapshot:
+  - tmux exact-socket row had already returned to `...|zsh`
+  - daemon `list_panes_snapshot` still held managed Codex completion truth for that tick
+  - `ui.bootstrap.v3` still held managed completion truth for that tick
+
+### Implementation notes
+- Added `daemon_rpc()` to `scripts/tests/e2e/harness/common.sh`
+  - shell scenarios can now query daemon JSON-RPC endpoints directly, including `list_panes_snapshot` and `ui.bootstrap.v3`
+- Added `scripts/tests/e2e/scenarios/explicit-tmux-socket-codex-midflight-proof.sh`
+  - codex-specific exact-socket proof scenario
+  - writes mid-flight and final probe triplets under its temp workdir for repro/debug
+- Added the new scenario to `scripts/tests/e2e/online/run-all.sh` for `PROVIDER=codex`
+
+### Consumer implication
+- The remaining term-side red after provider launch was not reproduced as an upstream producer miss in the repo-owned exact-socket lane.
+- Producer truth exists mid-flight for the exact pane.
+- A final unmanaged shell snapshot in term can still be a later observation after the producer has already surfaced managed/run or managed/completed truth earlier.
+
+### Gate
+- `bash -n scripts/tests/e2e/harness/common.sh` PASS
+- `bash -n scripts/tests/e2e/scenarios/explicit-tmux-socket-codex-midflight-proof.sh` PASS
+- `bash -n scripts/tests/e2e/online/run-all.sh` PASS
+- `PROVIDER=codex bash scripts/tests/e2e/scenarios/explicit-tmux-socket-codex-midflight-proof.sh` PASS

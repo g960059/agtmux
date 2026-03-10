@@ -76,6 +76,84 @@ jq_get() {
         2>/dev/null || echo "null"
 }
 
+# ── Daemon JSON-RPC helpers ───────────────────────────────────────────────
+
+daemon_rpc() {
+    local socket="$1" method="$2"
+    local params="${3:-{}}"
+
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "$socket" "$method" "$params" <<'PY'
+import json
+import socket
+import sys
+
+socket_path, method, params_json = sys.argv[1], sys.argv[2], sys.argv[3]
+params = json.loads(params_json)
+request = {
+    "jsonrpc": "2.0",
+    "method": method,
+    "params": params,
+    "id": 1,
+}
+
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+    client.connect(socket_path)
+    client.sendall((json.dumps(request) + "\n").encode("utf-8"))
+    client.shutdown(socket.SHUT_WR)
+    response = b""
+    while True:
+        chunk = client.recv(65536)
+        if not chunk:
+            break
+        response += chunk
+
+payload = json.loads(response.decode("utf-8").strip())
+if "error" in payload:
+    raise SystemExit(json.dumps(payload["error"]))
+print(json.dumps(payload.get("result")))
+PY
+        return
+    fi
+
+    if command -v python >/dev/null 2>&1; then
+        python - "$socket" "$method" "$params" <<'PY'
+import json
+import socket
+import sys
+
+socket_path, method, params_json = sys.argv[1], sys.argv[2], sys.argv[3]
+params = json.loads(params_json)
+request = {
+    "jsonrpc": "2.0",
+    "method": method,
+    "params": params,
+    "id": 1,
+}
+
+client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+client.connect(socket_path)
+client.sendall((json.dumps(request) + "\n").encode("utf-8"))
+client.shutdown(socket.SHUT_WR)
+response = b""
+while True:
+    chunk = client.recv(65536)
+    if not chunk:
+        break
+    response += chunk
+client.close()
+
+payload = json.loads(response.decode("utf-8").strip())
+if "error" in payload:
+    raise SystemExit(json.dumps(payload["error"]))
+print(json.dumps(payload.get("result")))
+PY
+        return
+    fi
+
+    fail "python3 or python is required for daemon_rpc"
+}
+
 # ── State polling ──────────────────────────────────────────────────────────
 
 # wait_for_agtmux_state SOCKET PANE_ID FIELD EXPECTED [MAX_WAIT_S]

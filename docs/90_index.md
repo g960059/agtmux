@@ -27,7 +27,11 @@
 ## Cross-Repo V2 A6
 - Source of truth: `docs/20_spec.md` (FR-069), `docs/60_tasks.md` (`T-XTERM-A6`)
 - Scratch handover: `/tmp/agtmux-app-child-bootstrap-still-empty-after-term-hardening-20260309.md`
-- Current scope: exact-socket inventory and sync-v3 bootstrap now appear consistent for the pre-launch plain-shell phase: the same `%pane` is visible on the custom socket as `zsh`, and producer bootstrap intentionally keeps it as unmanaged `shell:%pane` until provider truth arrives. The remaining cross-repo work is downstream gating on that producer contract, not a bootstrap identity mismatch.
+- Current scope: repo-owned exact-socket Codex proof is now green for both phases:
+  - pre-launch plain shell pane stays unmanaged `shell:%pane` until provider truth arrives
+  - mid-flight during a long-running real Codex task, `list_panes_snapshot` and `ui.bootstrap.v3` both surface the exact pane as `managed provider=codex`
+  - immediate post-completion snapshot still shows managed completion truth before any later shell demotion
+  - remaining term-side red was therefore not reproduced as an upstream producer miss in the repo-owned exact-socket lane
 
 ## Cross-Repo V2 A7
 - Source of truth: `docs/60_tasks.md` (`T-XTERM-A7`)
