@@ -31,7 +31,8 @@
   - pre-launch plain shell pane stays unmanaged `shell:%pane` until provider truth arrives
   - mid-flight during a long-running real Codex task, `list_panes_snapshot` and `ui.bootstrap.v3` both surface the exact pane as `managed provider=codex`
   - immediate post-completion snapshot still shows managed completion truth before any later shell demotion
-  - remaining term-side red was therefore not reproduced as an upstream producer miss in the repo-owned exact-socket lane
+  - after the later T-149 contradiction, runtime Step 6a was hardened so a neutral `node` pane can still promote from Codex JSONL/CWD truth without first requiring `process_hint=codex`
+  - remaining term-side red from the earlier proof was therefore not a sync-v3 wire collapse bug; it was a producer managed-truth formation gap specific to Codex node runtimes
 
 ## Cross-Repo V2 A7
 - Source of truth: `docs/60_tasks.md` (`T-XTERM-A7`)

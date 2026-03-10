@@ -873,3 +873,17 @@ Phase 7 (Distribution) と独立して実施可能。
       - mid-flight @8s: tmux exact-socket row and both daemon surfaces agreed on the same pane identity, with `list_panes_snapshot` + `ui.bootstrap.v3` both `presence=managed provider=codex`
       - immediate post-completion snapshot still showed managed Codex completion truth (`activity_state=WaitingInput` in sync-v2 compat, `thread.lifecycle=idle + turn.outcome=completed` in sync-v3)
     - this means the remaining term-side red was not reproduced as a producer miss in repo-owned exact-socket proof
+
+- [x] T-XTERM-A6e (P0) Producer fix: Codex node-runtime discovery no longer requires a direct process hint — DONE (2026-03-09)
+  - 目的: f559187 exact-socket proof と term T-149 contradiction を reconcile し、exact socket で `pane_current_command=node` を観測しても app-child bootstrap が `shell:%pane` unmanaged のまま固着する drift を producer-side runtime で解消する
+  - Deliverables:
+    - Codex JSONL discovery を `process_hint=codex` 専用ゲートから広げ、neutral runtime `node` + tmux current_path でも candidate に含める
+    - Codex JSONL discovery を coarse `metadata_failure_reason` gate から外し、deep process inspection が degraded な tick でも tmux/CODEX_HOME 側の deterministic truth を引けるようにする
+    - Codex session root resolution を `CODEX_HOME` 優先にし、app-child env と shell proof env の差で `~/.codex/sessions` を取り逃がさないようにする
+  - Evidence:
+    - `cargo test -p agtmux poll_tick_discovers_codex_jsonl_from_node_runtime_without_process_hint -- --nocapture` PASS
+    - `cargo test -p agtmux codex_jsonl_candidates_include_neutral_node_runtime -- --nocapture` PASS
+    - `cargo test -p agtmux-source-codex-jsonl codex_home_dir_ -- --nocapture` PASS
+  - Notes:
+    - explicit proof path and term app-child path still differed materially in one place: shell proof already had direct Codex process truth, while app-child could remain at `current_cmd=node` and needed JSONL/CWD truth to promote
+    - this slice keeps sync-v3 semantics unchanged; it only hardens producer managed-truth formation for Codex node runtimes

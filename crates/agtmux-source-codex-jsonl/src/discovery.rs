@@ -7,7 +7,7 @@
 //! sessions per pane instead of letting every pane claim the newest transcript.
 
 use agtmux_core_v5::system_bin::resolve_lsof_bin;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -43,10 +43,10 @@ pub struct CodexSessionDiscovery {
 
 /// Top-level entry point: discover Codex JSONL sessions for given pane hints.
 pub fn discover_sessions(hints: &[CodexPaneHint]) -> Vec<CodexSessionDiscovery> {
-    let codex_sessions_dir = match home_dir() {
-        Some(home) => home.join(".codex").join("sessions"),
+    let codex_sessions_dir = match codex_home_dir() {
+        Some(codex_home) => codex_home.join("sessions"),
         None => {
-            warn!("could not determine home directory for Codex JSONL discovery");
+            warn!("could not determine CODEX_HOME/HOME for Codex JSONL discovery");
             return Vec::new();
         }
     };
@@ -285,8 +285,24 @@ fn session_key_from_path(path: &Path) -> String {
         .unwrap_or_else(|| "unknown-codex-session".to_owned())
 }
 
-fn home_dir() -> Option<PathBuf> {
-    std::env::var("HOME").ok().map(PathBuf::from)
+fn codex_home_dir() -> Option<PathBuf> {
+    let env = std::env::vars().collect::<HashMap<_, _>>();
+    codex_home_dir_from_env(&env)
+}
+
+fn codex_home_dir_from_env(env: &HashMap<String, String>) -> Option<PathBuf> {
+    if let Some(codex_home) = env
+        .get("CODEX_HOME")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        return Some(PathBuf::from(codex_home));
+    }
+
+    env.get("HOME")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 #[cfg(test)]
@@ -460,6 +476,28 @@ mod tests {
         // PID 999999999 is almost certainly invalid
         let result = get_cwd_via_lsof(999999999);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn codex_home_dir_prefers_codex_home_env() {
+        let env = HashMap::from([
+            ("HOME".to_string(), "/Users/vm".to_string()),
+            (
+                "CODEX_HOME".to_string(),
+                "/tmp/custom-codex-home".to_string(),
+            ),
+        ]);
+
+        let resolved = codex_home_dir_from_env(&env);
+        assert_eq!(resolved, Some(PathBuf::from("/tmp/custom-codex-home")));
+    }
+
+    #[test]
+    fn codex_home_dir_falls_back_to_home_env() {
+        let env = HashMap::from([("HOME".to_string(), "/Users/vm".to_string())]);
+
+        let resolved = codex_home_dir_from_env(&env);
+        assert_eq!(resolved, Some(PathBuf::from("/Users/vm")));
     }
 
     #[test]

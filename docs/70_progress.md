@@ -3271,3 +3271,39 @@ JSONL スキャナーなし) を発見 → デーモンが stale binary で起�
 - `bash -n scripts/tests/e2e/scenarios/explicit-tmux-socket-codex-midflight-proof.sh` PASS
 - `bash -n scripts/tests/e2e/online/run-all.sh` PASS
 - `PROVIDER=codex bash scripts/tests/e2e/scenarios/explicit-tmux-socket-codex-midflight-proof.sh` PASS
+
+## 2026-03-09 — T-XTERM-A6e done: Codex node-runtime discovery no longer needs a direct process hint
+
+### Contradiction analysis
+- The fresh term contradiction against `f559187` was real enough to require an upstream runtime comparison, not consumer reinterpretation:
+  - repo-owned proof: exact-socket daemon launched from the shell, mid-flight pane truth becomes `managed provider=codex`
+  - term T-149: exact-socket wait gate observes `pane_current_command=node|codex` before bootstrap polling, but `ui.bootstrap.v3` stays `unmanaged provider=nil` for 45 seconds
+- Reading the runtime path showed a remaining producer-side dependency that the shell proof did not need:
+  - Step 6a (`poll_loop.rs`) only attempted Codex JSONL discovery when `process_hint == "codex"`
+  - the same step also skipped entirely when `metadata_failure_reason` was set, even though tmux current_path + Codex session files do not depend on deep process inspection success
+  - `agtmux-source-codex-jsonl` still resolved the sessions root from `HOME` only, instead of preferring `CODEX_HOME`
+
+### Why this fits the term contradiction
+- In the term lane, the exact socket already reported `pane_current_command=node|codex`, which means the same pane could legitimately sit on a neutral `node` runtime while Codex is live.
+- If that pane does not surface a direct `process_hint=codex` at the same tick, the previous daemon code would not even attempt Codex JSONL discovery for it.
+- That makes the app-child lane materially different from the shell proof path:
+  - shell proof can still win from direct process truth
+  - app-child lane can need tmux current_path + CODEX_HOME + JSONL bootstrap truth to promote the same pane
+
+### Implementation notes
+- `crates/agtmux-runtime/src/poll_loop.rs`
+  - added an explicit Codex candidate helper that includes neutral `node` runtimes while still excluding shell / Claude / unknown hints
+  - removed the coarse `metadata_failure_reason` gate from Step 6a so Codex JSONL discovery can still run when deep process inspection is degraded
+  - added a focused runtime regression test proving that a `node` pane with no direct process hint is promoted from a real Codex session file
+- `crates/agtmux-source-codex-jsonl/src/discovery.rs`
+  - session-root resolution now prefers `CODEX_HOME` before falling back to `HOME/.codex`
+  - added pure tests for `CODEX_HOME` vs `HOME` resolution
+
+### Consumer implication
+- The earlier exact-socket proof and the term contradiction were not mutually exclusive: the producer still had a node-runtime-specific gap in managed-truth formation.
+- After this fix, Codex exact-socket managed promotion no longer depends on getting a direct `process_hint=codex` first.
+
+### Gate
+- `cargo test -p agtmux poll_tick_discovers_codex_jsonl_from_node_runtime_without_process_hint -- --nocapture` PASS
+- `cargo test -p agtmux codex_jsonl_candidates_include_neutral_node_runtime -- --nocapture` PASS
+- `cargo test -p agtmux-source-codex-jsonl codex_home_dir_ -- --nocapture` PASS

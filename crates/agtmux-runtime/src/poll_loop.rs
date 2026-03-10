@@ -301,6 +301,17 @@ fn metadata_backoff_delay_ms(streak: u32) -> i64 {
     delay.min(MAX_MS)
 }
 
+fn is_codex_jsonl_candidate(process_hint: Option<&str>, current_cmd: &str) -> bool {
+    const CODEX_JSONL_RUNTIME_CMDS: &[&str] = &["node"];
+
+    match process_hint {
+        Some("codex") => true,
+        Some("shell") | Some("claude") => false,
+        Some(_) => false,
+        None => CODEX_JSONL_RUNTIME_CMDS.contains(&current_cmd),
+    }
+}
+
 fn record_runtime_error(st: &mut DaemonState, detail: impl Into<String>) {
     st.runtime_last_error = Some(detail.into());
 }
@@ -530,16 +541,27 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
     // Uses agtmux-source-codex-jsonl to detect Codex sessions by reading
     // their JSONL files and running a semantic FSM (not mtime heuristics).
     //
-    // Only panes with process_hint="codex" are included.
-    if !metadata_backoff_active && metadata_failure_reason.is_none() {
+    // Neutral `node` runtimes are also valid candidates here. In app-child
+    // launch paths, tmux can already show `pane_current_command=node` on the
+    // correct socket while deep process inspection is degraded. Discovery must
+    // still be able to recover Codex truth from tmux CWD + CODEX_HOME.
+    if !metadata_backoff_active {
         let snapshot_hint: std::collections::HashMap<&str, Option<&str>> = snapshots
             .iter()
             .map(|s| (s.pane_id.as_str(), s.process_hint.as_deref()))
             .collect();
+        let snapshot_cmd: std::collections::HashMap<&str, &str> = snapshots
+            .iter()
+            .map(|s| (s.pane_id.as_str(), s.current_cmd.as_str()))
+            .collect();
 
         let codex_hints: Vec<CodexPaneHint> = panes
             .iter()
-            .filter(|p| snapshot_hint.get(p.pane_id.as_str()).copied().flatten() == Some("codex"))
+            .filter(|p| {
+                let process_hint = snapshot_hint.get(p.pane_id.as_str()).copied().flatten();
+                let current_cmd = snapshot_cmd.get(p.pane_id.as_str()).copied().unwrap_or("");
+                is_codex_jsonl_candidate(process_hint, current_cmd)
+            })
             .map(|p| {
                 let (pane_gen, pane_birth) = st
                     .generation_tracker
@@ -1070,6 +1092,9 @@ mod tests {
     use agtmux_tmux_v5::error::TmuxError;
     use chrono::DateTime;
     use std::collections::HashMap;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex as StdMutex;
 
     /// Fake tmux backend for integration testing.
     /// Configurable to return canned list-panes and capture-pane data.
@@ -1194,6 +1219,63 @@ mod tests {
             is_heartbeat: false,
             actual_activity_at: Some(observed_at),
         }
+    }
+
+    static ENV_LOCK: StdMutex<()> = StdMutex::new(());
+
+    struct TestEnvGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl TestEnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            // SAFETY: test-only env mutation is serialized via ENV_LOCK.
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for TestEnvGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.as_ref() {
+                // SAFETY: test-only env mutation is serialized via ENV_LOCK.
+                unsafe { std::env::set_var(self.key, previous) };
+            } else {
+                // SAFETY: test-only env mutation is serialized via ENV_LOCK.
+                unsafe { std::env::remove_var(self.key) };
+            }
+        }
+    }
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("valid unix epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("agtmux-{label}-{nonce}"));
+        fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    fn write_codex_session_file(codex_home: &Path, cwd: &Path, lines: &[&str]) -> PathBuf {
+        let day_dir = codex_home
+            .join("sessions")
+            .join("2026")
+            .join("03")
+            .join("09");
+        fs::create_dir_all(&day_dir).expect("sessions dir");
+
+        let session_path = day_dir.join("midflight-proof.jsonl");
+        let mut payload = Vec::with_capacity(lines.len() + 1);
+        payload.push(format!(
+            r#"{{"type":"session_meta","payload":{{"type":"session_meta","cwd":"{}","sessionId":"sess-1"}}}}"#,
+            cwd.display()
+        ));
+        payload.extend(lines.iter().map(|line| (*line).to_string()));
+        fs::write(&session_path, payload.join("\n") + "\n").expect("session file");
+        session_path
     }
 
     // --- Integration tests ---
@@ -1632,6 +1714,54 @@ mod tests {
             !managed.is_empty(),
             "codex jsonl event should create managed pane"
         );
+    }
+
+    #[tokio::test]
+    async fn poll_tick_discovers_codex_jsonl_from_node_runtime_without_process_hint() {
+        let _env_lock = ENV_LOCK.lock().expect("env lock");
+        let temp = temp_dir("codex-node-runtime");
+        let codex_home = temp.join("codex-home");
+        let project_dir = temp.join("project");
+        fs::create_dir_all(&project_dir).expect("project dir");
+        let _session_path = write_codex_session_file(
+            &codex_home,
+            &project_dir,
+            &[r#"{"type":"event_msg","payload":{"type":"task_started"}}"#],
+        );
+
+        let _codex_home = TestEnvGuard::set("CODEX_HOME", codex_home.to_str().expect("utf8 path"));
+        let backend = Arc::new(FakeTmuxBackend::new().with_pane_cwd(
+            "%0",
+            "main",
+            "node",
+            "$ ls",
+            project_dir.to_str().expect("utf8 path"),
+        ));
+        let state = new_state();
+
+        poll_tick(&backend, &state).await.expect("tick");
+
+        let st = state.lock().await;
+        let managed = st.daemon.list_panes();
+        assert_eq!(
+            managed.len(),
+            1,
+            "Codex JSONL discovery should manage node runtime"
+        );
+        assert_eq!(managed[0].provider.map(|p| p.as_str()), Some("codex"));
+
+        drop(st);
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn codex_jsonl_candidates_include_neutral_node_runtime() {
+        assert!(is_codex_jsonl_candidate(Some("codex"), "zsh"));
+        assert!(is_codex_jsonl_candidate(None, "node"));
+        assert!(!is_codex_jsonl_candidate(Some("shell"), "node"));
+        assert!(!is_codex_jsonl_candidate(Some("claude"), "node"));
+        assert!(!is_codex_jsonl_candidate(Some("runtime_unknown"), "node"));
+        assert!(!is_codex_jsonl_candidate(None, "zsh"));
     }
 
     #[tokio::test]
