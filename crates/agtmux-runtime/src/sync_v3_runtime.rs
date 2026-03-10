@@ -435,7 +435,7 @@ fn build_managed_snapshot(
     pane.pane_id = tmux_pane.pane_id.clone();
     pane.pane_instance_id = pane_instance_id;
     pane.presence = PresenceV3::Managed;
-    pane.freshness = freshness_from_updated_at(pane.updated_at, now);
+    pane.freshness = freshness_for_managed_snapshot(&pane, now);
     pane.pending_requests
         .retain(|request| matches!(request.status, PendingRequestStatusV3::Pending));
     pane
@@ -532,6 +532,20 @@ fn freshness_from_updated_at(updated_at: DateTime<Utc>, now: DateTime<Utc>) -> F
         ResolverFreshness::Down => FreshnessState::Down,
     };
     build_freshness_summary(freshness, freshness, None)
+}
+
+fn freshness_for_managed_snapshot(
+    snapshot: &SyncV3PaneSnapshot,
+    now: DateTime<Utc>,
+) -> FreshnessSummaryV3 {
+    if matches!(
+        snapshot.thread.lifecycle,
+        ThreadLifecycleV3::Idle | ThreadLifecycleV3::Interrupted | ThreadLifecycleV3::Errored
+    ) {
+        snapshot.freshness.clone()
+    } else {
+        freshness_from_updated_at(snapshot.updated_at, now)
+    }
 }
 
 #[cfg(test)]
@@ -833,6 +847,58 @@ mod tests {
         let down_pane = &down_payload.panes[0];
         assert_eq!(down_pane.thread.lifecycle, ThreadLifecycleV3::NotLoaded);
         assert_eq!(down_pane.freshness.snapshot, FreshnessState::Down);
+    }
+
+    #[test]
+    fn settled_managed_rows_preserve_freshness_after_fifteen_seconds() {
+        let pane = tmux_pane("%88", "workbench", "@8", "codex");
+        let pane_instance_id = PaneInstanceId {
+            pane_id: "%88".to_string(),
+            generation: 3,
+            birth_ts: ts(0),
+        };
+
+        for lifecycle in [
+            ThreadLifecycleV3::Idle,
+            ThreadLifecycleV3::Interrupted,
+            ThreadLifecycleV3::Errored,
+        ] {
+            let snapshot = SyncV3PaneSnapshot {
+                session_name: "workbench".to_string(),
+                window_id: "@8".to_string(),
+                session_key: "codex:%88".to_string(),
+                pane_id: "%88".to_string(),
+                pane_instance_id: pane_instance_id.clone(),
+                provider: Some(Provider::Codex),
+                presence: PresenceV3::Managed,
+                agent: AgentStateV3 {
+                    lifecycle: AgentLifecycleV3::Completed,
+                },
+                thread: ThreadStateV3 {
+                    lifecycle,
+                    blocking: ThreadBlockingV3::None,
+                    execution: ThreadExecutionV3::None,
+                    flags: ThreadFlagsV3::default(),
+                    turn: TurnStateV3 {
+                        outcome: TurnOutcomeV3::Completed,
+                        sequence: Some(7),
+                        started_at: Some(ts(1)),
+                        completed_at: Some(ts(10)),
+                    },
+                },
+                pending_requests: Vec::new(),
+                attention: AttentionSummaryV3::none(),
+                freshness: FreshnessSummaryV3::fresh(),
+                provider_raw: ProviderRawEnvelopeV3::default(),
+                updated_at: ts(10),
+            };
+
+            let pane = build_managed_snapshot(&snapshot, &pane, pane_instance_id.clone(), ts(30));
+            assert_eq!(pane.thread.lifecycle, lifecycle);
+            assert_eq!(pane.freshness.snapshot, FreshnessState::Fresh);
+            assert_eq!(pane.freshness.blocking, FreshnessState::Fresh);
+            assert_eq!(pane.freshness.execution, FreshnessState::Fresh);
+        }
     }
 
     #[test]

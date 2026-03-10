@@ -1921,6 +1921,49 @@ mod tests {
     }
 
     #[test]
+    fn ui_bootstrap_v3_settled_managed_truth_does_not_decay_to_down_after_fifteen_seconds() {
+        let mut state = make_state();
+        let observed_at = Utc::now() - chrono::TimeDelta::seconds(20);
+        state.last_panes = vec![TmuxPaneInfo {
+            pane_id: "%12".to_string(),
+            session_id: "$5".to_string(),
+            session_name: "workbench".to_string(),
+            window_id: "@5".to_string(),
+            window_name: "main".to_string(),
+            current_cmd: "codex".to_string(),
+            ..Default::default()
+        }];
+        state.generation_tracker.update(&["%12"], observed_at);
+        state.sync_v3.apply_events(
+            &[codex_v3_event("%12", "task_complete", observed_at)],
+            &state.last_panes,
+            &state.generation_tracker,
+        );
+
+        let payload: UiBootstrapV3 = serde_json::from_value(build_ui_bootstrap_v3(&mut state))
+            .expect("ui.bootstrap.v3 should parse");
+        payload.validate().expect("ui.bootstrap.v3 should validate");
+
+        let pane = payload
+            .panes
+            .iter()
+            .find(|pane| pane.pane_id == "%12")
+            .expect("settled row");
+        assert_eq!(
+            pane.thread.lifecycle,
+            agtmux_core_v5::sync_v3::ThreadLifecycleV3::Idle
+        );
+        assert_eq!(
+            pane.thread.turn.outcome,
+            agtmux_core_v5::sync_v3::TurnOutcomeV3::Completed
+        );
+        assert_ne!(
+            pane.freshness.snapshot,
+            agtmux_core_v5::types::FreshnessState::Down
+        );
+    }
+
+    #[test]
     fn plain_shell_inventory_remains_unmanaged_in_bootstrap_until_provider_truth_arrives() {
         let mut state = make_state();
         let now = Utc::now();
