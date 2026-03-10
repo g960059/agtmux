@@ -275,7 +275,15 @@ fn bootstrap_event(
         pane_birth_ts: discovery.pane_birth_ts,
         source_event_id: None,
         event_type: sync_v2_compat::activity_event_type(ActivityState::Idle).to_owned(),
-        payload: serde_json::json!({}),
+        payload: serde_json::json!({
+            "line_type": "assistant",
+            "claude_jsonl": {
+                "line_type": "assistant",
+                "session_id": discovery.session_id,
+                "timestamp": actual_activity_at,
+                "bootstrap": true
+            }
+        }),
         confidence: 1.0,
         is_heartbeat: false, // KEY: updates last_real_activity in the projection
         actual_activity_at,
@@ -562,6 +570,14 @@ mod tests {
         assert_eq!(boot.pane_id, Some("%9".to_owned()));
         assert_eq!(boot.pane_generation, Some(3));
         assert_eq!(boot.observed_at, now());
+        assert_eq!(boot.payload["line_type"], "assistant");
+        assert_eq!(boot.payload["claude_jsonl"]["line_type"], "assistant");
+        assert_eq!(boot.payload["claude_jsonl"]["session_id"], "idle-sess");
+        assert_eq!(boot.payload["claude_jsonl"]["bootstrap"], true);
+        assert_eq!(
+            boot.payload["claude_jsonl"]["timestamp"],
+            serde_json::json!("2026-02-25T10:00:00Z")
+        );
 
         // SECOND poll → idle heartbeat (is_heartbeat=true), bootstrap is done.
         let events2 = ClaudeJsonlSourceState::poll_files(&mut watchers, &discoveries, now());
@@ -576,6 +592,10 @@ mod tests {
             "subsequent polls must emit heartbeat (is_heartbeat=true)"
         );
         assert_eq!(hb.event_type, "activity.idle");
+        assert!(
+            hb.payload.get("claude_jsonl").is_none(),
+            "ordinary idle heartbeat should remain compat-only"
+        );
 
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -633,11 +653,20 @@ mod tests {
             "first poll must be bootstrap (is_heartbeat=false)"
         );
         assert_eq!(events[0].event_type, "activity.idle");
+        assert_eq!(events[0].payload["line_type"], "assistant");
+        assert_eq!(events[0].payload["claude_jsonl"]["line_type"], "assistant");
+        assert_eq!(events[0].payload["claude_jsonl"]["session_id"], "meta-sess");
+        assert_eq!(events[0].payload["claude_jsonl"]["bootstrap"], true);
+        assert!(events[0].payload["claude_jsonl"]["timestamp"].is_null());
 
         // Second poll (no new lines): heartbeat emitted.
         let events2 = ClaudeJsonlSourceState::poll_files(&mut watchers, &discoveries, now());
         assert_eq!(events2.len(), 1, "second poll emits heartbeat");
         assert!(events2[0].is_heartbeat, "subsequent poll must be heartbeat");
+        assert!(
+            events2[0].payload.get("claude_jsonl").is_none(),
+            "ordinary idle heartbeat should remain compat-only"
+        );
 
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -702,6 +731,10 @@ mod tests {
                 ev.pane_id.as_deref().unwrap_or("?")
             );
             assert_eq!(ev.event_type, "activity.idle");
+            assert!(
+                ev.payload.get("claude_jsonl").is_none(),
+                "ambiguous bootstrap must stay semantic-empty"
+            );
         }
 
         // Second poll: still no new lines → regular idle heartbeat (same semantics)

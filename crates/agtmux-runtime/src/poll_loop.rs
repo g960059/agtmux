@@ -1090,6 +1090,8 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::build_ui_bootstrap_v3;
+    use agtmux_core_v5::sync_v3::{ThreadLifecycleV3, UiBootstrapV3};
     use agtmux_core_v5::types::{EvidenceTier, Provider, SourceEventV2, SourceKind};
     use agtmux_tmux_v5::error::TmuxError;
     use chrono::DateTime;
@@ -1277,6 +1279,19 @@ mod tests {
         ));
         payload.extend(lines.iter().map(|line| (*line).to_string()));
         fs::write(&session_path, payload.join("\n") + "\n").expect("session file");
+        session_path
+    }
+
+    fn write_claude_session_file(home_dir: &Path, cwd: &Path, lines: &[&str]) -> PathBuf {
+        let canonical_cwd = std::fs::canonicalize(cwd).expect("canonical cwd");
+        let projects_dir = home_dir.join(".claude").join("projects");
+        let project_dir = projects_dir.join(agtmux_source_claude_jsonl::discovery::encode_path(
+            canonical_cwd.to_str().expect("utf8 path"),
+        ));
+        fs::create_dir_all(&project_dir).expect("claude project dir");
+
+        let session_path = project_dir.join("idle-proof.jsonl");
+        fs::write(&session_path, lines.join("\n") + "\n").expect("claude session file");
         session_path
     }
 
@@ -1804,6 +1819,68 @@ mod tests {
         );
         assert_eq!(pane.provider, Some(Provider::Codex));
         assert_eq!(pane.presence, agtmux_core_v5::sync_v3::PresenceV3::Managed);
+
+        drop(st);
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[tokio::test]
+    async fn poll_tick_idle_claude_restart_bootstrap_surfaces_sync_v3_idle_truth() {
+        let _env_lock = ENV_LOCK.lock().expect("env lock");
+        let temp = temp_dir("claude-idle-bootstrap");
+        let home_dir = temp.join("home");
+        let project_dir = temp.join("project");
+        fs::create_dir_all(&project_dir).expect("project dir");
+        let _session_path = write_claude_session_file(
+            &home_dir,
+            &project_dir,
+            &[
+                r#"{"type":"assistant","timestamp":"2026-03-10T15:03:06.628Z","uuid":"claude-a-1","sessionId":"claude-sess-1"}"#,
+            ],
+        );
+
+        let _home = TestEnvGuard::set("HOME", home_dir.to_str().expect("utf8 path"));
+        let backend = Arc::new(FakeTmuxBackend::new().with_pane_cwd(
+            "%152",
+            "vm agtmux-term",
+            "claude",
+            "╭ Claude Code",
+            project_dir.to_str().expect("utf8 path"),
+        ));
+        let state = new_state();
+
+        poll_tick(&backend, &state).await.expect("bootstrap tick");
+        {
+            let st = state.lock().await;
+            assert_eq!(
+                st.gateway.source_cursor(SourceKind::ClaudeJsonl),
+                Some("claude-jsonl:1"),
+                "bootstrap tick should ingest one Claude JSONL bootstrap event"
+            );
+        }
+        poll_tick(&backend, &state).await.expect("heartbeat tick");
+
+        let mut st = state.lock().await;
+        let payload: UiBootstrapV3 = serde_json::from_value(build_ui_bootstrap_v3(&mut st))
+            .expect("valid ui.bootstrap.v3 payload");
+        let pane = payload
+            .panes
+            .iter()
+            .find(|pane| pane.pane_id == "%152")
+            .expect("sync-v3 pane row");
+
+        assert_eq!(pane.provider, Some(Provider::Claude));
+        assert_eq!(pane.presence, agtmux_core_v5::sync_v3::PresenceV3::Managed);
+        assert_eq!(
+            pane.thread.lifecycle,
+            ThreadLifecycleV3::Idle,
+            "Claude restart bootstrap should load settled idle truth"
+        );
+        assert_ne!(
+            pane.freshness.snapshot,
+            agtmux_core_v5::types::FreshnessState::Down,
+            "settled Claude truth should not fall back to managed/not_loaded/down"
+        );
 
         drop(st);
         let _ = fs::remove_dir_all(temp);
