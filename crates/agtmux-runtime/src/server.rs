@@ -1861,6 +1861,66 @@ mod tests {
     }
 
     #[test]
+    fn ui_bootstrap_v3_managed_fallback_ages_freshness_from_projection_updated_at() {
+        let mut state = make_state();
+        let now = Utc::now();
+        let snapshot = agtmux_source_poller::source::PaneSnapshot {
+            pane_id: "%77".to_string(),
+            pane_title: "codex".to_string(),
+            current_cmd: "codex".to_string(),
+            process_hint: Some("codex".to_string()),
+            capture_lines: vec!["Codex".to_string()],
+            captured_at: now,
+        };
+        state.poller.poll_batch(&[snapshot]);
+        let pull_req = agtmux_core_v5::types::PullEventsRequest {
+            cursor: None,
+            limit: 100,
+        };
+        let poller_resp = state.poller.pull_events(&pull_req, now);
+        state
+            .gateway
+            .ingest_source_response(SourceKind::Poller, poller_resp);
+        let gw_req = agtmux_core_v5::types::GatewayPullRequest {
+            cursor: None,
+            limit: 100,
+        };
+        let gw_resp = state.gateway.pull_events(&gw_req);
+        state.daemon.apply_events(gw_resp.events, now);
+        state.last_panes = vec![TmuxPaneInfo {
+            pane_id: "%77".to_string(),
+            session_id: "$7".to_string(),
+            session_name: "workbench".to_string(),
+            window_id: "@7".to_string(),
+            window_name: "main".to_string(),
+            current_cmd: "codex".to_string(),
+            ..Default::default()
+        }];
+        state.generation_tracker.update(&["%77"], now);
+
+        let payload: UiBootstrapV3 = serde_json::from_value(build_ui_bootstrap_v3(&mut state))
+            .expect("ui.bootstrap.v3 should parse");
+        payload.validate().expect("ui.bootstrap.v3 should validate");
+
+        let pane = payload
+            .panes
+            .iter()
+            .find(|pane| pane.pane_id == "%77")
+            .expect("fallback row");
+        assert_eq!(pane.session_key, "codex:%77");
+        assert_eq!(pane.presence, agtmux_core_v5::sync_v3::PresenceV3::Managed);
+        assert_eq!(pane.provider, Some(Provider::Codex));
+        assert_eq!(
+            pane.thread.lifecycle,
+            agtmux_core_v5::sync_v3::ThreadLifecycleV3::NotLoaded
+        );
+        assert_eq!(
+            pane.freshness.snapshot,
+            agtmux_core_v5::types::FreshnessState::Fresh
+        );
+    }
+
+    #[test]
     fn plain_shell_inventory_remains_unmanaged_in_bootstrap_until_provider_truth_arrives() {
         let mut state = make_state();
         let now = Utc::now();

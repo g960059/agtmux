@@ -223,7 +223,7 @@ fn compose_rows(
         let snapshot = if let Some(reducer) = reducers.get(&tmux_pane.pane_id) {
             build_managed_snapshot(reducer.snapshot(), tmux_pane, pane_instance_id, now)
         } else if let Some(managed) = managed_by_id.get(tmux_pane.pane_id.as_str()) {
-            build_managed_fallback_snapshot(tmux_pane, pane_instance_id, managed)
+            build_managed_fallback_snapshot(tmux_pane, pane_instance_id, managed, now)
         } else {
             build_unmanaged_snapshot(tmux_pane, pane_instance_id)
         };
@@ -445,6 +445,7 @@ fn build_managed_fallback_snapshot(
     tmux_pane: &TmuxPaneInfo,
     pane_instance_id: PaneInstanceId,
     managed: &PaneRuntimeState,
+    now: DateTime<Utc>,
 ) -> SyncV3PaneSnapshot {
     SyncV3PaneSnapshot {
         session_name: tmux_pane.session_name.clone(),
@@ -469,7 +470,7 @@ fn build_managed_fallback_snapshot(
         },
         pending_requests: Vec::new(),
         attention: AttentionSummaryV3::none(),
-        freshness: build_freshness_summary(FreshnessState::Down, FreshnessState::Down, None),
+        freshness: freshness_from_updated_at(managed.updated_at, now),
         provider_raw: ProviderRawEnvelopeV3::default(),
         updated_at: managed.updated_at,
     }
@@ -789,7 +790,49 @@ mod tests {
         assert_eq!(pane.agent.lifecycle, AgentLifecycleV3::Unknown);
         assert_eq!(pane.thread.lifecycle, ThreadLifecycleV3::NotLoaded);
         assert_eq!(pane.thread.blocking, ThreadBlockingV3::None);
-        assert_eq!(pane.freshness.snapshot, FreshnessState::Down);
+        assert_eq!(pane.freshness.snapshot, FreshnessState::Stale);
+        assert_eq!(pane.freshness.blocking, FreshnessState::Stale);
+        assert_eq!(pane.freshness.execution, FreshnessState::Stale);
+    }
+
+    #[test]
+    fn managed_fallback_freshness_tracks_projection_updated_at() {
+        let mut live = SyncV3LiveState::default();
+        let pane = tmux_pane("%77", "codex", "@3", "node");
+        let panes = vec![pane];
+        let mut tracker = PaneGenerationTracker::new();
+        tracker.update(&["%77"], ts(0));
+
+        let managed = PaneRuntimeState {
+            pane_instance_id: PaneInstanceId {
+                pane_id: "%77".to_string(),
+                generation: 2,
+                birth_ts: ts(0),
+            },
+            presence: PanePresence::Managed,
+            evidence_mode: agtmux_core_v5::types::EvidenceMode::Deterministic,
+            signature_class: PaneSignatureClass::Deterministic,
+            signature_reason: "deterministic".to_string(),
+            signature_confidence: 1.0,
+            no_agent_streak: 0,
+            signature_inputs: SignatureInputsCompact::default(),
+            activity_state: agtmux_core_v5::types::ActivityState::Running,
+            provider: Some(Provider::Codex),
+            session_key: "poller-%77".to_string(),
+            updated_at: ts(10),
+        };
+
+        live.reconcile(&[&managed], &panes, &tracker, ts(11));
+        let fresh_payload = live.build_bootstrap(ts(11));
+        let fresh_pane = &fresh_payload.panes[0];
+        assert_eq!(fresh_pane.thread.lifecycle, ThreadLifecycleV3::NotLoaded);
+        assert_eq!(fresh_pane.freshness.snapshot, FreshnessState::Fresh);
+
+        live.reconcile(&[&managed], &panes, &tracker, ts(26));
+        let down_payload = live.build_bootstrap(ts(26));
+        let down_pane = &down_payload.panes[0];
+        assert_eq!(down_pane.thread.lifecycle, ThreadLifecycleV3::NotLoaded);
+        assert_eq!(down_pane.freshness.snapshot, FreshnessState::Down);
     }
 
     #[test]

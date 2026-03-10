@@ -3433,3 +3433,39 @@ JSONL スキャナーなし) を発見 → デーモンが stale binary で起�
 - `cargo test -p agtmux ui_changes_v3_replaces_shell_row_when_exact_identity_changes_on_promotion -- --nocapture` PASS
 - `cargo test -p agtmux ui_bootstrap_v3_emits_unmanaged_row_when_no_semantic_truth_exists -- --nocapture` PASS
 - `cargo test -p agtmux ui_changes_v3_emits_upsert_with_strict_identity_from_sync_v3_truth -- --nocapture` PASS
+
+## 2026-03-10 — T-SYNCV3-FRESHNESS-FALLBACK done: managed fallback rows now age freshness from `updated_at`
+
+### Investigation result
+- The widespread provider-adjacent `freshness.down` symptom split into two separate causes:
+  - Cause 1: a real daemon bug in the managed fallback constructor
+  - Cause 2: the existing row-age policy for reducer-backed rows after `>15s`
+- Cause 1 was the immediate product bug:
+  - `crates/agtmux-runtime/src/sync_v3_runtime.rs`
+  - `compose_rows()` selected `build_managed_fallback_snapshot()` whenever the daemon projection already had provider truth for a pane but the sync-v3 reducer had not loaded native semantics yet
+  - that constructor hard-coded `freshness = down/down/down`
+  - so provider-attributed fallback rows (`presence=managed`, `provider=codex|claude`, `thread.lifecycle=not_loaded`) were born `freshness.down` even when `managed.updated_at` was only seconds old
+- Cause 2 still exists but was not changed in this slice:
+  - reducer-backed rows already use `freshness_from_updated_at(updated_at, now)`
+  - with the current fixed thresholds, any row that stays idle/waiting for `>15s` ages to `freshness.down`
+  - that policy may still be user-hostile product-wise, but it is not the constructor bug that caused fallback rows to show `down` immediately
+
+### Implementation notes
+- `crates/agtmux-runtime/src/sync_v3_runtime.rs`
+  - `build_managed_fallback_snapshot()` now derives freshness from `managed.updated_at` via `freshness_from_updated_at(...)`
+  - `thread.lifecycle = not_loaded` remains unchanged, so semantic incompleteness is still represented explicitly without conflating it with a freshness outage
+- `crates/agtmux-runtime/src/server.rs`
+  - added a focused `ui.bootstrap.v3` regression proving that a provider-attributed fallback row is surfaced as:
+    - `presence = managed`
+    - `provider = codex`
+    - `thread.lifecycle = not_loaded`
+    - `freshness.snapshot = fresh`
+
+### Gate
+- `cargo test -p agtmux sync_v3_runtime::tests::managed_fallback_does_not_reuse_collapsed_v2_activity_state -- --nocapture` PASS
+- `cargo test -p agtmux sync_v3_runtime::tests::managed_fallback_freshness_tracks_projection_updated_at -- --nocapture` PASS
+- `cargo test -p agtmux ui_bootstrap_v3_managed_fallback_ages_freshness_from_projection_updated_at -- --nocapture` PASS
+
+### Intentional deferral
+- Cause 2 remains open: reducer-backed idle / waiting rows still age to `down` after `>15s` under the current row-age summary policy
+- live regression pin for this Cause 1 fix stays downstream in the existing `agtmux-term` managed-provider live proof rather than a new daemon-owned online lane

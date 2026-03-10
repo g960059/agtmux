@@ -61,6 +61,7 @@
 - Contract note: linked-session sync-v3 rows are keyed by the full exact location tuple, not by `pane_id` alone; bootstrap/changes may emit multiple rows sharing `pane_id` when `session_name` or `window_id` differ
 - Contract note: shell bootstrap → managed promotion at the same visible location keeps `pane_instance_id` stable but may legitimately change `session_key` from `shell:%pane` to `<provider>:%pane`; `ui.changes.v3` now represents that as `remove(old exact identity)` + `upsert(new exact identity)`
 - Runtime note: when `CODEX_HOME` is unset, Codex JSONL discovery now falls back to `HOME/.codex/sessions` rather than `HOME/sessions`; this is required for reducer-backed sync-v3 running truth in live harnesses that only export `AGTMUX_TMUX_SOCKET_NAME`
+- Freshness note: managed fallback sync-v3 rows (`thread.lifecycle = not_loaded`) now age freshness from projection `updated_at` instead of forcing `freshness.down`; the separate `>15s` row-age decay for reducer-backed idle/waiting rows remains the current deferred product question
 - Still deferred: v3 replay trimming / epoch hardening, richer field-group freshness clocks beyond the current row-age summary, and broader sync-v2 deletion
 
 ## Phase 3 Hardening (COMPLETE — 585 tests)

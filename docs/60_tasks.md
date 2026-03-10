@@ -943,3 +943,20 @@ Phase 7 (Distribution) と独立して実施可能。
     - `cargo test -p agtmux poll_tick_discovers_codex_jsonl_via_home_dot_codex_fallback -- --nocapture` PASS
   - Notes:
     - this slice fixes discovery/binding only; Codex FSM semantics stay unchanged because the matched live transcript already contained `task_started` / `function_call` and was simply never discovered
+
+- [x] T-SYNCV3-FRESHNESS-FALLBACK (P1) Daemon fix: recent managed fallback rows no longer force `freshness.down` by construction — DONE (2026-03-10)
+  - 目的: sync-v3 provider-attributed rowsが reducer truth未ロードの fallback (`thread.lifecycle = not_loaded`) にいる間でも、recent `updated_at` を持つ row を `down/down/down` で誤表示しないようにする
+  - Deliverables:
+    - `build_managed_fallback_snapshot()` の freshness を hard-coded `down/down/down` から `managed.updated_at` ベースの row-age summary に変更
+    - focused runtime tests で:
+      - fallback-managed row が collapsed v2 `activity_state` を semantic truth として再利用しないこと
+      - fallback-managed row が recent `updated_at` では `fresh/stale` を返し、十分に古い場合だけ `down` へ落ちること
+      - `ui.bootstrap.v3` surface でも managed fallback row が `thread.not_loaded + freshness=fresh` で返ること
+  - Evidence:
+    - `cargo test -p agtmux sync_v3_runtime::tests::managed_fallback_does_not_reuse_collapsed_v2_activity_state -- --nocapture` PASS
+    - `cargo test -p agtmux sync_v3_runtime::tests::managed_fallback_freshness_tracks_projection_updated_at -- --nocapture` PASS
+    - `cargo test -p agtmux ui_bootstrap_v3_managed_fallback_ages_freshness_from_projection_updated_at -- --nocapture` PASS
+  - Notes:
+    - Cause 1 fixed here: managed fallback rows are no longer born `freshness.down` solely because reducer truth is missing
+    - Cause 2 remains open by design in this slice: reducer-backed idle/waiting rows still age to `down` after `>15s` via the existing row-age summary policy
+    - downstream live regression pin remains the existing term-side managed-provider live proof after this daemon fix
