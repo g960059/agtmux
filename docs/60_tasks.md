@@ -887,3 +887,22 @@ Phase 7 (Distribution) と独立して実施可能。
   - Notes:
     - explicit proof path and term app-child path still differed materially in one place: shell proof already had direct Codex process truth, while app-child could remain at `current_cmd=node` and needed JSONL/CWD truth to promote
     - this slice keeps sync-v3 semantics unchanged; it only hardens producer managed-truth formation for Codex node runtimes
+
+- [x] T-XTERM-A6f (P0) Producer fix: preserve linked-session v3 row identity and document shell→managed promotion identity churn — DONE (2026-03-09)
+  - 目的: linked-session/app-child path で same live pane が複数 exact tmux locations に現れる場合でも、sync-v3 bootstrap/changes が `pane_id` 単独で collapse せず full exact location (`session_name`, `window_id`, `pane_id`) ごとに row truth を返すようにし、term 側 investigation 向けに shell bootstrap → managed promotion の identity pattern も固定する
+  - Deliverables:
+    - `SyncV3LiveState` row store/reconcile を exact location key に切り替え、同一 `pane_id` が linked session に現れる場合は v3 bootstrap/changes が各 location row を保持できるようにする
+    - focused runtime/server tests で:
+      - linked-session managed pane が `ui.bootstrap.v3` では 2 rows に fan-out する一方、sync-v2 compat `list_panes_snapshot` は従来どおり 1 row compaction のままであること
+      - same visible shell row が later `ui.changes.v3` upsert で managed Codex row に昇格する際、`pane_instance_id` は stable だが `session_key` は `shell:%pane` → `codex:%pane` に変わること
+    - Step 6a candidate helper で `process_hint=runtime_unknown` かつ `current_cmd=node` も Codex JSONL discovery candidate に含める
+    - daemon-owned contract docs に linked-session exact identity / shell→managed identity churn を追記する
+  - Evidence:
+    - `cargo test -p agtmux build_bootstrap_preserves_linked_session_locations_for_same_pane_id -- --nocapture` PASS
+    - `cargo test -p agtmux reconcile_removes_only_missing_linked_session_location -- --nocapture` PASS
+    - `cargo test -p agtmux ui_bootstrap_v3_preserves_linked_session_rows_even_when_v2_cache_compacts -- --nocapture` PASS
+    - `cargo test -p agtmux ui_changes_v3_promotes_same_visible_row_with_stable_pane_instance_id -- --nocapture` PASS
+    - `cargo test -p agtmux codex_jsonl_candidates_include_neutral_node_runtime -- --nocapture` PASS
+  - Notes:
+    - sync-v2 compat surfaces intentionally still compact managed linked-session rows by `pane_id`; this slice changes only sync-v3 exact-row truth
+    - shell bootstrap → managed promotion at the same visible location still changes `session_key` by design; term consumer logic must tolerate that upsert pattern instead of treating it as an impossible conflict

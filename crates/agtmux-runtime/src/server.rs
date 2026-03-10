@@ -1929,6 +1929,130 @@ mod tests {
     }
 
     #[test]
+    fn ui_bootstrap_v3_preserves_linked_session_rows_even_when_v2_cache_compacts() {
+        let mut state = make_state();
+        let now = Utc::now();
+        state.last_panes = vec![
+            TmuxPaneInfo {
+                pane_id: "%7".to_string(),
+                session_id: "$1".to_string(),
+                session_name: "linked".to_string(),
+                window_id: "@0".to_string(),
+                window_name: "main".to_string(),
+                current_cmd: "node".to_string(),
+                ..Default::default()
+            },
+            TmuxPaneInfo {
+                pane_id: "%7".to_string(),
+                session_id: "$2".to_string(),
+                session_name: "primary".to_string(),
+                window_id: "@0".to_string(),
+                window_name: "main".to_string(),
+                current_cmd: "node".to_string(),
+                ..Default::default()
+            },
+        ];
+        state.generation_tracker.update(&["%7"], now);
+
+        let event = codex_v3_event("%7", "task_started", now);
+        state.daemon.apply_events(vec![event.clone()], now);
+        state
+            .sync_v3
+            .apply_events(&[event], &state.last_panes, &state.generation_tracker);
+
+        let cache = new_pane_cache();
+        refresh_pane_cache(&cache, &state, now);
+        let cached_snapshot = read_cached_snapshot(&cache);
+        let cached_panes = cached_snapshot["panes"].as_array().expect("cached panes");
+        assert_eq!(
+            cached_panes.len(),
+            1,
+            "sync-v2/list snapshot still compacts linked managed rows by pane_id"
+        );
+
+        let payload: UiBootstrapV3 = serde_json::from_value(build_ui_bootstrap_v3(&mut state))
+            .expect("ui.bootstrap.v3 should parse");
+        payload.validate().expect("ui.bootstrap.v3 should validate");
+
+        assert_eq!(payload.panes.len(), 2);
+        let linked = payload
+            .panes
+            .iter()
+            .find(|pane| pane.session_name == "linked")
+            .expect("linked row");
+        let primary = payload
+            .panes
+            .iter()
+            .find(|pane| pane.session_name == "primary")
+            .expect("primary row");
+
+        for pane in [linked, primary] {
+            assert_eq!(pane.window_id, "@0");
+            assert_eq!(pane.pane_id, "%7");
+            assert_eq!(pane.pane_instance_id.pane_id, "%7");
+            assert_eq!(pane.session_key, "codex:%7");
+            assert_eq!(pane.presence, agtmux_core_v5::sync_v3::PresenceV3::Managed);
+            assert_eq!(pane.provider, Some(Provider::Codex));
+        }
+    }
+
+    #[test]
+    fn ui_changes_v3_promotes_same_visible_row_with_stable_pane_instance_id() {
+        let mut state = make_state();
+        let now = Utc::now();
+        state.last_panes = vec![TmuxPaneInfo {
+            pane_id: "%0".to_string(),
+            session_id: "$0".to_string(),
+            session_name: "agtmux-e2e-managed".to_string(),
+            window_id: "@0".to_string(),
+            window_name: "main".to_string(),
+            current_cmd: "node".to_string(),
+            ..Default::default()
+        }];
+        state.generation_tracker.update(&["%0"], now);
+
+        let bootstrap: UiBootstrapV3 = serde_json::from_value(build_ui_bootstrap_v3(&mut state))
+            .expect("ui.bootstrap.v3 should parse");
+        bootstrap.validate().expect("bootstrap should validate");
+        let cursor = bootstrap.replay_cursor.expect("bootstrap cursor");
+        let unmanaged_row = bootstrap.panes.first().expect("shell row");
+        let pane_instance_id = unmanaged_row.pane_instance_id.clone();
+        assert_eq!(unmanaged_row.session_name, "agtmux-e2e-managed");
+        assert_eq!(unmanaged_row.window_id, "@0");
+        assert_eq!(unmanaged_row.pane_id, "%0");
+        assert_eq!(unmanaged_row.session_key, "shell:%0");
+
+        let event = codex_v3_event("%0", "task_started", now);
+        state.daemon.apply_events(vec![event.clone()], now);
+        state
+            .sync_v3
+            .apply_events(&[event], &state.last_panes, &state.generation_tracker);
+
+        let result = build_ui_changes_v3(&mut state, Some(cursor), 100);
+        let payload: UiChangesV3 =
+            serde_json::from_value(result).expect("ui.changes.v3 should parse");
+        payload.validate().expect("ui.changes.v3 should validate");
+
+        assert_eq!(payload.changes.len(), 1);
+        let change = &payload.changes[0];
+        assert_eq!(change.pane_id, "%0");
+        assert_eq!(change.session_name, "agtmux-e2e-managed");
+        assert_eq!(change.window_id, "@0");
+        assert_eq!(change.pane_instance_id, pane_instance_id);
+        assert_eq!(change.session_key, "codex:%0");
+        assert!(
+            change
+                .field_groups
+                .contains(&agtmux_core_v5::sync_v3::SyncV3FieldGroupV3::Identity)
+        );
+        let pane = change.pane.as_ref().expect("managed pane");
+        assert_eq!(pane.presence, agtmux_core_v5::sync_v3::PresenceV3::Managed);
+        assert_eq!(pane.provider, Some(Provider::Codex));
+        assert_eq!(pane.session_key, "codex:%0");
+        assert_eq!(pane.pane_instance_id, pane_instance_id);
+    }
+
+    #[test]
     fn ui_changes_v3_emits_upsert_with_strict_identity_from_sync_v3_truth() {
         let mut state = make_bootstrap_v3_codex_completed_state();
         let bootstrap: UiBootstrapV3 = serde_json::from_value(build_ui_bootstrap_v3(&mut state))

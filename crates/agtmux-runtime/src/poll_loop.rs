@@ -306,6 +306,7 @@ fn is_codex_jsonl_candidate(process_hint: Option<&str>, current_cmd: &str) -> bo
 
     match process_hint {
         Some("codex") => true,
+        Some("runtime_unknown") => CODEX_JSONL_RUNTIME_CMDS.contains(&current_cmd),
         Some("shell") | Some("claude") => false,
         Some(_) => false,
         None => CODEX_JSONL_RUNTIME_CMDS.contains(&current_cmd),
@@ -543,8 +544,9 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
     //
     // Neutral `node` runtimes are also valid candidates here. In app-child
     // launch paths, tmux can already show `pane_current_command=node` on the
-    // correct socket while deep process inspection is degraded. Discovery must
-    // still be able to recover Codex truth from tmux CWD + CODEX_HOME.
+    // correct socket while deep process inspection is degraded or only yields
+    // `process_hint=runtime_unknown`. Discovery must still be able to recover
+    // Codex truth from tmux CWD + CODEX_HOME.
     if !metadata_backoff_active {
         let snapshot_hint: std::collections::HashMap<&str, Option<&str>> = snapshots
             .iter()
@@ -1758,10 +1760,11 @@ mod tests {
     fn codex_jsonl_candidates_include_neutral_node_runtime() {
         assert!(is_codex_jsonl_candidate(Some("codex"), "zsh"));
         assert!(is_codex_jsonl_candidate(None, "node"));
+        assert!(is_codex_jsonl_candidate(Some("runtime_unknown"), "node"));
         assert!(!is_codex_jsonl_candidate(Some("shell"), "node"));
         assert!(!is_codex_jsonl_candidate(Some("claude"), "node"));
-        assert!(!is_codex_jsonl_candidate(Some("runtime_unknown"), "node"));
         assert!(!is_codex_jsonl_candidate(None, "zsh"));
+        assert!(!is_codex_jsonl_candidate(Some("runtime_unknown"), "python"));
     }
 
     #[tokio::test]

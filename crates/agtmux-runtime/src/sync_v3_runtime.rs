@@ -19,9 +19,26 @@ use chrono::{DateTime, TimeZone, Utc};
 #[derive(Debug, Default)]
 pub struct SyncV3LiveState {
     reducers: BTreeMap<String, SyncV3Reducer>,
-    rows: BTreeMap<String, SyncV3PaneSnapshot>,
+    rows: BTreeMap<SyncV3RowKey, SyncV3PaneSnapshot>,
     replay_log: Vec<SyncV3PaneChangeV3>,
     head_seq: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct SyncV3RowKey {
+    session_name: String,
+    window_id: String,
+    pane_id: String,
+}
+
+impl SyncV3RowKey {
+    fn from_tmux_pane(pane: &TmuxPaneInfo) -> Self {
+        Self {
+            session_name: pane.session_name.clone(),
+            window_id: pane.window_id.clone(),
+            pane_id: pane.pane_id.clone(),
+        }
+    }
 }
 
 impl SyncV3LiveState {
@@ -169,13 +186,19 @@ fn compose_rows(
     tmux_panes: &[TmuxPaneInfo],
     generation_tracker: &PaneGenerationTracker,
     now: DateTime<Utc>,
-) -> BTreeMap<String, SyncV3PaneSnapshot> {
+) -> BTreeMap<SyncV3RowKey, SyncV3PaneSnapshot> {
     let managed_by_id = managed_fallbacks
         .iter()
         .map(|pane| (pane.pane_instance_id.pane_id.as_str(), *pane))
         .collect::<HashMap<_, _>>();
     let mut inventory = tmux_panes.iter().collect::<Vec<_>>();
-    inventory.sort_by(|left, right| left.pane_id.cmp(&right.pane_id));
+    inventory.sort_by(|left, right| {
+        (&left.session_name, &left.window_id, &left.pane_id).cmp(&(
+            &right.session_name,
+            &right.window_id,
+            &right.pane_id,
+        ))
+    });
 
     let mut rows = BTreeMap::new();
     for tmux_pane in inventory {
@@ -195,10 +218,12 @@ fn compose_rows(
 
         match snapshot.validate() {
             Ok(()) => {
-                rows.insert(tmux_pane.pane_id.clone(), snapshot);
+                rows.insert(SyncV3RowKey::from_tmux_pane(tmux_pane), snapshot);
             }
             Err(err) => {
                 tracing::warn!(
+                    session_name = %tmux_pane.session_name,
+                    window_id = %tmux_pane.window_id,
                     pane_id = %tmux_pane.pane_id,
                     "dropping invalid sync-v3 pane row: {err}"
                 );
@@ -631,6 +656,81 @@ mod tests {
         assert_eq!(pane.thread.lifecycle, ThreadLifecycleV3::Idle);
         assert_eq!(pane.freshness.snapshot, FreshnessState::Down);
         assert_eq!(pane.updated_at, ts(0));
+    }
+
+    #[test]
+    fn build_bootstrap_preserves_linked_session_locations_for_same_pane_id() {
+        let mut live = SyncV3LiveState::default();
+        let panes = vec![
+            tmux_pane("%52", "linked", "@9", "node"),
+            tmux_pane("%52", "primary", "@9", "node"),
+        ];
+        let mut tracker = PaneGenerationTracker::new();
+        tracker.update(&["%52"], ts(0));
+
+        live.apply_events(
+            &[codex_event("task_started", "%52", ts(10))],
+            &panes,
+            &tracker,
+        );
+        live.reconcile(&[], &panes, &tracker, ts(11));
+
+        let payload = live.build_bootstrap(ts(11));
+        payload.validate().expect("payload should validate");
+
+        assert_eq!(payload.panes.len(), 2);
+        let primary = payload
+            .panes
+            .iter()
+            .find(|pane| pane.session_name == "primary")
+            .expect("primary linked row");
+        let linked = payload
+            .panes
+            .iter()
+            .find(|pane| pane.session_name == "linked")
+            .expect("linked row");
+
+        for pane in [primary, linked] {
+            assert_eq!(pane.window_id, "@9");
+            assert_eq!(pane.pane_id, "%52");
+            assert_eq!(pane.pane_instance_id.pane_id, "%52");
+            assert_eq!(pane.session_key, "codex:%52");
+            assert_eq!(pane.presence, PresenceV3::Managed);
+            assert_eq!(pane.provider, Some(Provider::Codex));
+            assert_eq!(pane.thread.lifecycle, ThreadLifecycleV3::Active);
+        }
+    }
+
+    #[test]
+    fn reconcile_removes_only_missing_linked_session_location() {
+        let mut live = SyncV3LiveState::default();
+        let panes = vec![
+            tmux_pane("%52", "linked", "@9", "node"),
+            tmux_pane("%52", "primary", "@9", "node"),
+        ];
+        let mut tracker = PaneGenerationTracker::new();
+        tracker.update(&["%52"], ts(0));
+
+        live.apply_events(
+            &[codex_event("task_started", "%52", ts(10))],
+            &panes,
+            &tracker,
+        );
+        live.reconcile(&[], &panes, &tracker, ts(11));
+
+        let remaining = vec![tmux_pane("%52", "primary", "@9", "node")];
+        live.reconcile(&[], &remaining, &tracker, ts(12));
+
+        let payload = live.build_changes(Some(SyncV3CursorV3 { seq: 2 }), 10);
+        payload.validate().expect("changes should validate");
+
+        assert_eq!(payload.changes.len(), 1);
+        let change = &payload.changes[0];
+        assert_eq!(change.kind, SyncV3ChangeKindV3::Remove);
+        assert_eq!(change.pane_id, "%52");
+        assert_eq!(change.session_name, "linked");
+        assert_eq!(change.window_id, "@9");
+        assert_eq!(change.session_key, "codex:%52");
     }
 
     #[test]

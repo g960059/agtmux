@@ -3307,3 +3307,45 @@ JSONL スキャナーなし) を発見 → デーモンが stale binary で起�
 - `cargo test -p agtmux poll_tick_discovers_codex_jsonl_from_node_runtime_without_process_hint -- --nocapture` PASS
 - `cargo test -p agtmux codex_jsonl_candidates_include_neutral_node_runtime -- --nocapture` PASS
 - `cargo test -p agtmux-source-codex-jsonl codex_home_dir_ -- --nocapture` PASS
+
+## 2026-03-09 — T-XTERM-A6f done: sync-v3 preserves linked-session exact rows and shell→managed promotion identity is now explicitly documented
+
+### Investigation result
+- The strongest remaining H1 seam was real in producer code: `SyncV3LiveState` still stored live rows in a `BTreeMap` keyed only by `pane_id`.
+- That meant tmux inventory could contain multiple exact locations for the same live pane (`session_name` / `window_id` differ in linked-session topologies), but sync-v3 bootstrap/changes would silently keep only one surviving row.
+- This was separate from the already-proven shell→managed promotion pattern:
+  - same visible pane location
+  - same `pane_instance_id`
+  - `session_key` changes from `shell:%pane` to `<provider>:%pane` once provider truth arrives
+- Term-side conflict/drop findings fit that producer shape: the daemon really can send later managed upserts whose identity differs from the earlier shell bootstrap row only in the strict provider/session identity fields.
+
+### Implementation notes
+- `crates/agtmux-runtime/src/sync_v3_runtime.rs`
+  - live reducer ownership stays keyed by `pane_id`
+  - emitted sync-v3 rows are now keyed internally by the exact location tuple `(session_name, window_id, pane_id)` so linked-session rows no longer collapse
+  - reconcile/remove logic now works per exact location row rather than per bare `pane_id`
+- `crates/agtmux-runtime/src/server.rs`
+  - added focused proofs that:
+    - sync-v2 compat cache/list snapshot still compacts a linked managed pane by `pane_id`
+    - `ui.bootstrap.v3` now returns both linked exact rows for the same managed pane
+    - `ui.changes.v3` promotes a shell row to managed at the same visible location with stable `pane_instance_id` but changed `session_key`
+- `crates/agtmux-runtime/src/poll_loop.rs`
+  - widened Codex Step 6a candidate selection so `process_hint=runtime_unknown` with `current_cmd=node` is treated the same as other neutral node-runtime Codex discovery candidates
+- `docs/80_decisions/ADR-20260309-sync-v3-contract-freeze.md`
+  - clarified that `pane_id` alone is not a unique v3 row key in linked-session topologies
+  - documented that shell→managed promotion may legitimately change `session_key` while keeping `pane_instance_id` stable
+
+### Consumer implication
+- Upstream daemon truth now preserves linked-session exact row identity in sync-v3 itself; the old `pane_id` collapse is no longer a valid explanation for missing linked rows in bootstrap/changes.
+- The remaining shell→managed promotion pattern is still by design:
+  - same visible location
+  - same `pane_instance_id`
+  - different `session_key`
+- A strict term consumer must therefore accept managed upserts that replace a shell row at the same visible location instead of silently dropping them as impossible conflicts.
+
+### Gate
+- `cargo test -p agtmux build_bootstrap_preserves_linked_session_locations_for_same_pane_id -- --nocapture` PASS
+- `cargo test -p agtmux reconcile_removes_only_missing_linked_session_location -- --nocapture` PASS
+- `cargo test -p agtmux ui_bootstrap_v3_preserves_linked_session_rows_even_when_v2_cache_compacts -- --nocapture` PASS
+- `cargo test -p agtmux ui_changes_v3_promotes_same_visible_row_with_stable_pane_instance_id -- --nocapture` PASS
+- `cargo test -p agtmux codex_jsonl_candidates_include_neutral_node_runtime -- --nocapture` PASS
