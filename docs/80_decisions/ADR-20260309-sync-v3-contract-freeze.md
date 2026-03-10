@@ -76,6 +76,7 @@
   - `pane_instance_id.pane_id` must match top-level `pane_id`.
   - `pane_id` alone is not a unique row key in linked-session topologies. If tmux inventory exposes the same live pane through multiple exact locations, v3 bootstrap/changes may emit multiple rows sharing `pane_id` while differing in `session_name` and/or `window_id`.
   - When a plain shell row is promoted to managed truth at the same visible location, `pane_instance_id` should stay stable while `session_key` may legitimately change from `shell:%pane_id` to `<provider>:%pane_id`.
+  - In `ui.changes.v3`, an exact-identity change at the same visible location must be represented as `remove(old exact identity)` followed by `upsert(new exact identity)`, not as an in-place conflicting upsert.
   - If exact identity cannot be produced, the daemon must drop the pane from v3 output rather than emit partial/null identity.
 - `pending_requests[].request_id` is the truth source for request identity.
 - `attention` is summary only, never truth.

@@ -1997,7 +1997,7 @@ mod tests {
     }
 
     #[test]
-    fn ui_changes_v3_promotes_same_visible_row_with_stable_pane_instance_id() {
+    fn ui_changes_v3_replaces_shell_row_when_exact_identity_changes_on_promotion() {
         let mut state = make_state();
         let now = Utc::now();
         state.last_panes = vec![TmuxPaneInfo {
@@ -2033,8 +2033,24 @@ mod tests {
             serde_json::from_value(result).expect("ui.changes.v3 should parse");
         payload.validate().expect("ui.changes.v3 should validate");
 
-        assert_eq!(payload.changes.len(), 1);
-        let change = &payload.changes[0];
+        assert_eq!(payload.changes.len(), 2);
+        let remove = &payload.changes[0];
+        assert_eq!(
+            remove.kind,
+            agtmux_core_v5::sync_v3::SyncV3ChangeKindV3::Remove
+        );
+        assert_eq!(remove.pane_id, "%0");
+        assert_eq!(remove.session_name, "agtmux-e2e-managed");
+        assert_eq!(remove.window_id, "@0");
+        assert_eq!(remove.pane_instance_id, pane_instance_id);
+        assert_eq!(remove.session_key, "shell:%0");
+        assert!(remove.pane.is_none());
+
+        let change = &payload.changes[1];
+        assert_eq!(
+            change.kind,
+            agtmux_core_v5::sync_v3::SyncV3ChangeKindV3::Upsert
+        );
         assert_eq!(change.pane_id, "%0");
         assert_eq!(change.session_name, "agtmux-e2e-managed");
         assert_eq!(change.window_id, "@0");
@@ -2043,7 +2059,8 @@ mod tests {
         assert!(
             change
                 .field_groups
-                .contains(&agtmux_core_v5::sync_v3::SyncV3FieldGroupV3::Identity)
+                .contains(&agtmux_core_v5::sync_v3::SyncV3FieldGroupV3::Identity),
+            "replacement upsert should still advertise identity fields"
         );
         let pane = change.pane.as_ref().expect("managed pane");
         assert_eq!(pane.presence, agtmux_core_v5::sync_v3::PresenceV3::Managed);

@@ -132,8 +132,20 @@ impl SyncV3LiveState {
                 Some(previous) if previous != pane => {
                     let field_groups = diff_field_groups(previous, pane);
                     if !field_groups.is_empty() {
-                        self.head_seq += 1;
-                        changes.push(upsert_change(self.head_seq, now, pane, field_groups));
+                        if requires_row_replacement(&field_groups) {
+                            self.head_seq += 1;
+                            changes.push(remove_change(self.head_seq, now, previous));
+                            self.head_seq += 1;
+                            changes.push(upsert_change(
+                                self.head_seq,
+                                now,
+                                pane,
+                                all_field_groups(),
+                            ));
+                        } else {
+                            self.head_seq += 1;
+                            changes.push(upsert_change(self.head_seq, now, pane, field_groups));
+                        }
                     }
                 }
                 Some(_) => {}
@@ -281,6 +293,12 @@ fn all_field_groups() -> Vec<SyncV3FieldGroupV3> {
         SyncV3FieldGroupV3::Freshness,
         SyncV3FieldGroupV3::ProviderRaw,
     ]
+}
+
+fn requires_row_replacement(field_groups: &[SyncV3FieldGroupV3]) -> bool {
+    field_groups
+        .iter()
+        .any(|group| matches!(group, SyncV3FieldGroupV3::Identity))
 }
 
 fn diff_field_groups(
@@ -775,6 +793,60 @@ mod tests {
     }
 
     #[test]
+    fn build_changes_replaces_row_when_claude_promotion_changes_exact_identity() {
+        let mut live = SyncV3LiveState::default();
+        let panes = vec![tmux_pane("%34", "review", "@7", "claude")];
+        let mut tracker = PaneGenerationTracker::new();
+        tracker.update(&["%34"], ts(0));
+
+        live.reconcile(&[], &panes, &tracker, ts(1));
+
+        let managed = PaneRuntimeState {
+            pane_instance_id: PaneInstanceId {
+                pane_id: "%34".to_string(),
+                generation: 2,
+                birth_ts: ts(0),
+            },
+            presence: PanePresence::Managed,
+            evidence_mode: agtmux_core_v5::types::EvidenceMode::Deterministic,
+            signature_class: PaneSignatureClass::Deterministic,
+            signature_reason: "deterministic".to_string(),
+            signature_confidence: 1.0,
+            no_agent_streak: 0,
+            signature_inputs: SignatureInputsCompact::default(),
+            activity_state: agtmux_core_v5::types::ActivityState::Idle,
+            provider: Some(Provider::Claude),
+            session_key: "thr-claude-1".to_string(),
+            updated_at: ts(10),
+        };
+
+        live.reconcile(&[&managed], &panes, &tracker, ts(11));
+
+        let payload = live.build_changes(Some(SyncV3CursorV3 { seq: 1 }), 10);
+        payload.validate().expect("changes should validate");
+
+        assert_eq!(payload.changes.len(), 2);
+        let remove = &payload.changes[0];
+        assert_eq!(remove.kind, SyncV3ChangeKindV3::Remove);
+        assert_eq!(remove.session_name, "review");
+        assert_eq!(remove.window_id, "@7");
+        assert_eq!(remove.pane_id, "%34");
+        assert_eq!(remove.session_key, "shell:%34");
+
+        let upsert = &payload.changes[1];
+        assert_eq!(upsert.kind, SyncV3ChangeKindV3::Upsert);
+        assert_eq!(upsert.session_name, "review");
+        assert_eq!(upsert.window_id, "@7");
+        assert_eq!(upsert.pane_id, "%34");
+        assert_eq!(upsert.session_key, "claude:%34");
+        assert_eq!(upsert.pane_instance_id, remove.pane_instance_id);
+        let pane = upsert.pane.as_ref().expect("replacement pane");
+        assert_eq!(pane.provider, Some(Provider::Claude));
+        assert_eq!(pane.presence, PresenceV3::Managed);
+        assert_eq!(pane.session_key, "claude:%34");
+    }
+
+    #[test]
     fn build_changes_emits_upsert_with_field_groups_and_completed_truth() {
         let mut live = SyncV3LiveState::default();
         let panes = vec![tmux_pane("%12", "workbench", "@5", "codex")];
@@ -806,6 +878,72 @@ mod tests {
         let pane = change.pane.as_ref().expect("upsert pane");
         assert_eq!(pane.thread.lifecycle, ThreadLifecycleV3::Idle);
         assert_eq!(pane.thread.turn.outcome, TurnOutcomeV3::Completed);
+    }
+
+    #[test]
+    fn build_changes_replaces_row_when_exact_identity_changes_at_same_location() {
+        let mut live = SyncV3LiveState::default();
+        let panes = vec![tmux_pane("%12", "workbench", "@5", "node")];
+        let mut tracker = PaneGenerationTracker::new();
+        tracker.update(&["%12"], ts(0));
+
+        live.reconcile(&[], &panes, &tracker, ts(1));
+        let shell_row = live.build_bootstrap(ts(1)).panes[0].clone();
+        live.apply_events(
+            &[codex_event("task_started", "%12", ts(10))],
+            &panes,
+            &tracker,
+        );
+        live.reconcile(&[], &panes, &tracker, ts(11));
+        let managed_row = live.build_bootstrap(ts(11)).panes[0].clone();
+
+        let payload = live.build_changes(Some(SyncV3CursorV3 { seq: 1 }), 10);
+        payload.validate().expect("changes should validate");
+
+        let buggy_field_groups = diff_field_groups(&shell_row, &managed_row);
+        assert!(
+            buggy_field_groups.contains(&SyncV3FieldGroupV3::Identity),
+            "old buggy in-place promotion would have advertised identity churn in one upsert"
+        );
+        let buggy_in_place_upsert =
+            upsert_change(2, ts(11), &managed_row, buggy_field_groups.clone());
+        assert_eq!(buggy_in_place_upsert.session_name, "workbench");
+        assert_eq!(buggy_in_place_upsert.window_id, "@5");
+        assert_eq!(buggy_in_place_upsert.pane_id, "%12");
+        assert_eq!(buggy_in_place_upsert.session_key, "codex:%12");
+        assert_eq!(
+            buggy_in_place_upsert.pane_instance_id, shell_row.pane_instance_id,
+            "the old shape changed exact identity without first removing the shell row"
+        );
+
+        assert_eq!(payload.changes.len(), 2);
+        let remove = &payload.changes[0];
+        assert_eq!(remove.kind, SyncV3ChangeKindV3::Remove);
+        assert_eq!(remove.session_name, "workbench");
+        assert_eq!(remove.window_id, "@5");
+        assert_eq!(remove.pane_id, "%12");
+        assert_eq!(remove.session_key, "shell:%12");
+        assert!(remove.pane.is_none());
+
+        let upsert = &payload.changes[1];
+        assert_eq!(upsert.kind, SyncV3ChangeKindV3::Upsert);
+        assert_eq!(upsert.session_name, "workbench");
+        assert_eq!(upsert.window_id, "@5");
+        assert_eq!(upsert.pane_id, "%12");
+        assert_eq!(upsert.session_key, "codex:%12");
+        assert_eq!(
+            upsert.field_groups,
+            all_field_groups(),
+            "replacement upsert should describe the full new row"
+        );
+        let pane = upsert.pane.as_ref().expect("replacement pane");
+        assert_eq!(pane.pane_instance_id.pane_id, "%12");
+        assert_eq!(pane.session_key, "codex:%12");
+        assert_eq!(pane.presence, PresenceV3::Managed);
+        assert_ne!(
+            payload.changes[1], buggy_in_place_upsert,
+            "runtime must replace exact identity instead of emitting the old conflicting upsert"
+        );
     }
 
     #[test]

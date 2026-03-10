@@ -906,3 +906,24 @@ Phase 7 (Distribution) と独立して実施可能。
   - Notes:
     - sync-v2 compat surfaces intentionally still compact managed linked-session rows by `pane_id`; this slice changes only sync-v3 exact-row truth
     - shell bootstrap → managed promotion at the same visible location still changes `session_key` by design; term consumer logic must tolerate that upsert pattern instead of treating it as an impossible conflict
+
+- [x] T-XTERM-A6g (P0) Producer fix: replace exact-identity churn with remove+upsert in `ui.changes.v3` — DONE (2026-03-09)
+  - 目的: unmanaged shell row が same visible location で managed Codex/Claude row に昇格する際、daemon が conflicting exact identity を single upsert として流していた問題を修正し、strict consumer が old exact row を明示的に落としてから new exact row を受け取れるようにする
+  - Deliverables:
+    - sync-v3 reconcile で `session_key` / `pane_instance_id` を含む exact identity field が同じ visible location 上で変化した場合、`ui.changes.v3` は `remove(old exact identity)` + `upsert(new exact identity)` を emit する
+    - focused runtime/server tests で shell bootstrap → managed promotionが:
+      - bootstrap では unmanaged shell row
+      - changes では old shell remove + new managed upsert
+      - `pane_instance_id` は stable
+      - `freshness.down` は provider state ではない
+      ことを固定する
+    - daemon-owned contract docs に exact-identity change の replace semantics を追記する
+  - Evidence:
+    - `cargo test -p agtmux build_changes_replaces_row_when_exact_identity_changes_at_same_location -- --nocapture` PASS
+    - `cargo test -p agtmux build_changes_replaces_row_when_claude_promotion_changes_exact_identity -- --nocapture` PASS
+    - `cargo test -p agtmux ui_changes_v3_replaces_shell_row_when_exact_identity_changes_on_promotion -- --nocapture` PASS
+    - `cargo test -p agtmux ui_bootstrap_v3_emits_unmanaged_row_when_no_semantic_truth_exists -- --nocapture` PASS
+    - `cargo test -p agtmux ui_changes_v3_emits_upsert_with_strict_identity_from_sync_v3_truth -- --nocapture` PASS
+  - Notes:
+    - linked-session row fan-out from T-XTERM-A6f remains in place; this slice only changes same-location exact-identity churn behavior in the v3 changes lane
+    - provider truth is still driven by `presence` / `provider` / thread fields, not by freshness badges alone

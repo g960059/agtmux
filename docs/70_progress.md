@@ -3349,3 +3349,46 @@ JSONL スキャナーなし) を発見 → デーモンが stale binary で起�
 - `cargo test -p agtmux ui_bootstrap_v3_preserves_linked_session_rows_even_when_v2_cache_compacts -- --nocapture` PASS
 - `cargo test -p agtmux ui_changes_v3_promotes_same_visible_row_with_stable_pane_instance_id -- --nocapture` PASS
 - `cargo test -p agtmux codex_jsonl_candidates_include_neutral_node_runtime -- --nocapture` PASS
+
+## 2026-03-09 — T-XTERM-A6g done: `ui.changes.v3` now replaces exact-identity churn instead of mutating it in place
+
+### Investigation result
+- The new cross-repo repro exposed a real daemon-side contract bug in the changes lane:
+  - bootstrap for a plain shell row was valid (`session_key = shell:%pane`, unmanaged, same exact visible location)
+  - later provider truth for the same visible pane could arrive with:
+    - same `session_name`
+    - same `window_id`
+    - same `pane_id`
+    - same `pane_instance_id`
+    - different `session_key` (`codex:%pane` / `claude:%pane`)
+  - the runtime previously emitted that as a single `upsert` with `field_groups` containing `identity`
+- For a strict consumer keyed by exact identity, that is ambiguous: the old exact row was never explicitly removed, so a conflict-drop path was plausible downstream.
+- `freshness.down` was not the provider signal here. Freshness remains orthogonal summary state; the actual producer disagreement was the in-place exact-identity mutation.
+
+### Implementation notes
+- `crates/agtmux-runtime/src/sync_v3_runtime.rs`
+  - reconcile now treats any same-location exact-identity delta as row replacement:
+    - `remove(old exact identity)`
+    - `upsert(new exact identity)` with a full field-group payload
+  - non-identity deltas still use the existing structured field-group upsert path
+- `crates/agtmux-runtime/src/server.rs`
+  - updated the shell→managed promotion proof so bootstrap still yields the unmanaged shell row, while `ui.changes.v3` now returns two ordered changes:
+    - remove the shell exact row
+    - upsert the managed exact row
+- `docs/80_decisions/ADR-20260309-sync-v3-contract-freeze.md`
+  - now explicitly states that same-location exact-identity changes must be represented as remove+upsert, not as an in-place conflicting upsert
+
+### Consumer implication
+- The daemon was at fault for this specific promotion shape in the changes lane.
+- After this fix:
+  - linked-session exact rows are still preserved
+  - same-location shell→managed promotion keeps `pane_instance_id` stable
+  - `session_key` may still change by design
+  - but the changes feed now expresses that as an explicit row replacement that strict consumers can apply without conflict heuristics
+
+### Gate
+- `cargo test -p agtmux build_changes_replaces_row_when_exact_identity_changes_at_same_location -- --nocapture` PASS
+- `cargo test -p agtmux build_changes_replaces_row_when_claude_promotion_changes_exact_identity -- --nocapture` PASS
+- `cargo test -p agtmux ui_changes_v3_replaces_shell_row_when_exact_identity_changes_on_promotion -- --nocapture` PASS
+- `cargo test -p agtmux ui_bootstrap_v3_emits_unmanaged_row_when_no_semantic_truth_exists -- --nocapture` PASS
+- `cargo test -p agtmux ui_changes_v3_emits_upsert_with_strict_identity_from_sync_v3_truth -- --nocapture` PASS
