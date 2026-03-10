@@ -6,6 +6,48 @@
 
 ---
 
+## 2026-03-10 — Codex exec parity landed on the deterministic JSONL path
+
+### Summary
+
+- `codex exec --json` / `codex --yolo` can now reach reducer-backed sync-v3 `primary=.running` without reviving the removed appserver path.
+- The runtime keeps `CodexJsonl` as the only deterministic Codex semantic source:
+  - interactive transcript discovery still comes from `CODEX_HOME` / `HOME/.codex/sessions`
+  - exec mode now writes a pane-bound synthetic spool JSONL and binds that exact file to the exact pane
+- term-side strict Codex running proof moved to exec parity, while one interactive sentinel remains to protect the persistent transcript delivery path separately.
+
+### What landed
+
+- `crates/agtmux-runtime/src/codex_exec_spool.rs`
+  - normalizes exec NDJSON into transcript-like JSONL lines (`task_started`, `function_call`, `function_call_output`, `task_complete`)
+  - writes `session_meta` once and emits a pane-bound discovery hint with `session_key_override = codex:%pane`
+- `poll_loop.rs`
+  - captures joined pane output for Codex candidates
+  - keeps a pane-local spool tracker keyed by exact pane identity
+  - routes spool-backed deterministic hints into existing `CodexJsonl` discovery
+- `discovery.rs`
+  - explicit spool path binding now wins over same-CWD discovery
+  - missing explicit spool path no longer falls back to sibling same-CWD panes
+
+### Gate
+
+- `cargo fmt --all`
+- `cargo test -p agtmux-source-codex-jsonl`
+- `cargo test -p agtmux-tmux-v5`
+- `cargo test -p agtmux`
+- focused proofs:
+  - `cargo test -p agtmux codex_exec_spool -- --nocapture`
+  - `cargo test -p agtmux poll_tick_exec_json_promotes_exact_pane_to_sync_v3_running_without_same_cwd_bleed -- --nocapture`
+  - `cargo test -p agtmux poll_tick_exec_spool_rehydrates_running_truth_after_restart -- --nocapture`
+
+### Contract note
+
+- Current Codex deterministic truth is now:
+  - interactive transcript path via real `~/.codex/sessions/**/*.jsonl`
+  - exec parity path via pane-bound synthetic spool JSONL
+- `poller` remains attribution-only for Codex.
+- Interactive launch remains as a narrow sentinel in `agtmux-term`; it is no longer the only strict running-state live proof.
+
 ## 2026-03-09 — Codex strict running-state contradiction: source discovery bug isolated and fixed
 
 ### Summary

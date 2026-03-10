@@ -251,6 +251,8 @@ mod tests {
             pane_id: pane_id.to_owned(),
             session_key: session_key.to_owned(),
             jsonl_path: path,
+            explicit_jsonl_path: None,
+            session_key_override: None,
             pane_generation: Some(1),
             pane_birth_ts: None,
         }

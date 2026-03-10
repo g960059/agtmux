@@ -1,7 +1,7 @@
 //! Poll loop: wires tmux → poller → gateway → daemon pipeline.
 //! Runs as a tokio task, polling tmux at configurable intervals.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use chrono::{TimeDelta, Utc};
@@ -26,11 +26,12 @@ use agtmux_source_codex_jsonl::source::CodexJsonlSourceState;
 use agtmux_source_codex_jsonl::watcher::CodexSessionFileWatcher;
 use agtmux_source_poller::source::{PollerSourceState, poll_pane};
 use agtmux_tmux_v5::{
-    PaneGenerationTracker, TmuxCommandRunner, TmuxExecutor, TmuxPaneInfo, capture_pane, list_panes,
-    scan_all_processes, to_pane_snapshot,
+    PaneGenerationTracker, TmuxCommandRunner, TmuxExecutor, TmuxPaneInfo, capture_pane,
+    capture_pane_joined, list_panes, scan_all_processes, to_pane_snapshot,
 };
 
 use crate::cli::DaemonOpts;
+use crate::codex_exec_spool::{CodexExecSpoolTracker, spool_path_for_pane};
 use crate::server;
 use crate::sync_v3_runtime::SyncV3LiveState;
 
@@ -42,6 +43,7 @@ pub struct DaemonState {
     pub claude_jsonl_watchers: std::collections::HashMap<String, SessionFileWatcher>,
     pub codex_jsonl_source: CodexJsonlSourceState,
     pub codex_jsonl_watchers: std::collections::HashMap<String, CodexSessionFileWatcher>,
+    pub codex_exec_spools: HashMap<String, CodexExecSpoolTracker>,
     pub gateway: Gateway,
     pub daemon: DaemonProjection,
     pub generation_tracker: PaneGenerationTracker,
@@ -129,6 +131,7 @@ impl DaemonState {
             claude_jsonl_watchers: std::collections::HashMap::new(),
             codex_jsonl_source: CodexJsonlSourceState::new(),
             codex_jsonl_watchers: std::collections::HashMap::new(),
+            codex_exec_spools: HashMap::new(),
             gateway: Gateway::with_sources(
                 &[
                     SourceKind::Poller,
@@ -515,6 +518,54 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
         tracing::warn!("pane capture degraded: {capture_failures}/{}", panes.len());
     }
 
+    let snapshot_hint: HashMap<&str, Option<&str>> = snapshots
+        .iter()
+        .map(|s| (s.pane_id.as_str(), s.process_hint.as_deref()))
+        .collect();
+    let snapshot_cmd: HashMap<&str, &str> = snapshots
+        .iter()
+        .map(|s| (s.pane_id.as_str(), s.current_cmd.as_str()))
+        .collect();
+
+    let mut codex_exec_joined_captures: HashMap<String, Vec<String>> = HashMap::new();
+    if !metadata_backoff_active {
+        for pane in &panes {
+            let process_hint = snapshot_hint.get(pane.pane_id.as_str()).copied().flatten();
+            let current_cmd = snapshot_cmd
+                .get(pane.pane_id.as_str())
+                .copied()
+                .unwrap_or("");
+            if !is_codex_jsonl_candidate(process_hint, current_cmd) {
+                continue;
+            }
+
+            let exec = Arc::clone(executor);
+            let pane_id = pane.pane_id.clone();
+            let joined_lines = match tokio::time::timeout(
+                Duration::from_millis(150),
+                tokio::task::spawn_blocking(move || capture_pane_joined(&*exec, &pane_id, 200)),
+            )
+            .await
+            {
+                Ok(Ok(Ok(lines))) => lines,
+                Ok(Ok(Err(e))) => {
+                    tracing::debug!("joined capture failed for {}: {e}", pane.pane_id);
+                    Vec::new()
+                }
+                Ok(Err(e)) => {
+                    tracing::debug!("joined capture task failed for {}: {e}", pane.pane_id);
+                    Vec::new()
+                }
+                Err(_) => {
+                    tracing::debug!("joined capture timeout for {}", pane.pane_id);
+                    Vec::new()
+                }
+            };
+
+            codex_exec_joined_captures.insert(pane.pane_id.clone(), joined_lines);
+        }
+    }
+
     // 4. Process through pipeline
     let mut st = state.lock().await;
 
@@ -548,41 +599,80 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
     // `process_hint=runtime_unknown`. Discovery must still be able to recover
     // Codex truth from tmux CWD + CODEX_HOME.
     if !metadata_backoff_active {
-        let snapshot_hint: std::collections::HashMap<&str, Option<&str>> = snapshots
-            .iter()
-            .map(|s| (s.pane_id.as_str(), s.process_hint.as_deref()))
-            .collect();
-        let snapshot_cmd: std::collections::HashMap<&str, &str> = snapshots
-            .iter()
-            .map(|s| (s.pane_id.as_str(), s.current_cmd.as_str()))
-            .collect();
-
-        let codex_hints: Vec<CodexPaneHint> = panes
+        let codex_candidate_ids: HashSet<&str> = panes
             .iter()
             .filter(|p| {
                 let process_hint = snapshot_hint.get(p.pane_id.as_str()).copied().flatten();
                 let current_cmd = snapshot_cmd.get(p.pane_id.as_str()).copied().unwrap_or("");
                 is_codex_jsonl_candidate(process_hint, current_cmd)
             })
-            .map(|p| {
-                let (pane_gen, pane_birth) = st
-                    .generation_tracker
-                    .get(&p.pane_id)
-                    .map(|(g, b)| (Some(g), Some(b)))
-                    .unwrap_or((None, None));
-                CodexPaneHint {
-                    pane_id: p.pane_id.clone(),
-                    pane_pid: p.pane_pid,
-                    cwd: p.current_path.clone(),
-                    existing_jsonl_path: st
-                        .codex_jsonl_watchers
-                        .get(&p.pane_id)
-                        .map(|watcher| watcher.path().to_path_buf()),
-                    pane_generation: pane_gen,
-                    pane_birth_ts: pane_birth,
-                }
-            })
+            .map(|p| p.pane_id.as_str())
             .collect();
+        st.codex_exec_spools
+            .retain(|pane_id, _| codex_candidate_ids.contains(pane_id.as_str()));
+
+        let mut codex_hints = Vec::new();
+        for pane in &panes {
+            let process_hint = snapshot_hint.get(pane.pane_id.as_str()).copied().flatten();
+            let current_cmd = snapshot_cmd
+                .get(pane.pane_id.as_str())
+                .copied()
+                .unwrap_or("");
+            if !is_codex_jsonl_candidate(process_hint, current_cmd) {
+                continue;
+            }
+
+            let (pane_gen, pane_birth) = st
+                .generation_tracker
+                .get(&pane.pane_id)
+                .map(|(g, b)| (Some(g), Some(b)))
+                .unwrap_or((None, None));
+            let existing_jsonl_path = st
+                .codex_jsonl_watchers
+                .get(&pane.pane_id)
+                .map(|watcher| watcher.path().to_path_buf());
+
+            let desired_spool_path = spool_path_for_pane(
+                &pane.session_name,
+                &pane.window_id,
+                &pane.pane_id,
+                pane.pane_pid,
+            );
+            let capture_lines = codex_exec_joined_captures
+                .get(&pane.pane_id)
+                .cloned()
+                .unwrap_or_default();
+
+            let explicit_spool_hint = {
+                let tracker = st
+                    .codex_exec_spools
+                    .entry(pane.pane_id.clone())
+                    .and_modify(|tracker| {
+                        if tracker.spool_path() != desired_spool_path {
+                            *tracker = CodexExecSpoolTracker::new(desired_spool_path.clone());
+                        }
+                    })
+                    .or_insert_with(|| CodexExecSpoolTracker::new(desired_spool_path.clone()));
+
+                if let Err(e) = tracker.sync_capture(&pane.current_path, &capture_lines, now) {
+                    tracing::debug!("codex exec spool sync failed for {}: {}", pane.pane_id, e);
+                }
+                tracker.discovery_hint(&pane.pane_id)
+            };
+
+            codex_hints.push(CodexPaneHint {
+                pane_id: pane.pane_id.clone(),
+                pane_pid: pane.pane_pid,
+                cwd: pane.current_path.clone(),
+                explicit_jsonl_path: explicit_spool_hint
+                    .as_ref()
+                    .map(|hint| hint.jsonl_path.clone()),
+                session_key_override: explicit_spool_hint.map(|hint| hint.session_key_override),
+                existing_jsonl_path,
+                pane_generation: pane_gen,
+                pane_birth_ts: pane_birth,
+            });
+        }
 
         if !codex_hints.is_empty() {
             let discoveries = CodexJsonlSourceState::discover_sessions(&codex_hints);
@@ -1091,7 +1181,7 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
 mod tests {
     use super::*;
     use crate::server::build_ui_bootstrap_v3;
-    use agtmux_core_v5::sync_v3::{ThreadLifecycleV3, UiBootstrapV3};
+    use agtmux_core_v5::sync_v3::{ThreadExecutionV3, ThreadLifecycleV3, UiBootstrapV3};
     use agtmux_core_v5::types::{EvidenceTier, Provider, SourceEventV2, SourceKind};
     use agtmux_tmux_v5::error::TmuxError;
     use chrono::DateTime;
@@ -1821,6 +1911,128 @@ mod tests {
         assert_eq!(pane.presence, agtmux_core_v5::sync_v3::PresenceV3::Managed);
 
         drop(st);
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[tokio::test]
+    async fn poll_tick_exec_json_promotes_exact_pane_to_sync_v3_running_without_same_cwd_bleed() {
+        let _env_lock = ENV_LOCK.lock().expect("env lock");
+        let project_dir = temp_dir("codex-exec-running");
+        let cwd = project_dir.to_str().expect("utf8 path");
+
+        let backend = Arc::new(
+            FakeTmuxBackend::new()
+                .with_pane_cwd(
+                    "%1",
+                    "vm agtmux",
+                    "node",
+                    concat!(
+                        r#"{"type":"thread.started","thread_id":"thr_1"}"#,
+                        "\n",
+                        r#"{"type":"turn.started","turn_id":"turn_1"}"#,
+                        "\n",
+                        r#"{"type":"item.started","item":{"id":"item_1","type":"command_execution","status":"in_progress","command":"sleep 30"}}"#
+                    ),
+                    cwd,
+                )
+                .with_pane_cwd("%2", "vm agtmux", "node", "$ ", cwd),
+        );
+        let state = new_state();
+
+        poll_tick(&backend, &state).await.expect("tick");
+
+        let mut st = state.lock().await;
+        let payload: UiBootstrapV3 = serde_json::from_value(build_ui_bootstrap_v3(&mut st))
+            .expect("valid ui.bootstrap.v3 payload");
+
+        let pane1 = payload
+            .panes
+            .iter()
+            .find(|pane| pane.pane_id == "%1")
+            .expect("exec pane row");
+        assert_eq!(pane1.provider, Some(Provider::Codex));
+        assert_eq!(pane1.presence, agtmux_core_v5::sync_v3::PresenceV3::Managed);
+        assert_eq!(pane1.thread.lifecycle, ThreadLifecycleV3::Active);
+        assert_eq!(pane1.thread.execution, ThreadExecutionV3::ToolRunning);
+
+        let pane2 = payload
+            .panes
+            .iter()
+            .find(|pane| pane.pane_id == "%2")
+            .expect("sibling pane row");
+        assert_eq!(pane2.provider, None);
+        assert_eq!(
+            pane2.presence,
+            agtmux_core_v5::sync_v3::PresenceV3::Unmanaged
+        );
+        assert!(
+            st.gateway.source_cursor(SourceKind::CodexJsonl).is_some(),
+            "exec NDJSON spool should feed the existing CodexJsonl source cursor"
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_tick_exec_spool_rehydrates_running_truth_after_restart() {
+        let _env_lock = ENV_LOCK.lock().expect("env lock");
+        let temp = temp_dir("codex-exec-restart");
+        let home_dir = temp.join("home");
+        let project_dir = temp.join("project");
+        fs::create_dir_all(&home_dir).expect("home dir");
+        fs::create_dir_all(&project_dir).expect("project dir");
+        let _home = TestEnvGuard::set("HOME", home_dir.to_str().expect("utf8 path"));
+
+        let backend = Arc::new(FakeTmuxBackend::new().with_pane_cwd(
+            "%1",
+            "vm agtmux",
+            "node",
+            "",
+            project_dir.to_str().expect("utf8 path"),
+        ));
+        let state = new_state();
+        let now = Utc::now();
+        let spool_path = {
+            let mut st = state.lock().await;
+            st.generation_tracker.update(&["%1"], now);
+            let _ = st
+                .generation_tracker
+                .get("%1")
+                .expect("tracked pane generation");
+            spool_path_for_pane("vm agtmux", "@0", "%1", None)
+        };
+        let parent = spool_path.parent().expect("spool parent");
+        fs::create_dir_all(parent).expect("spool dir");
+        fs::write(
+            &spool_path,
+            format!(
+                concat!(
+                    r#"{{"timestamp":"2026-03-10T17:00:00.000Z","type":"session_meta","payload":{{"type":"session_meta","cwd":"{cwd}","sessionId":"agtmux-codex-exec-spool"}}}}"#,
+                    "\n",
+                    r#"{{"timestamp":"2026-03-10T17:00:01.000Z","type":"event_msg","payload":{{"type":"task_started"}}}}"#,
+                    "\n",
+                    r#"{{"timestamp":"2026-03-10T17:00:02.000Z","type":"response_item","payload":{{"type":"function_call","call_id":"item_1","name":"shell_command"}}}}"#,
+                    "\n"
+                ),
+                cwd = project_dir.to_str().expect("utf8 path"),
+            ),
+        )
+        .expect("seed spool");
+
+        poll_tick(&backend, &state).await.expect("restart tick");
+
+        let mut st = state.lock().await;
+        let payload: UiBootstrapV3 = serde_json::from_value(build_ui_bootstrap_v3(&mut st))
+            .expect("valid ui.bootstrap.v3 payload");
+        let pane = payload
+            .panes
+            .iter()
+            .find(|pane| pane.pane_id == "%1")
+            .expect("rehydrated pane row");
+
+        assert_eq!(pane.provider, Some(Provider::Codex));
+        assert_eq!(pane.presence, agtmux_core_v5::sync_v3::PresenceV3::Managed);
+        assert_eq!(pane.thread.lifecycle, ThreadLifecycleV3::Active);
+        assert_eq!(pane.thread.execution, ThreadExecutionV3::ToolRunning);
+
         let _ = fs::remove_dir_all(temp);
     }
 

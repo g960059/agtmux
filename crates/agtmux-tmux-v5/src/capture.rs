@@ -172,6 +172,18 @@ pub fn capture_pane(
     Ok(output.lines().map(String::from).collect())
 }
 
+/// Capture the last `lines` logical lines of terminal output from a pane,
+/// joining wrapped screen lines so newline-delimited JSON survives tmux wraps.
+pub fn capture_pane_joined(
+    runner: &impl TmuxCommandRunner,
+    pane_id: &str,
+    lines: u32,
+) -> Result<Vec<String>, TmuxError> {
+    let start_line = format!("-{lines}");
+    let output = runner.run(&["capture-pane", "-p", "-J", "-S", &start_line, "-t", pane_id])?;
+    Ok(output.lines().map(String::from).collect())
+}
+
 /// Known interactive shells — panes running these are plain terminals,
 /// not agent runtimes, and must never receive a Codex thread assignment.
 const SHELL_CMDS: &[&str] = &[

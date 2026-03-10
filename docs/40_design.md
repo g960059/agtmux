@@ -55,12 +55,11 @@
   - `signature_inputs` (`provider_hint`, `cmd_match`, `poller_match`, `title_match`)
 
 #### Deterministic sources (MVP fixed)
-- Codex: `agtmux-source-codex-appserver`
-  - **Protocol**: 公式 Codex App Server API (JSON-RPC 2.0 over stdio)
-  - **API reference**: `docs/codex-appserver-api-reference.md` (実装前に必読)
-  - **Primary path**: `CodexAppServerClient` が `codex app-server` を spawn し、`thread/list` ポーリング + notification 受信
-  - **Fallback path**: App Server 利用不可時のみ、tmux capture から `codex exec --json` の NDJSON を parse
-  - **T-119**: `thread/list` の `cwd` パラメータで tmux pane cwd とマッチングし thread ↔ pane 対応を確立
+- Codex: `agtmux-source-codex-jsonl`
+  - **Interactive transcript path**: `CODEX_HOME` または `HOME/.codex` 以下の `sessions/**/*.jsonl` を discovery し、`session_meta.payload.cwd` から pane ownership を決める
+  - **Exec parity path**: `codex exec --json` / `codex --yolo` の NDJSON を pane-bound spool JSONL に正規化し、同じ `CodexJsonl` watcher/FSM/reducer 契約へ流す
+  - **Heuristic fallback**: poller は provider/presence attribution のみ。sync-v3 reducer-backed `primary=.running` は deterministic Codex payload が来た時だけ成立する
+  - **Historical note**: 旧 `codex app-server` 調査資料は `docs/codex-appserver-api-reference.md` に残すが、current runtime path では使わない
 - Claude: `agtmux-source-claude-hooks`
   - **登録済み hook events**: `PreToolUse`, `PostToolUse`, `Notification`, `Stop`, `SubagentStop`
   - **T-E01 追加対象 hook events**（Phase 8）:
@@ -173,9 +172,9 @@ pub struct SourceCursorState {
   4. それ以外は heuristic tier を採用
   5. fresh deterministic 再到達で即時 re-promotion
 - Source rank policy (MVP):
-  - Codex: `appserver (official API) > capture fallback > poller`
+  - Codex: `jsonl transcript / exec spool (deterministic) > poller`
   - Claude: `hooks (rank 0) > jsonl (rank 1) > poller (rank 2)`
-  - Note: Codex appserver は公式 API (`docs/codex-appserver-api-reference.md`) を使用。独自プロトコルは禁止。
+  - Note: Codex は `CodexJsonl` を唯一の deterministic semantic path とし、interactive transcript と exec spool を同じ payload/FSM/reducer 契約へ収束させる。
   - Note: Claude JSONL は hooks 未登録環境での deterministic fallback。hooks が有効な場合は hooks が rank 優先。
 - Source rank policy (Post-MVP, after T-E04):
   - Claude: `hooks (rank 0) > jsonl (rank 1) > osc_tap (rank 2) > poller (rank 3)`

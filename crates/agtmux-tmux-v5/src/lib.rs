@@ -12,8 +12,8 @@ pub mod pane_info;
 pub mod snapshot;
 
 pub use capture::{
-    ProcessInfo, ProcessMap, capture_pane, inspect_pane_processes, inspect_pane_processes_deep,
-    scan_all_processes,
+    ProcessInfo, ProcessMap, capture_pane, capture_pane_joined, inspect_pane_processes,
+    inspect_pane_processes_deep, scan_all_processes,
 };
 pub use error::TmuxError;
 pub use executor::{TmuxCommandRunner, TmuxExecutor};

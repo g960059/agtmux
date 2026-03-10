@@ -76,14 +76,15 @@
 - **Crate**: `crates/agtmux-source-claude-jsonl/`
 - Source rank: `ClaudeHooks (rank 0) > ClaudeJsonl (rank 1) > Poller (rank 2)`
 
-## Codex App Server Integration (T-113a — 597 tests)
-- **API reference (MUST READ before Codex work)**: `docs/codex-appserver-api-reference.md`
-- **Design/implementation strategy**: `docs/40_design.md` (Section 9 → Codex App Server Integration)
-- `docs/60_tasks.md` (T-113a DONE, T-119 TODO)
-- `docs/70_progress.md` (implementation records)
-- Primary: `CodexAppServerClient` (JSON-RPC 2.0 over stdio, `codex app-server`)
-- Fallback: capture-based NDJSON extraction from `codex exec --json` output
-- External API ref: https://developers.openai.com/codex/app-server/
+## Codex Deterministic Sources
+- **Current design/implementation**: `docs/40_design.md` (Deterministic sources / Source rank policy)
+- `docs/60_tasks.md` (`T-codex01a`〜`T-codex01d`)
+- `docs/70_progress.md`
+- Deterministic semantic path is unified under `CodexJsonl`:
+  - interactive transcripts: `CODEX_HOME` or `HOME/.codex/sessions/**/*.jsonl`
+  - exec parity: pane-bound synthetic spool JSONL for `codex exec --json` / `codex --yolo`
+- Poller remains attribution-only for Codex; reducer-backed `primary=.running` comes only from native Codex semantic payloads.
+- Historical archive only: `docs/codex-appserver-api-reference.md`
 
 ## Hardening Later (Post-MVP Phase 4+)
 - `docs/20_spec.md` の `[Post-MVP]` FR

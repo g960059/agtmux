@@ -241,6 +241,19 @@ Phase 7 (Distribution) と独立して実施可能。
   - Gateway sources: `CodexAppserver` → `CodexJsonl` に置換
   - Gate: `just verify` 800+ tests PASS, zero warnings
 
+- [x] T-codex01d (P1) exec parity deterministic spool/hint — DONE (2026-03-10)
+  - **目的**: `codex exec --json` / `codex --yolo` でも interactive transcript と同じ deterministic Codex semantic path へ入り、strict live proof で `primary=.running` を出せるようにする
+  - **実装**:
+    - `crates/agtmux-runtime/src/codex_exec_spool.rs` 新規: pane-bound NDJSON spool tracker、`session_meta` header、exec NDJSON → transcript-like JSONL 正規化
+    - `poll_loop.rs`: joined capture を exact pane ごとに spool し、`CodexPaneHint.explicit_jsonl_path + session_key_override` で `CodexJsonl` discovery に直結
+    - `discovery.rs`: explicit pane-bound JSONL binding を最優先し、missing explicit path では same-CWD fallback しない
+    - `tmux capture-pane -J` helper 追加
+  - **Gate**:
+    - `cargo test -p agtmux codex_exec_spool -- --nocapture`
+    - `cargo test -p agtmux poll_tick_exec_json_promotes_exact_pane_to_sync_v3_running_without_same_cwd_bleed -- --nocapture`
+    - `cargo test -p agtmux poll_tick_exec_spool_rehydrates_running_truth_after_restart -- --nocapture`
+    - `cargo test -p agtmux`
+
 ## DOING
 
 ### Cross-repo agtmux-term compatibility recovery

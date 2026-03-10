@@ -12,6 +12,7 @@ mod cmd_ls;
 mod cmd_pick;
 mod cmd_wait;
 mod cmd_watch;
+mod codex_exec_spool;
 #[allow(dead_code)] // Skeleton module — wired into poll_tick once Codex protocol is finalized
 mod codex_poller;
 mod context;
