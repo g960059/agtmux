@@ -1,9 +1,6 @@
 //! Translates raw Codex appserver lifecycle events into [`SourceEventV2`].
 
-use agtmux_core_v5::{
-    sync_v2_compat,
-    types::{ActivityState, EvidenceTier, Provider, SourceEventV2, SourceKind},
-};
+use agtmux_core_v5::types::{ActivityState, EvidenceTier, Provider, SourceEventV2, SourceKind};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -76,7 +73,19 @@ fn raw_event_type_to_activity_state(event_type: &str) -> ActivityState {
         "session.start" | "task.running" => ActivityState::Running,
         "session.end" | "task.idle" => ActivityState::Idle,
         "task.error" => ActivityState::Error,
-        other => sync_v2_compat::parse_activity_state(other),
+        "activity.running" | "lifecycle.running" | "activity.start" | "lifecycle.start"
+        | "thread.active" | "turn.started" | "turn.inProgress" => ActivityState::Running,
+        "activity.idle" | "lifecycle.idle" | "activity.end" | "activity.stop" | "lifecycle.end"
+        | "lifecycle.stop" | "thread.idle" | "thread.not_loaded" | "turn.completed"
+        | "turn.interrupted" => ActivityState::Idle,
+        "activity.waiting_input" | "lifecycle.waiting_input" => ActivityState::WaitingInput,
+        "activity.waiting_approval" | "lifecycle.waiting_approval" => {
+            ActivityState::WaitingApproval
+        }
+        "activity.error" | "lifecycle.error" | "thread.error" | "thread.systemError"
+        | "turn.failed" => ActivityState::Error,
+        "activity.user_input" | "activity.tool_complete" => ActivityState::Running,
+        _ => ActivityState::Unknown,
     }
 }
 

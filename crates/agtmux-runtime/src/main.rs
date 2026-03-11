@@ -19,7 +19,6 @@ mod context;
 mod poll_loop;
 mod server;
 mod setup_hooks;
-mod sync_v2_compat;
 mod sync_v3_runtime;
 
 #[tokio::main]

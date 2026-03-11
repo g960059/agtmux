@@ -1,9 +1,8 @@
-use agtmux_core_v5::sync_v2_compat;
 use agtmux_core_v5::sync_v3::{
     AgentLifecycleV3, PendingRequestKindV3, PendingRequestSourceV3, PendingRequestStatusV3,
     PendingRequestV3, ThreadExecutionV3, ThreadLifecycleV3, TurnOutcomeV3,
 };
-use agtmux_core_v5::types::{Provider, SourceEventV2, SourceKind};
+use agtmux_core_v5::types::{ActivityState, Provider, SourceEventV2, SourceKind};
 use chrono::{DateTime, SecondsFormat, Utc};
 
 use crate::sync_v3::SyncV3Reducer;
@@ -291,7 +290,7 @@ impl CodexSemanticEvent {
     fn provider_raw(&self, event: &SourceEventV2, updated_at: DateTime<Utc>) -> serde_json::Value {
         serde_json::json!({
             "source_kind": event.source_kind.as_str(),
-            "event_type": sync_v2_compat::activity_event_type(event.activity_state),
+            "event_type": legacy_activity_event_type(event.activity_state),
             "observed_at": event.observed_at.to_rfc3339_opts(SecondsFormat::Millis, true),
             "actual_activity_at": updated_at.to_rfc3339_opts(SecondsFormat::Millis, true),
             "semantic_event": {
@@ -307,6 +306,18 @@ impl CodexSemanticEvent {
                 "bootstrap": self.bootstrap
             }
         })
+    }
+}
+
+fn legacy_activity_event_type(state: ActivityState) -> &'static str {
+    match state {
+        ActivityState::Running => "activity.running",
+        ActivityState::Idle => "activity.idle",
+        ActivityState::WaitingInput => "activity.waiting_input",
+        ActivityState::WaitingApproval => "activity.waiting_approval",
+        ActivityState::Error => "activity.error",
+        ActivityState::Unknown => "activity.unknown",
+        _ => "activity.unknown",
     }
 }
 

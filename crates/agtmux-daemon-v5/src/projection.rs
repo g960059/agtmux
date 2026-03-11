@@ -1007,7 +1007,6 @@ fn extract_signature_inputs(payload: &serde_json::Value) -> SignatureInputsCompa
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agtmux_core_v5::sync_v2_compat;
     use agtmux_core_v5::types::{ActivityState, SourceKind};
     use chrono::TimeDelta;
 
@@ -1023,7 +1022,7 @@ mod tests {
         source_kind: SourceKind,
         session_key: &str,
         pane_id: Option<&str>,
-        event_type: &str,
+        activity_state: ActivityState,
         observed_at: DateTime<Utc>,
     ) -> SourceEventV2 {
         SourceEventV2 {
@@ -1037,11 +1036,29 @@ mod tests {
             pane_generation: None,
             pane_birth_ts: None,
             source_event_id: None,
-            activity_state: agtmux_core_v5::sync_v2_compat::parse_activity_state(event_type),
+            activity_state,
             payload: serde_json::json!({}),
             confidence: 0.86,
             is_heartbeat: false,
             actual_activity_at: None,
+        }
+    }
+
+    fn legacy_activity_state(event_type: &str) -> ActivityState {
+        match event_type {
+            "activity.running" | "lifecycle.running" | "activity.start" | "lifecycle.start"
+            | "thread.active" | "turn.started" | "turn.inProgress" => ActivityState::Running,
+            "activity.user_input" | "activity.tool_complete" => ActivityState::Running,
+            "activity.idle" | "lifecycle.idle" | "activity.end" | "activity.stop"
+            | "lifecycle.end" | "lifecycle.stop" | "thread.idle" | "thread.not_loaded"
+            | "turn.completed" | "turn.interrupted" => ActivityState::Idle,
+            "activity.waiting_input" | "lifecycle.waiting_input" => ActivityState::WaitingInput,
+            "activity.waiting_approval" | "lifecycle.waiting_approval" => {
+                ActivityState::WaitingApproval
+            }
+            "activity.error" | "lifecycle.error" | "thread.error" | "thread.systemError"
+            | "turn.failed" => ActivityState::Error,
+            _ => ActivityState::Unknown,
         }
     }
 
@@ -1058,7 +1075,7 @@ mod tests {
             SourceKind::CodexAppserver,
             session,
             Some(pane),
-            event_type,
+            legacy_activity_state(event_type),
             at,
         )
     }
@@ -1076,7 +1093,7 @@ mod tests {
             SourceKind::Poller,
             session,
             Some(pane),
-            event_type,
+            legacy_activity_state(event_type),
             at,
         );
         e.payload = serde_json::json!({
@@ -1155,126 +1172,96 @@ mod tests {
     // ── 4. Activity state parsing ──────────────────────────────────
 
     #[test]
-    fn sync_v2_compat_activity_state_parsing() {
+    fn legacy_activity_state_parsing() {
         assert_eq!(
-            sync_v2_compat::parse_activity_state("activity.running"),
+            legacy_activity_state("activity.running"),
             ActivityState::Running
         );
         assert_eq!(
-            sync_v2_compat::parse_activity_state("lifecycle.running"),
+            legacy_activity_state("lifecycle.running"),
             ActivityState::Running
         );
+        assert_eq!(legacy_activity_state("activity.idle"), ActivityState::Idle);
+        assert_eq!(legacy_activity_state("lifecycle.idle"), ActivityState::Idle);
         assert_eq!(
-            sync_v2_compat::parse_activity_state("activity.idle"),
-            ActivityState::Idle
-        );
-        assert_eq!(
-            sync_v2_compat::parse_activity_state("lifecycle.idle"),
-            ActivityState::Idle
-        );
-        assert_eq!(
-            sync_v2_compat::parse_activity_state("activity.waiting_input"),
+            legacy_activity_state("activity.waiting_input"),
             ActivityState::WaitingInput
         );
         assert_eq!(
-            sync_v2_compat::parse_activity_state("activity.waiting_approval"),
+            legacy_activity_state("activity.waiting_approval"),
             ActivityState::WaitingApproval
         );
         assert_eq!(
-            sync_v2_compat::parse_activity_state("activity.error"),
+            legacy_activity_state("activity.error"),
             ActivityState::Error
         );
         assert_eq!(
-            sync_v2_compat::parse_activity_state("lifecycle.start"),
+            legacy_activity_state("lifecycle.start"),
             ActivityState::Running
         );
         assert_eq!(
-            sync_v2_compat::parse_activity_state("activity.start"),
+            legacy_activity_state("activity.start"),
             ActivityState::Running
         );
+        assert_eq!(legacy_activity_state("lifecycle.end"), ActivityState::Idle);
+        assert_eq!(legacy_activity_state("lifecycle.stop"), ActivityState::Idle);
+        assert_eq!(legacy_activity_state("activity.end"), ActivityState::Idle);
+        assert_eq!(legacy_activity_state("activity.stop"), ActivityState::Idle);
         assert_eq!(
-            sync_v2_compat::parse_activity_state("lifecycle.end"),
-            ActivityState::Idle
-        );
-        assert_eq!(
-            sync_v2_compat::parse_activity_state("lifecycle.stop"),
-            ActivityState::Idle
-        );
-        assert_eq!(
-            sync_v2_compat::parse_activity_state("activity.end"),
-            ActivityState::Idle
-        );
-        assert_eq!(
-            sync_v2_compat::parse_activity_state("activity.stop"),
-            ActivityState::Idle
-        );
-        assert_eq!(
-            sync_v2_compat::parse_activity_state("lifecycle.waiting_input"),
+            legacy_activity_state("lifecycle.waiting_input"),
             ActivityState::WaitingInput
         );
         assert_eq!(
-            sync_v2_compat::parse_activity_state("lifecycle.waiting_approval"),
+            legacy_activity_state("lifecycle.waiting_approval"),
             ActivityState::WaitingApproval
         );
         assert_eq!(
-            sync_v2_compat::parse_activity_state("lifecycle.error"),
+            legacy_activity_state("lifecycle.error"),
             ActivityState::Error
         );
         assert_eq!(
-            sync_v2_compat::parse_activity_state("unknown.type"),
+            legacy_activity_state("unknown.type"),
             ActivityState::Unknown
         );
 
         // Claude JSONL namespace
         assert_eq!(
-            sync_v2_compat::parse_activity_state("activity.user_input"),
+            legacy_activity_state("activity.user_input"),
             ActivityState::Running
         );
         assert_eq!(
-            sync_v2_compat::parse_activity_state("activity.tool_complete"),
+            legacy_activity_state("activity.tool_complete"),
             ActivityState::Running
         );
 
         // Codex App Server namespace
         assert_eq!(
-            sync_v2_compat::parse_activity_state("thread.active"),
+            legacy_activity_state("thread.active"),
             ActivityState::Running
         );
+        assert_eq!(legacy_activity_state("thread.idle"), ActivityState::Idle);
+        assert_eq!(legacy_activity_state("thread.error"), ActivityState::Error);
         assert_eq!(
-            sync_v2_compat::parse_activity_state("thread.idle"),
-            ActivityState::Idle
-        );
-        assert_eq!(
-            sync_v2_compat::parse_activity_state("thread.error"),
+            legacy_activity_state("thread.systemError"),
             ActivityState::Error
         );
         assert_eq!(
-            sync_v2_compat::parse_activity_state("thread.systemError"),
-            ActivityState::Error
-        );
-        assert_eq!(
-            sync_v2_compat::parse_activity_state("turn.started"),
+            legacy_activity_state("turn.started"),
             ActivityState::Running
         );
         assert_eq!(
-            sync_v2_compat::parse_activity_state("turn.inProgress"),
+            legacy_activity_state("turn.inProgress"),
             ActivityState::Running
         );
+        assert_eq!(legacy_activity_state("turn.completed"), ActivityState::Idle);
         assert_eq!(
-            sync_v2_compat::parse_activity_state("turn.completed"),
+            legacy_activity_state("turn.interrupted"),
             ActivityState::Idle
         );
-        assert_eq!(
-            sync_v2_compat::parse_activity_state("turn.interrupted"),
-            ActivityState::Idle
-        );
-        assert_eq!(
-            sync_v2_compat::parse_activity_state("turn.failed"),
-            ActivityState::Error
-        );
+        assert_eq!(legacy_activity_state("turn.failed"), ActivityState::Error);
         // notLoaded threads map to Idle (defensive — primary filter is in codex_poller)
         assert_eq!(
-            sync_v2_compat::parse_activity_state("thread.not_loaded"),
+            legacy_activity_state("thread.not_loaded"),
             ActivityState::Idle
         );
     }
@@ -1738,7 +1725,7 @@ mod tests {
             SourceKind::CodexAppserver,
             "thr-1",
             None,
-            "turn.completed",
+            legacy_activity_state("turn.completed"),
             t2,
         );
         let result = proj.apply_events(vec![event], t2);
@@ -1912,7 +1899,7 @@ mod tests {
             SourceKind::ClaudeHooks,
             "claude-sess-1",
             Some("%5"),
-            "lifecycle.start",
+            legacy_activity_state("lifecycle.start"),
             now,
         );
         proj.apply_events(vec![event], now);
@@ -2034,7 +2021,7 @@ mod tests {
             SourceKind::Poller,
             "s1",
             Some("%1"),
-            "activity.running",
+            legacy_activity_state("activity.running"),
             now,
         );
         event.payload = serde_json::json!({ "provider_hint": true });
@@ -2069,7 +2056,7 @@ mod tests {
             SourceKind::Poller,
             "s1",
             Some("%1"),
-            "activity.running",
+            legacy_activity_state("activity.running"),
             now,
         );
 
@@ -2098,7 +2085,7 @@ mod tests {
             SourceKind::Poller,
             "s1",
             Some("%1"),
-            "activity.running",
+            legacy_activity_state("activity.running"),
             t,
         );
         e1.payload = serde_json::json!({ "provider_hint": true });
@@ -2115,7 +2102,7 @@ mod tests {
             SourceKind::Poller,
             "s1",
             Some("%1"),
-            "activity.running",
+            legacy_activity_state("activity.running"),
             t2,
         );
         proj.apply_events(vec![e2], t2);
@@ -2131,7 +2118,7 @@ mod tests {
             SourceKind::Poller,
             "s1",
             Some("%1"),
-            "activity.running",
+            legacy_activity_state("activity.running"),
             t3,
         );
         proj.apply_events(vec![e3], t3);
@@ -2157,7 +2144,7 @@ mod tests {
             SourceKind::Poller,
             "s1",
             Some("%1"),
-            "activity.running",
+            legacy_activity_state("activity.running"),
             now,
         );
         event.payload = serde_json::json!({
@@ -2279,7 +2266,7 @@ mod tests {
             SourceKind::Poller,
             "s1",
             Some("%1"),
-            "activity.running",
+            legacy_activity_state("activity.running"),
             now,
         );
         proj.apply_events(vec![event], now);
@@ -2324,7 +2311,7 @@ mod tests {
             SourceKind::Poller,
             "s1",
             Some("%1"),
-            "activity.running",
+            legacy_activity_state("activity.running"),
             t2,
         );
         proj.apply_events(vec![empty_heur], t2);
@@ -2354,7 +2341,7 @@ mod tests {
             SourceKind::Poller,
             "s1",
             Some("%1"),
-            "activity.running",
+            legacy_activity_state("activity.running"),
             now,
         );
         // Poller events set matched_pattern, not poller_match
@@ -2387,7 +2374,7 @@ mod tests {
             SourceKind::CodexAppserver,
             thread_id, // e.g. "thr_abc"
             Some(pane),
-            "thread.active",
+            legacy_activity_state("thread.active"),
             at,
         )
     }
@@ -2406,7 +2393,7 @@ mod tests {
             SourceKind::Poller,
             &session_key,
             Some(pane),
-            event_type,
+            legacy_activity_state(event_type),
             at,
         );
         e.payload = serde_json::json!({
@@ -2429,7 +2416,7 @@ mod tests {
             SourceKind::ClaudeHooks,
             session_id, // e.g. "claude-sess-xyz"
             Some(pane),
-            "lifecycle.running",
+            ActivityState::Running,
             at,
         )
     }
@@ -2448,7 +2435,7 @@ mod tests {
             SourceKind::Poller,
             &session_key,
             Some(pane),
-            event_type,
+            legacy_activity_state(event_type),
             at,
         );
         e.payload = serde_json::json!({
@@ -2695,7 +2682,7 @@ mod tests {
             SourceKind::CodexAppserver,
             "thr_abc",
             None, // no pane_id
-            "thread.active",
+            legacy_activity_state("thread.active"),
             now,
         );
         let result = proj.apply_events(vec![event], now);
@@ -2755,7 +2742,7 @@ mod tests {
             SourceKind::CodexAppserver,
             "sess-1",
             Some("%1"),
-            "thread.idle",
+            legacy_activity_state("thread.idle"),
             now,
         );
         proj.apply_events(vec![det_event], now);
@@ -2787,7 +2774,7 @@ mod tests {
             SourceKind::CodexAppserver,
             "sess-1",
             Some("%1"),
-            "thread.idle",
+            legacy_activity_state("thread.idle"),
             now,
         );
         proj.apply_events(vec![det_event], now);
@@ -3017,7 +3004,7 @@ mod tests {
             SourceKind::ClaudeJsonl,
             "claude-sess",
             Some("%1"),
-            "activity.idle",
+            legacy_activity_state("activity.idle"),
             t_hb,
         );
         hb.is_heartbeat = true;
@@ -3047,7 +3034,7 @@ mod tests {
             SourceKind::ClaudeJsonl,
             "claude-sess",
             Some("%1"),
-            "activity.idle",
+            legacy_activity_state("activity.idle"),
             t_hb,
         );
         hb.is_heartbeat = true;
@@ -3074,7 +3061,7 @@ mod tests {
             SourceKind::CodexAppserver,
             "codex-sess",
             Some("%1"),
-            "thread.idle",
+            legacy_activity_state("thread.idle"),
             t,
         );
         hb.is_heartbeat = true;
@@ -3111,7 +3098,7 @@ mod tests {
             SourceKind::ClaudeHooks,
             "claude-sess",
             Some("%1"),
-            "lifecycle.stop",
+            legacy_activity_state("lifecycle.stop"),
             t1,
         );
         proj.apply_events(vec![stop], t1);

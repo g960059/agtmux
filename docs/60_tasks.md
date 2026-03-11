@@ -998,7 +998,9 @@ Phase 7 (Distribution) と独立して実施可能。
   - RP: `docs/85_reviews/RP-T-SV2-P2-v2-endpoint-removal.md`
   - blocked_by: T-XTERM-A3 (DONE), T-XTERM-A4 (DONE), T-XTERM-A5 (DONE), T-XTERM-A7 (DONE), T-XTERM-A8 (DONE)
 
-- [ ] T-SV2-P3 (P2) sync-v2 compat: delete `agtmux-core-v5::sync_v2_compat` module
+- [x] T-SV2-P3 (P2) sync-v2 compat: delete `agtmux-core-v5::sync_v2_compat` module — DONE (2026-03-11)
   - 目的: T-SV2-P1 + T-SV2-P2 完了後、core module 自体を除去する
-  - 対象: `crates/agtmux-core-v5/src/sync_v2_compat.rs` + `lib.rs` からの re-export
-  - blocked_by: T-SV2-P1, T-SV2-P2
+  - 対象: `crates/agtmux-core-v5/src/sync_v2_compat.rs` (削除) + `lib.rs` からの re-export (削除); runtime stub 削除; projection.rs テストヘルパー更新 (19 call sites)
+  - Gate: `just verify` PASS (948 tests) ✅
+  - RP: `docs/85_reviews/RP-T-SV2-P3-sync-v2-module-deletion.md`
+  - blocked_by: T-SV2-P1 (DONE), T-SV2-P2 (DONE)
