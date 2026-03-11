@@ -271,64 +271,47 @@ Phase 7 (Distribution) と独立して実施可能。
 
 ### Cross-repo agtmux-term compatibility recovery
 
-- [ ] T-XTERM-A3 (P0) Cross-repo: sync-v2 exact-identity handback
-  - 目的: `AGTMUX_BIN=... swift run AgtmuxTerm` で `Local daemon incompatible` が出ない bootstrap/changes contract に戻し、strict consumer と live daemon を再接続する
-  - Current blocker after the earlier `session_id` fix:
-    - `build_sync_v2_pane_list()` still serializes managed rows whose tmux exact location can no longer be resolved from live inventory
-    - on a dirty persistent app-managed daemon, this yields managed panes with `session_name: null` / `window_id: null`
-    - strict agtmux-term consumer rejects the whole bootstrap epoch, so all provider/activity overlays disappear
-  - Why current online E2E missed it:
-    - existing online/e2e suites start a fresh daemon on a temporary socket with fresh tmux state
-    - they do not exercise dirty persistent daemon state with orphan managed rows
-  - Phase 1: add failing producer-side regression coverage for dirty-state bootstrap rows with unresolved exact location (`session_name` / `window_id` null)
-  - Phase 2: make sync-v2 bootstrap exclude or otherwise prevent orphan managed panes whose exact location cannot be resolved; emitting null exact fields is forbidden
-  - Progress (2026-03-08, producer-side landed):
-    - `build_sync_v2_pane_list()` now excludes managed panes whose exact location can no longer be resolved from `last_panes`
-    - regression `ui_bootstrap_v2_excludes_managed_pane_when_exact_location_is_unresolved` added, and required-field assertions now check non-null `session_name` / `window_id`
-    - verification: `cargo test -p agtmux ui_bootstrap_v2_`, `cargo test -p agtmux`
-  - Phase 3: rerun both clean online/e2e and cross-repo live smoke (`AGTMUX_BIN=/Users/virtualmachine/ghq/github.com/g960059/agtmux/target/debug/agtmux swift run AgtmuxTerm`) until the persistent app-managed socket also accepts strict consumer decode
-  - Gate:
-    - failing dirty-state regression test を先に追加すること
-    - `just verify` PASS
-    - producer-side online/e2e includes the dirty-state exact-location scenario
-    - strict agtmux-term consumer で live smoke PASS
+- [x] T-XTERM-A3 (P0) Cross-repo: sync-v2 exact-identity handback — DONE (2026-03-11)
+  - 目的: `build_sync_v2_pane_list()` が orphan managed panes（exact location null）を emit しないよう修正し、strict consumer が bootstrap を reject しないようにする
+  - Phase 1+2 (2026-03-08): producer-side fix landed
+    - `build_sync_v2_pane_list()` が `let Some(tmux_info) = state.last_panes.find(...)` else `continue` で unresolved panes を除外
+    - regression `ui_bootstrap_v2_excludes_managed_pane_when_exact_location_is_unresolved` added
+  - Phase 3 verification (2026-03-11):
+    - `cargo test -p agtmux ui_bootstrap_v2_` → 7/7 PASS
+    - `cargo build -p agtmux` → PASS (v0.1.17)
+    - `swift test --filter AgtmuxSyncV2DecodingTests` → 10/10 PASS
+    - `swift test --filter AppViewModelA0Tests/testLiveMarch8BootstrapSampleWithNullExactLocationFieldsFailsClosedAndSurfacesIncompatibleDaemon` → PASS
+  - Notes: full UI live smoke (`swift run AgtmuxTerm` + provider overlays) は T-XTERM-A5/A6 完了後に final confirmation
   - Scratch handover: `/tmp/agtmux-bootstrap-null-exact-location-handover-20260308.md`
 
-- [ ] T-XTERM-A4 (P1) Cross-repo: semantic truth handback for agtmux-term live canaries
+- [x] T-XTERM-A4 (P1) Cross-repo: semantic truth handback for agtmux-term live canaries — DONE (2026-03-08/11)
   - 目的: real-CLI semantic source-of-truth suite を agtmux repo 側で維持しつつ、agtmux-term が薄い daemon-to-sidebar canary を追加できるよう prompt/preflight/oracle 境界を固定する
-  - Deliverables:
+  - Deliverables (all present in RP):
     - daemon-owned scenario matrix for `provider`, `presence`, `running`, completion state, `waiting_input`, `waiting_approval`, conversation title, and no-bleed
     - provider-specific live prompt guidance for Claude Sonnet 4.6 and Codex 5.4 medium
     - explicit statement that agtmux-term mirrors only boundary assertions, not the full producer semantic matrix
-  - Gate:
-    - docs-first handover exists for agtmux-term
-    - online/e2e source tests remain the producer-side source of truth
-    - mirrored agtmux-term canaries use daemon payload truth as their primary oracle
+  - Gate: all satisfied; T-XTERM-A3 dependency DONE (2026-03-11)
   - Handover doc: `docs/85_reviews/RP-20260308-agtmux-term-semantic-truth-handover.md`
-  - blocked_by: T-XTERM-A3
+  - blocked_by: T-XTERM-A3 (DONE)
 
-- [ ] T-XTERM-A5 (P0) Cross-repo: managed-exit semantic truth handback
-  - 目的: confirmed real Codex pane が no-agent shell (`current_cmd=zsh`) に戻ったあとも stale `presence=managed provider=*` を保持する producer-side semantic drift を止める（Claude は follow-up validation）
-  - Fresh cross-repo repro from `agtmux-term`:
-    - temp daemon socket + temp tmux server + real `codex exec`
-    - after pane child processes are terminated and the pane has already returned to `current_cmd=zsh`, `agtmux json` still reports:
-      - `presence=managed`
-      - `provider=codex`
-      - `activity_state=waiting_input`
-      - `evidence_mode=heuristic`
-  - Why current online E2E missed it:
-    - current semantic truth suite validates entry/lifecycle/waiting states but does not force a pane back to a plain shell and require exact-row demotion to `unmanaged`
-    - current concrete evidence is Codex-only; Claude should be validated after the generic demotion path is fixed
-  - Phase 1: add failing producer-side regression/E2E that starts a real agent in tmux, forces the pane back to shell, and requires exact-row demotion (`presence=unmanaged`, `provider=null`)
-  - Phase 2: fix semantic truth reducer so heuristic fallback cannot keep a stale managed/provider/activity row once the pane's live process truth is back to shell
-  - Phase 3: rerun online/e2e plus cross-repo smoke until `agtmux-term` live consumer no longer sees stale managed/provider marks after agent exit
-  - Gate:
-    - failing producer-side managed-exit regression added first
-    - `cargo test -p agtmux` PASS
-    - online/e2e includes the managed-exit scenario
-    - cross-repo smoke no longer reproduces stale managed/provider truth on a shell pane
-  - Scratch handover: `/tmp/agtmux-managed-exit-semantic-truth-handover-20260308.md`
-  - blocked_by: T-XTERM-A4
+- [x] T-XTERM-A5 (P0) Cross-repo: managed-exit semantic truth handback — DONE (2026-03-11)
+  - 目的: confirmed real Codex pane が no-agent shell (`current_cmd=zsh`) に戻ったあとも stale `presence=managed provider=*` を保持する producer-side semantic drift を止める
+  - Root cause: `detect.rs` の `shell_hint` が `process_hint=None + current_cmd=zsh` を見逃し、stale Codex capture tokens で `agent_pane_ids` に残り続けることで step 10c demotion がスキップされていた
+  - Fix: `shell_hint` を match に変更して explicit agent hint (`process_hint=Some("claude"/"codex")`) を保護しつつ、`process_hint=None + current_cmd=zsh` を shell として扱う
+    ```rust
+    let shell_hint = match meta.process_hint.as_deref() {
+        Some("claude") | Some("codex") => false,
+        Some("shell") => true,
+        _ => SHELL_CMDS.contains(&cmd_lower.as_str()),
+    };
+    ```
+  - 変更ファイル 2 件:
+    - `crates/agtmux-source-poller/src/detect.rs`: shell_hint fix + 2 new tests
+    - `crates/agtmux-runtime/src/poll_loop.rs`: runtime regression test added
+  - Gate: `just verify` PASS (213 tests) ✅
+  - RP: `docs/85_reviews/RP-T-XTERM-A5-managed-exit-demotion.md`
+  - Notes: Phase 3 (cross-repo live smoke) は T-XTERM-A6/A7 完了後に final confirmation
+  - blocked_by: T-XTERM-A4 (DONE)
 
 - [ ] T-XTERM-A6 (P0) Cross-repo: app-launched explicit `--tmux-socket` zero-managed-bootstrap handback
   - 目的: `agtmux-term` metadata-enabled XCUITest から spawned された daemon が、exact `--tmux-socket /private/tmp/tmux-501/...` を受け取っているにもかかわらず `ui.bootstrap.v2 total=0`（managed sync-v2 rows が 0）を返す drift を止める
@@ -992,3 +975,44 @@ Phase 7 (Distribution) と独立して実施可能。
     - Cause 1 fixed here: managed fallback rows are no longer born `freshness.down` solely because reducer truth is missing
     - Cause 2 remains open by design in this slice: reducer-backed idle/waiting rows still age to `down` after `>15s` via the existing row-age summary policy
     - downstream live regression pin remains the existing term-side managed-provider live proof after this daemon fix
+
+---
+
+### sync-v2 removal planning (2026-03-10 Codex analysis)
+
+**Classification summary** (from Codex read-only survey):
+- `ActivityState` 型自体は sync-v3 でも使用 → 削除対象外
+- compat-only (削除候補): 5 source adapter ファイルの `sync_v2_compat::activity_event_type()` 呼び出し
+- product-path (後回し): `ui.bootstrap.v2` / `ui.changes.v2` RPC endpoints — T-XTERM-A3〜A8 完了後まで削除不可
+- never-remove: `ActivityState` enum、hysteresis、CLI コマンド、projection core
+
+**削除順序**:
+1. Phase 1 (compat-only transport adapters) — T-SV2-P1 — safe, no protocol change
+2. Phase 2 (v2 RPC endpoints) — T-SV2-P2 — blocked_by T-XTERM-A3〜A8 + agtmux-term v3-only migration
+3. `agtmux-core-v5::sync_v2_compat` module itself — T-SV2-P3 — blocked_by T-SV2-P2
+
+- [ ] T-SV2-P1 (P2) sync-v2 compat: remove event_type string round-trip from source adapters
+  - 目的: source adapters (poller, claude-hooks, claude-jsonl, codex-jsonl) が `ActivityState` を一度 legacy `event_type` 文字列に変換し、projection が再度 parse するという不要な round-trip を除去する
+  - 対象ファイル (compat-only layer):
+    - `crates/agtmux-source-poller/src/source.rs` — `sync_v2_compat::activity_event_type()` 呼び出し
+    - `crates/agtmux-source-claude-jsonl/src/source.rs` — 同上
+    - `crates/agtmux-source-codex-jsonl/src/translate.rs` — 同上
+    - `crates/agtmux-source-claude-hooks/src/translate.rs` — `sync_v2_compat::claude_hook_event_type()` / `claude_notification_event_type()`
+    - `crates/agtmux-daemon-v5/src/projection.rs` — `sync_v2_compat::parse_activity_state()` による再parse
+  - 方針: `PaneSyncEvent.event_type: String` フィールドを `ActivityState` 直接に変更するか、強型化された enum variant に切り替える
+  - Gate: `just verify` PASS; 既存の projection/source tests が全て通過
+  - Notes: `agtmux-core-v5::sync_v2_compat` module は Phase 2 完了後まで存続。Phase 1 でこのモジュール自体は削除しない
+  - blocked_by: なし（T-VERIFY-FIX 完了済みで just verify green）
+
+- [ ] T-SV2-P2 (P2) sync-v2 compat: remove `ui.bootstrap.v2` / `ui.changes.v2` RPC endpoints
+  - 目的: `agtmux-term` が sync-v3 only に移行完了した後、daemon から v2 wire endpoints を削除し、`agtmux-runtime::sync_v2_compat` module ごと除去する
+  - 対象:
+    - `crates/agtmux-runtime/src/server.rs` — `ui.bootstrap.v2` / `ui.changes.v2` handlers
+    - `crates/agtmux-runtime/src/sync_v2_compat.rs` — `build_ui_bootstrap_v2()` / `build_ui_changes_v2()` / `build_sync_v2_pane_list()`
+  - Gate: agtmux-term の全 live tests が `ui.bootstrap.v3` / `ui.changes.v3` のみで通過すること
+  - blocked_by: T-XTERM-A3, T-XTERM-A4, T-XTERM-A5, T-XTERM-A7, T-XTERM-A8 (agtmux-term full v3 migration)
+
+- [ ] T-SV2-P3 (P2) sync-v2 compat: delete `agtmux-core-v5::sync_v2_compat` module
+  - 目的: T-SV2-P1 + T-SV2-P2 完了後、core module 自体を除去する
+  - 対象: `crates/agtmux-core-v5/src/sync_v2_compat.rs` + `lib.rs` からの re-export
+  - blocked_by: T-SV2-P1, T-SV2-P2

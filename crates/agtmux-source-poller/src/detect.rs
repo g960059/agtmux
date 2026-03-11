@@ -86,7 +86,15 @@ pub fn mvp_provider_defs() -> Vec<ProviderDetectDef> {
 /// Returns `Some(DetectResult)` if at least one signal matches,
 /// or `None` if no signals match.
 pub fn detect(meta: &PaneMeta, def: &ProviderDetectDef) -> Option<DetectResult> {
-    let shell_hint = meta.process_hint.as_deref() == Some("shell");
+    const SHELL_CMDS: &[&str] = &[
+        "zsh", "bash", "fish", "sh", "csh", "tcsh", "ksh", "dash", "nu", "pwsh",
+    ];
+    let cmd_lower = meta.current_cmd.to_ascii_lowercase();
+    let shell_hint = match meta.process_hint.as_deref() {
+        Some("claude") | Some("codex") => false,
+        Some("shell") => true,
+        _ => SHELL_CMDS.contains(&cmd_lower.as_str()),
+    };
 
     let mut confidence: f64 = 0.0;
     let mut provider_hint = false;
@@ -103,7 +111,7 @@ pub fn detect(meta: &PaneMeta, def: &ProviderDetectDef) -> Option<DetectResult> 
     }
 
     // 2. Check cmd_tokens
-    let current_cmd_lower = meta.current_cmd.to_ascii_lowercase();
+    let current_cmd_lower = cmd_lower;
     for token in def.cmd_tokens {
         if current_cmd_lower.contains(&token.to_ascii_lowercase()) {
             cmd_match = true;
@@ -575,11 +583,11 @@ mod tests {
     }
 
     #[test]
-    fn detect_stale_title_not_suppressed_with_capture() {
-        // title + shell + capture match → NOT suppressed (capture proves agent is there)
+    fn detect_stale_title_not_suppressed_with_nonshell_capture() {
+        // title + neutral runtime + capture match → NOT suppressed
         let meta = PaneMeta {
             pane_title: "claude code".to_string(),
-            current_cmd: "zsh".to_string(),
+            current_cmd: "node".to_string(),
             process_hint: None,
             capture_lines: vec!["claude code is running".to_string()],
         };
@@ -589,7 +597,10 @@ mod tests {
             .find(|d| d.provider == Provider::Claude)
             .expect("def should exist");
         let result = detect(&meta, claude_def);
-        assert!(result.is_some(), "title + shell + capture → not suppressed");
+        assert!(
+            result.is_some(),
+            "title + neutral runtime + capture should remain detectable"
+        );
     }
 
     #[test]
@@ -679,6 +690,42 @@ mod tests {
         assert!(
             result.is_none(),
             "shell prompt at tail must suppress stale codex attribution"
+        );
+    }
+
+    #[test]
+    fn detect_shell_cmd_with_explicit_process_hint_stays_managed() {
+        let claude_def = &mvp_provider_defs()[0];
+        let meta = PaneMeta {
+            pane_title: "✳ Claude Code".to_string(),
+            current_cmd: "zsh".to_string(),
+            process_hint: Some("claude".to_string()),
+            capture_lines: vec![],
+        };
+        let result = detect(&meta, claude_def);
+        assert!(
+            result.is_some(),
+            "explicit agent process_hint must override shell current_cmd"
+        );
+    }
+
+    #[test]
+    fn detect_shell_cmd_without_process_hint_suppresses_stale_codex_prompt_tail() {
+        let codex_def = &mvp_provider_defs()[1];
+        let meta = PaneMeta {
+            pane_title: "openai codex".to_string(),
+            current_cmd: "zsh".to_string(),
+            process_hint: None,
+            capture_lines: vec![
+                "{\"type\":\"thread.started\",\"thread_id\":\"abc\"}".to_string(),
+                "{\"type\":\"turn.started\"}".to_string(),
+                "$ ".to_string(),
+            ],
+        };
+        let result = detect(&meta, codex_def);
+        assert!(
+            result.is_none(),
+            "shell current_cmd alone must suppress stale codex attribution after prompt returns"
         );
     }
 }

@@ -1731,6 +1731,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn poll_tick_demotes_managed_pane_when_shell_returns_with_stale_codex_capture_lines() {
+        let state = new_state();
+
+        let codex_backend = Arc::new(FakeTmuxBackend::new().with_pane(
+            "%0",
+            "work",
+            "node",
+            "{\"type\":\"turn.started\"}",
+        ));
+        poll_tick(&codex_backend, &state).await.expect("codex tick");
+
+        {
+            let st = state.lock().await;
+            let pane = st.daemon.get_pane("%0").expect("managed codex pane");
+            assert_eq!(pane.provider, Some(agtmux_core_v5::types::Provider::Codex));
+        }
+
+        let shell_backend = Arc::new(FakeTmuxBackend::new().with_pane(
+            "%0",
+            "work",
+            "zsh",
+            "{\"type\":\"turn.started\"}\n$ ",
+        ));
+        poll_tick(&shell_backend, &state).await.expect("shell tick");
+
+        let st = state.lock().await;
+        assert!(
+            st.daemon.get_pane("%0").is_none(),
+            "pane should be demoted after tmux returns to zsh even when stale codex capture lines remain"
+        );
+    }
+
+    #[tokio::test]
     async fn poll_tick_demotes_deterministic_pane_immediately_after_return_to_shell() {
         let state = new_state();
         let codex_backend = Arc::new(FakeTmuxBackend::new().with_pane(
