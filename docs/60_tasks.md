@@ -256,9 +256,9 @@ Phase 7 (Distribution) と独立して実施可能。
 
 ## DOING
 
-### Phase 10 — Session Metadata Display (2-line sidebar)
+### Phase 10 — Session Metadata Display (compact 1-line + provider-left status ring)
 
-- [ ] T-SM01 (P3) Daemon: session_subtitle フィールド追加 — TODO
+- [x] T-SM01 (P3) Daemon: session_subtitle フィールド追加 — DONE (2026-03-11, commit 38d1f93)
   - **目的**: sidebar 2行表示のために daemon が `session_subtitle` を計算・送信する
   - **設計決定**: Option A — 単一フィールド `session_subtitle` (Codex/Claude 両案で合意)
   - **Subtitle 解決ロジック** (daemon 側で実施、クライアントに責務を持たせない):
@@ -273,17 +273,23 @@ Phase 7 (Distribution) と独立して実施可能。
   - **Gate**: `just verify` PASS
   - blocked_by: なし
 
-- [ ] T-SM02 (P3) agtmux-term: 2行 sidebar 表示 — TODO
-  - **目的**: managed pane 行で title + subtitle を 2行表示する
+- [x] T-SM02 (P3) agtmux-term: session metadata model 改善 — DONE (2026-03-11, commit cae749a)
+  - `AgtmuxPane.primaryLabel`: provider名 fallback → working dir 名 (dir名のほうが session 識別に有用)
+  - `AgtmuxPane.sessionSubtitle`: daemon の `session_subtitle` フィールドをデコード
+  - `PaneDisplayCompatFallback.freshnessText`: running 中も常時表示 (ageSecs ガード削除)
+  - `AppViewModel.paneDisplaySubtitle(for:)`: subtitle アクセサ追加
+  - 2行 sidebar VStack は T-SM03 で 1行レイアウト再設計するため未実装
+  - Gate: 299/299 deterministic tests PASS
+
+- [ ] T-SM03 (P3) agtmux-term: sidebar 1行 compact レイアウト — TODO
+  - **ユーザー要望**: pane は 1行表示 (pane数が多いため compact 必要); provider mark を LEFT に、status は provider mark 周りの ring/circular progress で表示
   - **変更ファイル**:
-    - `Sources/AgtmuxTermCore/CoreModels.swift`: `AgtmuxPane` に `sessionSubtitle: String?` 追加 + RawPane DTO + 全 factory method を更新
-    - `Sources/AgtmuxTerm/SidebarView.swift`: `PaneRowView.body` の `Text(paneDisplayTitle)` を VStack に置き換え — managed pane のみ subtitle 行 (11pt, opacity 0.45) を追加; 行高さ固定 (layout jump 防止)
-  - **詳細仕様**: `docs/handoffs/T-SM02-session-subtitle.md` 参照 (agtmux-term repo)
-  - **テスト**:
-    - `AgtmuxPane` decode test: `sessionSubtitle` フィールド
-    - `PaneRowView` preview: subtitle あり/なし両方
-  - **Gate**: `swift build` PASS + `swift test` PASS (deterministic tests)
-  - blocked_by: T-SM01 (daemon 側の `session_subtitle` フィールドが必要)
+    - `SidebarView.swift`: 新 `ProviderStatusBadge` + `SpinnerRing` view 追加; `PaneRowView` の LEFT を `stateIndicator` → `ProviderStatusBadge` に置換; RIGHT の `ProviderIcon` 削除
+    - `ProviderStatusBadge`: provider icon (16x16) + 状態別 ring (running=animated arc green, waitingApproval=orange, waitingInput=yellow, error=red, idle=dim white)
+  - **詳細仕様**: `docs/handoffs/T-SM03-provider-status-badge.md` 参照 (agtmux-term repo)
+  - **Gate**: `swift build` PASS + `swift test` 299+ PASS
+  - blocked_by: T-SM02 (DONE)
+
 
 ### Clippy fix — just verify ブロッカー解消 ✅ DONE
 
