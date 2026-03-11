@@ -72,22 +72,21 @@ pub fn discover_sessions_in_dir(
     let mut cwd_hints = Vec::new();
 
     for hint in hints {
-        if let Some(jsonl_path) = hint.explicit_jsonl_path.as_deref() {
-            if let Some(discovery) = discovery_from_jsonl_path(
-                &hint.pane_id,
-                jsonl_path,
-                hint.session_key_override.as_deref(),
-                hint.pane_generation,
-                hint.pane_birth_ts,
-            ) {
-                if explicit_bound_paths.insert(discovery.jsonl_path.clone()) {
-                    explicit_results.push(discovery);
-                }
-            }
+        let Some(jsonl_path) = hint.explicit_jsonl_path.as_deref() else {
+            cwd_hints.push(hint);
             continue;
-        }
+        };
 
-        cwd_hints.push(hint);
+        if let Some(discovery) = discovery_from_jsonl_path(
+            &hint.pane_id,
+            jsonl_path,
+            hint.session_key_override.as_deref(),
+            hint.pane_generation,
+            hint.pane_birth_ts,
+        ) && explicit_bound_paths.insert(discovery.jsonl_path.clone())
+        {
+            explicit_results.push(discovery);
+        }
     }
 
     // Build index: canonical_cwd -> newest-first candidate sessions.

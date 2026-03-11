@@ -316,6 +316,23 @@ fn is_codex_jsonl_candidate(process_hint: Option<&str>, current_cmd: &str) -> bo
     }
 }
 
+fn is_claude_jsonl_candidate(
+    process_hint: Option<&str>,
+    current_cmd: &str,
+    metadata_available: bool,
+) -> bool {
+    const CLAUDE_JSONL_RUNTIME_CMDS: &[&str] = &["node", "bun", "deno", "python", "python3"];
+
+    match process_hint {
+        // Explicit Claude CLI panes stay discoverable even when process metadata is degraded.
+        Some("claude") => true,
+        Some("shell") | Some("codex") => false,
+        Some(_) => false,
+        // Neutral runtimes rely on healthy process metadata to avoid CWD-only false attribution.
+        None => metadata_available && CLAUDE_JSONL_RUNTIME_CMDS.contains(&current_cmd),
+    }
+}
+
 fn record_runtime_error(st: &mut DaemonState, detail: impl Into<String>) {
     st.runtime_last_error = Some(detail.into());
 }
@@ -715,20 +732,15 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
     // We include panes that fall into exactly one of these categories:
     //   a) process_hint="claude"  → explicit Claude CLI pane (always include)
     //   b) process_hint=None + current_cmd in CLAUDE_JSONL_RUNTIME_CMDS
-    //      → neutral runtime that can host Claude Code (node/bun/deno/python/python3)
+    //      → neutral runtime that can host Claude Code (node/bun/deno/python/python3),
+    //        but only while process metadata is healthy
     //
     // We EXCLUDE:
     //   - process_hint="shell" (zsh/bash/…): never an agent runtime
     //   - process_hint="codex":  handled by Step 6a (Codex JSONL source)
     //   - process_hint=None + current_cmd NOT in allowlist (yazi, htop, vim, …)
     //   - any other unknown hint: fail-closed
-    if !metadata_backoff_active && metadata_failure_reason.is_none() {
-        /// Neutral-runtime commands that can host a Claude JSONL session.
-        /// Panes with process_hint=None are only included if current_cmd matches.
-        /// This prevents false-positive Claude attribution for terminal tools
-        /// (yazi, htop, vim, …) that happen to share a CWD with old JSONL files.
-        const CLAUDE_JSONL_RUNTIME_CMDS: &[&str] = &["node", "bun", "deno", "python", "python3"];
-
+    if !metadata_backoff_active {
         // Build snapshot lookup for process_hint and current_cmd.
         let snapshot_hint: std::collections::HashMap<&str, Option<&str>> = snapshots
             .iter()
@@ -743,19 +755,8 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
             .iter()
             .filter(|p| {
                 let hint = snapshot_hint.get(p.pane_id.as_str()).copied().flatten();
-                match hint {
-                    // Definite non-Claude processes: exclude
-                    Some("shell") | Some("codex") => false,
-                    // Known Claude CLI: always include
-                    Some("claude") => true,
-                    // Unknown non-None hint: fail-closed, exclude
-                    Some(_) => false,
-                    // Neutral runtime: include only if current_cmd is a known Claude runtime
-                    None => {
-                        let cmd = snapshot_cmd.get(p.pane_id.as_str()).copied().unwrap_or("");
-                        CLAUDE_JSONL_RUNTIME_CMDS.contains(&cmd)
-                    }
-                }
+                let cmd = snapshot_cmd.get(p.pane_id.as_str()).copied().unwrap_or("");
+                is_claude_jsonl_candidate(hint, cmd, metadata_failure_reason.is_none())
             })
             .map(|p| {
                 let (pane_gen, pane_birth) = st
@@ -2107,6 +2108,22 @@ mod tests {
         assert!(!is_codex_jsonl_candidate(Some("claude"), "node"));
         assert!(!is_codex_jsonl_candidate(None, "zsh"));
         assert!(!is_codex_jsonl_candidate(Some("runtime_unknown"), "python"));
+    }
+
+    #[test]
+    fn claude_jsonl_candidates_require_metadata_for_neutral_runtimes() {
+        assert!(is_claude_jsonl_candidate(Some("claude"), "claude", false));
+        assert!(is_claude_jsonl_candidate(Some("claude"), "claude", true));
+        assert!(is_claude_jsonl_candidate(None, "node", true));
+        assert!(!is_claude_jsonl_candidate(None, "node", false));
+        assert!(!is_claude_jsonl_candidate(Some("shell"), "node", true));
+        assert!(!is_claude_jsonl_candidate(Some("codex"), "node", true));
+        assert!(!is_claude_jsonl_candidate(
+            Some("runtime_unknown"),
+            "node",
+            true
+        ));
+        assert!(!is_claude_jsonl_candidate(None, "zsh", true));
     }
 
     #[tokio::test]

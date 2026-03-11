@@ -14,7 +14,7 @@ use agtmux_daemon_v5::claude_v3::apply_claude_source_event;
 use agtmux_daemon_v5::codex_v3::apply_codex_source_event;
 use agtmux_daemon_v5::sync_v3::{SyncV3Reducer, build_freshness_summary};
 use agtmux_tmux_v5::{PaneGenerationTracker, TmuxPaneInfo};
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 
 #[derive(Debug, Default)]
 pub struct SyncV3LiveState {
@@ -557,6 +557,7 @@ mod tests {
     use agtmux_core_v5::types::{
         EvidenceTier, PanePresence, PaneSignatureClass, SignatureInputsCompact, SourceKind,
     };
+    use chrono::TimeZone;
 
     fn ts(second: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 3, 9, 23, 0, second)

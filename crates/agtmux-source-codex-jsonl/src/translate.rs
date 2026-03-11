@@ -11,6 +11,7 @@ use crate::fsm::{CodexJsonlEvent, CodexSessionState};
 /// Translate a Codex FSM state transition into a SourceEventV2.
 ///
 /// Returns `None` for states that don't produce events (e.g. Init, Ended).
+#[allow(clippy::too_many_arguments)]
 pub fn translate_state_change(
     new_state: CodexSessionState,
     event: &CodexJsonlEvent,

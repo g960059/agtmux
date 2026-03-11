@@ -256,6 +256,19 @@ Phase 7 (Distribution) と独立して実施可能。
 
 ## DOING
 
+### Clippy fix — just verify ブロッカー解消 ✅ DONE
+
+- [x] T-VERIFY-FIX + T-VERIFY-FIX-B (P0) clippy 修正 + narrower poll_loop fix — DONE (2026-03-10)
+  - **根本原因**: `d2ddf0f` コードが clippy をパスしていない + `scan_all_processes()` が `ps: operation not permitted` で `metadata_failure_reason` を立てた際、元の全体 guard が explicit `claude` pane まで除外する over-gating
+  - **変更ファイル 5 件**:
+    - `crates/agtmux-source-codex-jsonl/src/discovery.rs:74` — `let ... else` 平坦化 ✅
+    - `crates/agtmux-source-codex-jsonl/src/translate.rs:14` — `#[allow(clippy::too_many_arguments)]` ✅
+    - `crates/agtmux-runtime/src/sync_v3_runtime.rs` — `TimeZone` import をテスト専用スコープ ✅
+    - `crates/agtmux-runtime/src/poll_loop.rs:319` — `is_claude_jsonl_candidate()` 追加 (narrower fix): `Some("claude")` は常に許可、`None` neutral は `metadata_failure_reason.is_none()` のときのみ
+    - `crates/agtmux-runtime/src/poll_loop.rs:2113` — 回帰テスト `claude_jsonl_candidates_require_metadata_for_neutral_runtimes` 追加
+  - **Gate**: `just verify` PASS (212 tests) ✅
+  - RP: `docs/85_reviews/RP-T-VERIFY-FIX-clippy-green.md`
+
 ### Cross-repo agtmux-term compatibility recovery
 
 - [ ] T-XTERM-A3 (P0) Cross-repo: sync-v2 exact-identity handback
@@ -365,13 +378,19 @@ Phase 7 (Distribution) と独立して実施可能。
   - Phase 2: replace the tmux `list-panes -F` delimiter contract with a printable literal delimiter (`|`) that survives sanitized env, then rerun explicit-socket producer repros
   - Phase 3: rerun the higher-fidelity app-launched / shell-child promotion repros and confirm non-empty managed bootstrap
   - Phase 4: rerun cross-repo UI smoke until the isolated app-child daemon reaches a non-empty bootstrap and `agtmux-term` metadata-enabled plain-zsh Codex lane surfaces the managed row
+  - Progress (2026-03-10, Phase 2 confirmed already landed):
+    - `crates/agtmux-tmux-v5/src/pane_info.rs` has `LIST_PANES_DELIMITER: char = '|'` and `LIST_PANES_FORMAT` with `|` separators
+    - Legacy tab fallback is preserved in `parse_line()`
+    - `list_panes_format_uses_printable_pipe_delimiter` and `parse_line_accepts_legacy_tab_delimiter` tests both PASS (15/15 agtmux-tmux-v5 pane_info tests green)
+    - Phase 2 fix was part of an earlier commit, not freshly needed
+  - Current blocker: `just verify` fails on clippy — see T-VERIFY-FIX
   - Gate:
     - failing producer-side repro added first
-    - `cargo test -p agtmux` PASS
+    - `just verify` PASS (currently blocked by T-VERIFY-FIX)
     - explicit-`--tmux-socket` app-launched repro no longer returns empty bootstrap
     - cross-repo `agtmux-term` targeted metadata-enabled UI smoke passes
   - Scratch handover: `/tmp/agtmux-app-launched-normalized-env-still-empty-bootstrap-handover-20260308.md`
-  - blocked_by: T-XTERM-A5
+  - blocked_by: T-XTERM-A5, T-VERIFY-FIX
 
 ### Phase 9 — Waiting State Detection Improvements
 
