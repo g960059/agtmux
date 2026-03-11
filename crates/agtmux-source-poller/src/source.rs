@@ -941,6 +941,13 @@ mod tests {
         );
     }
 
+    // Note (T-E05a): poll_pane_spinner_title_does_not_override_waiting_input cannot be
+    // tested via capture lines because claude_activity_signals() intentionally has no
+    // WaitingInput pattern — Claude's WaitingInput comes from Stop hooks and JSONL sources,
+    // not from terminal capture. The spinner upgrade guard (Unknown | Idle only) structurally
+    // protects WaitingInput if it were ever present. The WaitingApproval case is the
+    // analogous live test (poll_pane_spinner_title_does_not_override_waiting_approval above).
+
     #[test]
     fn poll_pane_spinner_title_codex_pane_no_upgrade() {
         // Spinner-like title on a Codex pane must NOT trigger upgrade (Claude-only logic)

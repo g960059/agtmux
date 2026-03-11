@@ -380,11 +380,11 @@ Phase 7 (Distribution) と独立して実施可能。
   - Phase 3 で PermissionRequest injector kill 後に `sleep 4` を挿入
   - 暗黙の event expiry 依存を解消
 
-- [ ] T-E05a (P3) spinner-title WaitingInput 保護テスト — follow-up from RP review
-  - **目的**: `poll_pane_spinner_title_does_not_override_waiting_input` テスト追加
-  - **背景**: MT-2 gap — evidence.rs は WaitingInput を capture_lines から生成しないため poller 単体では直接テスト不可
-  - **方針**: ActivityState モック or evidence.rs に WaitingInput パターン追加 (将来対応)
-  - blocked_by: なし
+- [x] T-E05a (P3) spinner-title WaitingInput 保護テスト — CLOSED (2026-03-11, structural guarantee)
+  - `claude_activity_signals()` に WaitingInput パターンなし（設計通り — Claude の WaitingInput は hooks/JSONL ソース由来）
+  - spinner upgrade guard `matches!(Unknown | Idle)` が構造的に WaitingInput を保護
+  - WaitingApproval の同等テストは既存: `poll_pane_spinner_title_does_not_override_waiting_approval`
+  - source.rs に理由コメント追加済み; 動作テストは不要と確認
 
 - [ ] T-codex03b (P3) codex-title.sh online 再検証 — follow-up from RP review
   - `idle → waiting_input` アサーション変更を live Codex セッションで確認する
