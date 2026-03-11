@@ -24,10 +24,12 @@
 - T-SM05: `primaryLabel` fallback chain fix — `conversationTitle → sessionSubtitle → provider.rawValue → paneId` (commit 9e07def, agtmux-term)
   - Root finding: both title AND subtitle are nil when JSONL not discovered — T-SM06 needed to fix transport gap
 
-### Transport gap (T-SM06, in progress)
-- `SyncV3PaneSnapshot` (Rust) doesn't carry `conversation_title`/`session_subtitle` → titles never reach Swift client via sync-v3 even when daemon has them
-- Fix: add fields to Rust core struct + populate from `DaemonState.conversation_titles` in `reconcile_sync_v3`; add `conversationTitle` to Swift `AgtmuxSyncV3PaneSnapshot` + wire through `localMetadataOverlay`
-- Codex subagent running (task b53sb34z8)
+### Transport gap (T-SM06, DONE)
+- T-SM06: `conversation_title`/`session_subtitle` now flow through sync-v3 (commit f033912 agtmux, 0f14bfd agtmux-term)
+  - Rust: `SyncV3PaneSnapshot` gains `conversation_title + session_subtitle` (serde skip_serializing_if=None)
+  - `reconcile_sync_v3` clones title maps and injects per-pane via session_key lookup in `compose_rows`
+  - Swift: `AgtmuxSyncV3PaneSnapshot.conversationTitle` decoded; `localMetadataOverlay` wires to `AgtmuxPane`
+  - Gate: `just verify` 205+ PASS, `swift build` PASS
 
 ---
 

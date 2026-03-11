@@ -303,7 +303,7 @@ Phase 7 (Distribution) と独立して実施可能。
   - **変更ファイル**: `CoreModels.swift` (primaryLabel), `AgtmuxSnapshotDecodeCompatibilityTests.swift`, `AppViewModelA0Tests.swift`
   - Gate: `swift test --filter Decode/testDecodePreserves...` PASS
 
-- [ ] T-SM06 (P2) agtmux + agtmux-term: sync-v3 に conversation_title/session_subtitle を通す — IN PROGRESS
+- [x] T-SM06 (P2) agtmux + agtmux-term: sync-v3 に conversation_title/session_subtitle を通す — DONE (2026-03-11, agtmux f033912, agtmux-term 0f14bfd)
   - **問題**: `SyncV3PaneSnapshot` に title フィールドがないため、daemon が title を持っていても Swift クライアントに届かない
   - **修正**:
     - Rust: `SyncV3PaneSnapshot` に `conversation_title + session_subtitle` 追加; `reconcile_sync_v3` で `DaemonState.conversation_titles/subtitles` を渡す
