@@ -65,6 +65,9 @@ pub struct DaemonState {
     /// Conversation titles keyed by session_key (T-135a/b).
     /// Claude: session_key → title from custom-title JSONL events (T-135b).
     pub conversation_titles: std::collections::HashMap<String, String>,
+    /// Session subtitles keyed by session_key (T-SM01).
+    /// Always differs from conversation_title (de-duplicated on daemon side).
+    pub conversation_subtitles: std::collections::HashMap<String, String>,
     /// pane_id → transcript JSONL path, populated by SessionStart hooks.
     /// Used for P1 (highest-priority) JSONL discovery in poll_tick.
     pub transcript_path_hints: std::collections::HashMap<String, std::path::PathBuf>,
@@ -152,6 +155,7 @@ impl DaemonState {
             latency_window: LatencyWindow::new(3000),
             last_latency_eval: None,
             conversation_titles: std::collections::HashMap::new(),
+            conversation_subtitles: std::collections::HashMap::new(),
             transcript_path_hints: std::collections::HashMap::new(),
             metadata_stale: false,
             metadata_last_success_at: None,
@@ -340,6 +344,35 @@ fn record_runtime_error(st: &mut DaemonState, detail: impl Into<String>) {
 fn record_runtime_ok(st: &mut DaemonState, now: chrono::DateTime<Utc>) {
     st.runtime_last_ok_at = Some(now);
     st.runtime_last_error = None;
+}
+
+fn resolve_conversation_subtitle<'a, I>(
+    conversation_title: Option<&str>,
+    candidates: I,
+) -> Option<&'a str>
+where
+    I: IntoIterator<Item = Option<&'a str>>,
+{
+    let conversation_title = conversation_title.unwrap_or_default();
+    candidates
+        .into_iter()
+        .flatten()
+        .find(|candidate| !candidate.is_empty() && *candidate != conversation_title)
+}
+
+fn sync_conversation_subtitle<'a, I>(
+    conversation_subtitles: &mut HashMap<String, String>,
+    session_key: &str,
+    conversation_title: Option<&str>,
+    candidates: I,
+) where
+    I: IntoIterator<Item = Option<&'a str>>,
+{
+    if let Some(subtitle) = resolve_conversation_subtitle(conversation_title, candidates) {
+        conversation_subtitles.insert(session_key.to_string(), subtitle.to_string());
+    } else {
+        conversation_subtitles.remove(session_key);
+    }
 }
 
 fn update_focus_state(st: &mut DaemonState, now: chrono::DateTime<Utc>) {
@@ -700,17 +733,28 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
                 .codex_jsonl_source
                 .poll_files(&mut watchers, &discoveries, now);
             st.codex_jsonl_watchers = watchers;
-            let codex_titles: Vec<(String, String)> = discoveries
+            let codex_first_prompts: HashMap<String, String> = discoveries
                 .iter()
                 .filter_map(|disc| {
                     st.codex_jsonl_watchers
                         .get(&disc.pane_id)
                         .and_then(|w| w.last_first_prompt())
-                        .map(|title| (disc.session_key.clone(), title.to_string()))
+                        .map(|prompt| (disc.session_key.clone(), prompt.to_string()))
                 })
                 .collect();
-            for (session_key, title) in codex_titles {
-                st.conversation_titles.entry(session_key).or_insert(title);
+            for disc in &discoveries {
+                if let Some(first_prompt) = codex_first_prompts.get(&disc.session_key) {
+                    st.conversation_titles
+                        .entry(disc.session_key.clone())
+                        .or_insert_with(|| first_prompt.clone());
+                    let conversation_title = st.conversation_titles.get(&disc.session_key).cloned();
+                    sync_conversation_subtitle(
+                        &mut st.conversation_subtitles,
+                        &disc.session_key,
+                        conversation_title.as_deref(),
+                        [Some(first_prompt.as_str())],
+                    );
+                }
             }
             if !events.is_empty() {
                 tracing::debug!("codex jsonl: {} events", events.len());
@@ -814,7 +858,7 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
 
             // Collect all title signals from watchers before mutating conversation_titles
             // (borrow checker: cannot hold &st.claude_jsonl_watchers while mutating st).
-            let first_prompts: Vec<(String, String)> = discoveries
+            let first_prompts: HashMap<String, String> = discoveries
                 .iter()
                 .filter_map(|disc| {
                     st.claude_jsonl_watchers
@@ -823,7 +867,7 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
                         .map(|p| (disc.session_id.clone(), p.to_string()))
                 })
                 .collect();
-            let summaries: Vec<(String, String)> = discoveries
+            let summaries: HashMap<String, String> = discoveries
                 .iter()
                 .filter_map(|disc| {
                     st.claude_jsonl_watchers
@@ -832,7 +876,7 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
                         .map(|s| (disc.session_id.clone(), s.to_string()))
                 })
                 .collect();
-            let titles: Vec<(String, String)> = discoveries
+            let titles: HashMap<String, String> = discoveries
                 .iter()
                 .filter_map(|disc| {
                     st.claude_jsonl_watchers
@@ -846,8 +890,12 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
             // Priority: custom-title > summary(watcher) > summary(idx) > firstPrompt > first_prompt
 
             // 5 (lowest baseline): first user prompt from JSONL watcher history.
-            for (session_id, prompt) in first_prompts {
-                st.conversation_titles.entry(session_id).or_insert(prompt);
+            for disc in &discoveries {
+                if let Some(prompt) = first_prompts.get(&disc.session_id) {
+                    st.conversation_titles
+                        .entry(disc.session_id.clone())
+                        .or_insert_with(|| prompt.clone());
+                }
             }
 
             // 4+3: sessions-index.json (firstPrompt or_insert, then summary insert).
@@ -871,13 +919,32 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
             }
 
             // 2: summary from JSONL watcher (real-time AI summary).
-            for (session_id, summary) in summaries {
-                st.conversation_titles.insert(session_id, summary);
+            for disc in &discoveries {
+                if let Some(summary) = summaries.get(&disc.session_id) {
+                    st.conversation_titles
+                        .insert(disc.session_id.clone(), summary.clone());
+                }
             }
 
             // 1 (highest): custom-title from watcher (explicit user action).
-            for (session_id, title) in titles {
-                st.conversation_titles.insert(session_id, title);
+            for disc in &discoveries {
+                if let Some(title) = titles.get(&disc.session_id) {
+                    st.conversation_titles
+                        .insert(disc.session_id.clone(), title.clone());
+                }
+            }
+
+            for disc in &discoveries {
+                let conversation_title = st.conversation_titles.get(&disc.session_id).cloned();
+                sync_conversation_subtitle(
+                    &mut st.conversation_subtitles,
+                    &disc.session_id,
+                    conversation_title.as_deref(),
+                    [
+                        summaries.get(&disc.session_id).map(String::as_str),
+                        first_prompts.get(&disc.session_id).map(String::as_str),
+                    ],
+                );
             }
             for event in jsonl_events {
                 st.claude_jsonl_source.ingest(event);
@@ -1376,7 +1443,12 @@ mod tests {
         session_path
     }
 
-    fn write_claude_session_file(home_dir: &Path, cwd: &Path, lines: &[&str]) -> PathBuf {
+    fn write_claude_session_file_named(
+        home_dir: &Path,
+        cwd: &Path,
+        file_name: &str,
+        lines: &[&str],
+    ) -> PathBuf {
         let canonical_cwd = std::fs::canonicalize(cwd).expect("canonical cwd");
         let projects_dir = home_dir.join(".claude").join("projects");
         let project_dir = projects_dir.join(agtmux_source_claude_jsonl::discovery::encode_path(
@@ -1384,9 +1456,13 @@ mod tests {
         ));
         fs::create_dir_all(&project_dir).expect("claude project dir");
 
-        let session_path = project_dir.join("idle-proof.jsonl");
+        let session_path = project_dir.join(file_name);
         fs::write(&session_path, lines.join("\n") + "\n").expect("claude session file");
         session_path
+    }
+
+    fn write_claude_session_file(home_dir: &Path, cwd: &Path, lines: &[&str]) -> PathBuf {
+        write_claude_session_file_named(home_dir, cwd, "idle-proof.jsonl", lines)
     }
 
     // --- Integration tests ---
@@ -2159,6 +2235,98 @@ mod tests {
             pane.freshness.snapshot,
             agtmux_core_v5::types::FreshnessState::Down,
             "settled Claude truth should not fall back to managed/not_loaded/down"
+        );
+
+        drop(st);
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[tokio::test]
+    async fn poll_tick_session_subtitle_deduplicates_when_summary_equals_title() {
+        let _env_lock = ENV_LOCK.lock().expect("env lock");
+        let temp = temp_dir("claude-session-subtitle");
+        let home_dir = temp.join("home");
+        let project_a = temp.join("project-a");
+        let project_b = temp.join("project-b");
+        fs::create_dir_all(&project_a).expect("project a");
+        fs::create_dir_all(&project_b).expect("project b");
+
+        let session_path_a = write_claude_session_file_named(
+            &home_dir,
+            &project_a,
+            "summary-equals-title.jsonl",
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"First prompt A"}}"#,
+                r#"{"type":"summary","summary":"Shared summary"}"#,
+                r#"{"type":"custom-title","customTitle":"Shared summary"}"#,
+            ],
+        );
+        let session_path_b = write_claude_session_file_named(
+            &home_dir,
+            &project_b,
+            "summary-differs.jsonl",
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"First prompt B"}}"#,
+                r#"{"type":"summary","summary":"AI summary B"}"#,
+                r#"{"type":"custom-title","customTitle":"Manual title B"}"#,
+            ],
+        );
+
+        let _home = TestEnvGuard::set("HOME", home_dir.to_str().expect("utf8 path"));
+        let backend = Arc::new(
+            FakeTmuxBackend::new()
+                .with_pane_cwd(
+                    "%10",
+                    "main",
+                    "claude",
+                    "╭ Claude Code",
+                    project_a.to_str().expect("utf8 path"),
+                )
+                .with_pane_cwd(
+                    "%11",
+                    "main",
+                    "claude",
+                    "╭ Claude Code",
+                    project_b.to_str().expect("utf8 path"),
+                ),
+        );
+        let state = new_state();
+
+        poll_tick(&backend, &state).await.expect("tick");
+
+        let st = state.lock().await;
+        let session_key_a = session_path_a
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .expect("session key a");
+        let session_key_b = session_path_b
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .expect("session key b");
+
+        assert_eq!(
+            st.conversation_titles
+                .get(session_key_a)
+                .map(String::as_str),
+            Some("Shared summary")
+        );
+        assert_eq!(
+            st.conversation_subtitles
+                .get(session_key_a)
+                .map(String::as_str),
+            Some("First prompt A")
+        );
+        assert_eq!(
+            st.conversation_titles
+                .get(session_key_b)
+                .map(String::as_str),
+            Some("Manual title B")
+        );
+        assert_eq!(
+            st.conversation_subtitles
+                .get(session_key_b)
+                .map(String::as_str),
+            Some("AI summary B")
         );
 
         drop(st);

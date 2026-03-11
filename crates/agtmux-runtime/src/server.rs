@@ -504,6 +504,7 @@ pub(crate) fn build_pane_list(state: &DaemonState) -> serde_json::Value {
             "activity_state": format!("{:?}", pane.activity_state),
             "provider": pane.provider.map(|p| p.as_str()),
             "conversation_title": state.conversation_titles.get(&pane.session_key),
+            "session_subtitle": state.conversation_subtitles.get(&pane.session_key),
             "title": title_decision.title,
             "title_quality": format!("{:?}", title_decision.quality),
             "session_id": tmux_info.map(|t| &t.session_id),
@@ -2625,6 +2626,56 @@ mod tests {
         let arr = result.as_array().expect("array");
         let managed = arr.iter().find(|p| p["pane_id"] == "%30").expect("%30");
         assert_eq!(managed["conversation_title"], "TUI prototype");
+    }
+
+    #[test]
+    fn server_build_pane_list_includes_session_subtitle() {
+        let mut state = make_state();
+        let now = Utc::now();
+        let snapshot = agtmux_source_poller::source::PaneSnapshot {
+            pane_id: "%32".to_string(),
+            pane_title: String::new(),
+            current_cmd: "codex".to_string(),
+            process_hint: Some("codex".to_string()),
+            capture_lines: vec![],
+            captured_at: now,
+        };
+        state.poller.poll_batch(&[snapshot]);
+        let pull_req = agtmux_core_v5::types::PullEventsRequest {
+            cursor: None,
+            limit: 100,
+        };
+        let poller_resp = state.poller.pull_events(&pull_req, now);
+        state
+            .gateway
+            .ingest_source_response(SourceKind::Poller, poller_resp);
+        let gw_resp = state
+            .gateway
+            .pull_events(&agtmux_core_v5::types::GatewayPullRequest {
+                cursor: None,
+                limit: 100,
+            });
+        state.daemon.apply_events(gw_resp.events, now);
+
+        let managed_panes = state.daemon.list_panes();
+        let pane = managed_panes
+            .iter()
+            .find(|p| p.pane_instance_id.pane_id == "%32")
+            .expect("managed pane %32");
+        state
+            .conversation_subtitles
+            .insert(pane.session_key.clone(), "Second line".to_string());
+
+        state.last_panes = vec![agtmux_tmux_v5::TmuxPaneInfo {
+            pane_id: "%32".to_string(),
+            current_cmd: "codex".to_string(),
+            ..Default::default()
+        }];
+
+        let result = build_pane_list(&state);
+        let arr = result.as_array().expect("array");
+        let managed = arr.iter().find(|p| p["pane_id"] == "%32").expect("%32");
+        assert_eq!(managed["session_subtitle"], "Second line");
     }
 
     #[test]
