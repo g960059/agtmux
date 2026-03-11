@@ -15,7 +15,6 @@ use chrono::{DateTime, Utc};
 
 use agtmux_core_v5::resolver::{self, ResolverState, SourceRank};
 use agtmux_core_v5::signature::{self, SignatureInputs};
-use agtmux_core_v5::sync_v2_compat;
 use agtmux_core_v5::types::{
     EvidenceMode, EvidenceTier, PaneInstanceId, PanePresence, PaneRuntimeState, PaneSignatureClass,
     Provider, SessionRuntimeState, SignatureInputsCompact, SourceEventV2,
@@ -300,10 +299,7 @@ impl DaemonProjection {
             .or(latest_event);
 
         let (activity_state, activity_source) = match state_event {
-            Some(event) => (
-                sync_v2_compat::parse_activity_state(&event.event_type),
-                event.source_kind,
-            ),
+            Some(event) => (event.activity_state, event.source_kind),
             None => return false,
         };
 
@@ -463,17 +459,14 @@ impl DaemonProjection {
         // Heartbeats (is_heartbeat=true) preserve existing activity_state to prevent
         // periodic idle_heartbeats from flipping Running→Idle between real tool events.
         // If the pane has no prior state (first event is a heartbeat), fall back to
-        // the heartbeat's own event_type so initial bootstraps still work.
-        // Legacy sync-v2 projection still derives its collapsed activity enum from
-        // the compat `event_type` string. The sync-v3 truth path is updated
-        // separately from provider-native payloads and must not depend on this parser.
+        // the heartbeat's own activity_state so initial bootstraps still work.
         let pane_activity_state = if event.is_heartbeat {
             self.panes
                 .get(pane_id)
                 .map(|p| p.activity_state)
-                .unwrap_or_else(|| sync_v2_compat::parse_activity_state(&event.event_type))
+                .unwrap_or(event.activity_state)
         } else {
-            sync_v2_compat::parse_activity_state(&event.event_type)
+            event.activity_state
         };
         let pane_provider = Some(event.provider);
 
@@ -1014,6 +1007,7 @@ fn extract_signature_inputs(payload: &serde_json::Value) -> SignatureInputsCompa
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agtmux_core_v5::sync_v2_compat;
     use agtmux_core_v5::types::{ActivityState, SourceKind};
     use chrono::TimeDelta;
 
@@ -1043,7 +1037,7 @@ mod tests {
             pane_generation: None,
             pane_birth_ts: None,
             source_event_id: None,
-            event_type: event_type.to_owned(),
+            activity_state: agtmux_core_v5::sync_v2_compat::parse_activity_state(event_type),
             payload: serde_json::json!({}),
             confidence: 0.86,
             is_heartbeat: false,

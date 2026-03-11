@@ -555,7 +555,8 @@ mod tests {
         SyncV3ChangeKindV3, SyncV3FieldGroupV3, ThreadBlockingV3, ThreadLifecycleV3, TurnOutcomeV3,
     };
     use agtmux_core_v5::types::{
-        EvidenceTier, PanePresence, PaneSignatureClass, SignatureInputsCompact, SourceKind,
+        ActivityState, EvidenceTier, PanePresence, PaneSignatureClass, SignatureInputsCompact,
+        SourceKind,
     };
     use chrono::TimeZone;
 
@@ -582,11 +583,11 @@ mod tests {
     }
 
     fn codex_event(inner_type: &str, pane_id: &str, observed_at: DateTime<Utc>) -> SourceEventV2 {
-        codex_event_with_compat_event_type("activity.unknown", inner_type, pane_id, observed_at)
+        codex_event_with_activity_state(ActivityState::Unknown, inner_type, pane_id, observed_at)
     }
 
-    fn codex_event_with_compat_event_type(
-        compat_event_type: &str,
+    fn codex_event_with_activity_state(
+        activity_state: ActivityState,
         inner_type: &str,
         pane_id: &str,
         observed_at: DateTime<Utc>,
@@ -602,9 +603,7 @@ mod tests {
             pane_generation: None,
             pane_birth_ts: None,
             source_event_id: None,
-            // Sync-v3 runtime tests should derive semantics from the native
-            // `payload.codex_jsonl` truth rather than this legacy compat string.
-            event_type: compat_event_type.to_string(),
+            activity_state,
             payload: serde_json::json!({
                 "codex_jsonl": {
                     "top_type": "event_msg",
@@ -656,7 +655,7 @@ mod tests {
         tracker.update(&["%18"], ts(0));
 
         let event =
-            codex_event_with_compat_event_type("activity.running", "task_complete", "%18", ts(10));
+            codex_event_with_activity_state(ActivityState::Running, "task_complete", "%18", ts(10));
 
         live.apply_events(&[event], &panes, &tracker);
         live.reconcile(&[], &panes, &tracker, ts(11));

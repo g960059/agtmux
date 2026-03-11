@@ -338,7 +338,7 @@ mod tests {
         ProviderRawEnvelopeV3, SyncV3PaneSnapshot, ThreadBlockingV3, ThreadFlagsV3, ThreadStateV3,
         TurnStateV3,
     };
-    use agtmux_core_v5::types::{EvidenceTier, PaneInstanceId};
+    use agtmux_core_v5::types::{ActivityState, EvidenceTier, PaneInstanceId};
     use chrono::TimeZone;
 
     fn ts(second: u32) -> DateTime<Utc> {
@@ -388,16 +388,16 @@ mod tests {
         actual_activity_at: DateTime<Utc>,
         data: serde_json::Value,
     ) -> SourceEventV2 {
-        claude_hook_event_with_compat_event_type(
-            "lifecycle.unknown",
+        claude_hook_event_with_activity_state(
+            ActivityState::Unknown,
             hook_type,
             actual_activity_at,
             data,
         )
     }
 
-    fn claude_hook_event_with_compat_event_type(
-        compat_event_type: &str,
+    fn claude_hook_event_with_activity_state(
+        activity_state: ActivityState,
         hook_type: &str,
         actual_activity_at: DateTime<Utc>,
         data: serde_json::Value,
@@ -434,9 +434,7 @@ mod tests {
             pane_generation: Some(2),
             pane_birth_ts: Some(ts(0)),
             source_event_id: Some(format!("hook-{}", actual_activity_at.timestamp())),
-            // Sync-v3 hook semantics come from `payload.claude_hook`; the legacy
-            // compat `event_type` should not drive these reducer tests.
-            event_type: compat_event_type.to_string(),
+            activity_state,
             payload,
             confidence: 1.0,
             is_heartbeat: false,
@@ -445,11 +443,15 @@ mod tests {
     }
 
     fn claude_jsonl_event(line_type: &str, actual_activity_at: DateTime<Utc>) -> SourceEventV2 {
-        claude_jsonl_event_with_compat_event_type("activity.unknown", line_type, actual_activity_at)
+        claude_jsonl_event_with_activity_state(
+            ActivityState::Unknown,
+            line_type,
+            actual_activity_at,
+        )
     }
 
-    fn claude_jsonl_event_with_compat_event_type(
-        compat_event_type: &str,
+    fn claude_jsonl_event_with_activity_state(
+        activity_state: ActivityState,
         line_type: &str,
         actual_activity_at: DateTime<Utc>,
     ) -> SourceEventV2 {
@@ -467,7 +469,7 @@ mod tests {
             pane_generation: Some(2),
             pane_birth_ts: Some(ts(0)),
             source_event_id: Some(format!("uuid-{}", actual_activity_at.timestamp())),
-            event_type: compat_event_type.to_string(),
+            activity_state,
             payload: serde_json::json!({
                 "line_type": line_type,
                 "claude_jsonl": {
@@ -632,8 +634,8 @@ mod tests {
     #[test]
     fn permission_request_ignores_contradictory_compat_event_type_when_hook_payload_exists() {
         let mut reducer = SyncV3Reducer::new(base_snapshot());
-        let event = claude_hook_event_with_compat_event_type(
-            "activity.idle",
+        let event = claude_hook_event_with_activity_state(
+            ActivityState::Idle,
             "PermissionRequest",
             ts(17),
             serde_json::json!({
@@ -654,7 +656,7 @@ mod tests {
     #[test]
     fn jsonl_tool_use_ignores_contradictory_compat_event_type_when_payload_exists() {
         let mut reducer = SyncV3Reducer::new(base_snapshot());
-        let event = claude_jsonl_event_with_compat_event_type("activity.idle", "tool_use", ts(18));
+        let event = claude_jsonl_event_with_activity_state(ActivityState::Idle, "tool_use", ts(18));
 
         assert!(apply_claude_source_event(&mut reducer, &event));
         assert_eq!(

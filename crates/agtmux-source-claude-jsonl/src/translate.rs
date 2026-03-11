@@ -1,9 +1,6 @@
 //! Event translation from Claude JSONL transcript lines to [`SourceEventV2`].
 
-use agtmux_core_v5::{
-    sync_v2_compat,
-    types::{EvidenceTier, Provider, SourceEventV2, SourceKind},
-};
+use agtmux_core_v5::types::{ActivityState, EvidenceTier, Provider, SourceEventV2, SourceKind};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
@@ -48,7 +45,7 @@ pub struct TranslateContext {
 /// Returns `None` for metadata-only line types that do not represent
 /// activity state changes (e.g. `system`, `file-history-snapshot`).
 pub fn translate(line: &ClaudeJsonlLine, ctx: &TranslateContext) -> Option<SourceEventV2> {
-    let event_type = normalize_event_type(&line.line_type)?;
+    let activity_state = normalize_activity_state(&line.line_type)?;
     let event_id = format!("claude-jsonl-{}", line.uuid.as_deref().unwrap_or("unknown"));
     let observed_at = line.timestamp.unwrap_or_else(Utc::now);
 
@@ -63,7 +60,7 @@ pub fn translate(line: &ClaudeJsonlLine, ctx: &TranslateContext) -> Option<Sourc
         pane_generation: ctx.pane_generation,
         pane_birth_ts: ctx.pane_birth_ts,
         source_event_id: line.uuid.clone(),
-        event_type,
+        activity_state,
         payload: serde_json::json!({
             "line_type": line.line_type,
             "claude_jsonl": {
@@ -79,12 +76,16 @@ pub fn translate(line: &ClaudeJsonlLine, ctx: &TranslateContext) -> Option<Sourc
     })
 }
 
-/// Map JSONL line types to normalized event_type strings.
+/// Map JSONL line types to the collapsed activity state used by SourceEventV2.
 ///
 /// Returns `None` for metadata-only types that should not produce events
 /// (e.g. `system`, `file-history-snapshot`, `queue-operation`).
-fn normalize_event_type(line_type: &str) -> Option<String> {
-    sync_v2_compat::claude_jsonl_event_type(line_type).map(str::to_owned)
+fn normalize_activity_state(line_type: &str) -> Option<ActivityState> {
+    match line_type {
+        "user" | "tool_use" | "tool_result" | "progress" => Some(ActivityState::Running),
+        "assistant" => Some(ActivityState::Idle),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -131,7 +132,7 @@ mod tests {
         assert_eq!(ev.provider, Provider::Claude);
         assert_eq!(ev.source_kind, SourceKind::ClaudeJsonl);
         assert_eq!(ev.tier, EvidenceTier::Deterministic);
-        assert_eq!(ev.event_type, "activity.user_input");
+        assert_eq!(ev.activity_state, ActivityState::Running);
         assert_eq!(ev.session_key, "c4c0766e-test");
         assert_eq!(ev.pane_id, Some("%3".to_owned()));
         assert_eq!(ev.pane_generation, Some(1));
@@ -148,28 +149,28 @@ mod tests {
     fn translate_tool_use_event() {
         let line = sample_line("tool_use");
         let ev = translate(&line, &ctx()).expect("tool_use should produce an event");
-        assert_eq!(ev.event_type, "activity.running");
+        assert_eq!(ev.activity_state, ActivityState::Running);
     }
 
     #[test]
     fn translate_tool_result_event() {
         let line = sample_line("tool_result");
         let ev = translate(&line, &ctx()).expect("tool_result should produce an event");
-        assert_eq!(ev.event_type, "activity.tool_complete");
+        assert_eq!(ev.activity_state, ActivityState::Running);
     }
 
     #[test]
     fn translate_assistant_event() {
         let line = sample_line("assistant");
         let ev = translate(&line, &ctx()).expect("assistant should produce an event");
-        assert_eq!(ev.event_type, "activity.idle");
+        assert_eq!(ev.activity_state, ActivityState::Idle);
     }
 
     #[test]
     fn translate_progress_event() {
         let line = sample_line("progress");
         let ev = translate(&line, &ctx()).expect("progress should produce an event");
-        assert_eq!(ev.event_type, "activity.running");
+        assert_eq!(ev.activity_state, ActivityState::Running);
     }
 
     #[test]

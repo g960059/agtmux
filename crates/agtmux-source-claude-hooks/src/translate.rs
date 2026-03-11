@@ -1,9 +1,6 @@
 //! Event translation from Claude hooks format to [`SourceEventV2`].
 
-use agtmux_core_v5::{
-    sync_v2_compat,
-    types::{EvidenceTier, Provider, SourceEventV2, SourceKind},
-};
+use agtmux_core_v5::types::{ActivityState, EvidenceTier, Provider, SourceEventV2, SourceKind};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -38,7 +35,7 @@ pub fn translate(raw: &ClaudeHookEvent) -> SourceEventV2 {
         pane_generation: None,
         pane_birth_ts: None,
         source_event_id: Some(raw.hook_id.clone()),
-        event_type: resolve_event_type(&raw.hook_type, &raw.data),
+        activity_state: resolve_activity_state(&raw.hook_type, &raw.data),
         payload: build_payload(raw),
         confidence: 1.0,
         is_heartbeat: false, // Claude hooks are always real activity (not periodic keep-alive)
@@ -46,24 +43,38 @@ pub fn translate(raw: &ClaudeHookEvent) -> SourceEventV2 {
     }
 }
 
-/// Map Claude hook types to normalized event_type strings.
-fn normalize_event_type(hook_type: &str) -> String {
-    sync_v2_compat::claude_hook_event_type(hook_type).to_owned()
+/// Map Claude hook types to the collapsed activity state used by SourceEventV2.
+fn normalize_activity_state(hook_type: &str) -> ActivityState {
+    match hook_type {
+        "session_start" | "SessionStart" => ActivityState::Running,
+        "session_end" | "SessionEnd" => ActivityState::Idle,
+        "tool_start" | "thinking" => ActivityState::Running,
+        "tool_end" | "idle" => ActivityState::Idle,
+        "error" | "PostToolUseFailure" => ActivityState::Error,
+        "PermissionRequest" => ActivityState::WaitingApproval,
+        "UserPromptSubmit" => ActivityState::Running,
+        "Stop" | "SubagentStop" => ActivityState::WaitingInput,
+        "PreToolUse" | "PostToolUse" => ActivityState::Running,
+        _ => ActivityState::Unknown,
+    }
 }
 
-/// Resolve event_type, taking hook payload into account for hooks that
+/// Resolve activity state, taking hook payload into account for hooks that
 /// require data-level dispatch (e.g. `Notification`).
 ///
-/// For all other hook types the call is forwarded to [`normalize_event_type`].
-fn resolve_event_type(hook_type: &str, data: &serde_json::Value) -> String {
+/// For all other hook types the call is forwarded to [`normalize_activity_state`].
+fn resolve_activity_state(hook_type: &str, data: &serde_json::Value) -> ActivityState {
     if hook_type == "Notification" {
-        sync_v2_compat::claude_notification_event_type(
-            data.get("notification_type")
-                .and_then(serde_json::Value::as_str),
-        )
-        .to_owned()
+        match data
+            .get("notification_type")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("idle_prompt") => ActivityState::WaitingInput,
+            Some("permission_prompt") => ActivityState::WaitingApproval,
+            Some(_) | None => ActivityState::Unknown,
+        }
     } else {
-        normalize_event_type(hook_type)
+        normalize_activity_state(hook_type)
     }
 }
 
@@ -125,7 +136,7 @@ mod tests {
         assert_eq!(ev.observed_at, raw.timestamp);
         assert_eq!(ev.session_key, "sess-abc");
         assert_eq!(ev.pane_id, Some("%3".to_owned()));
-        assert_eq!(ev.event_type, "lifecycle.running");
+        assert_eq!(ev.activity_state, ActivityState::Running);
         assert_eq!(ev.payload["tool"], "bash");
         assert_eq!(ev.payload["claude_hook"]["hook_type"], "tool_start");
         assert_eq!(ev.payload["claude_hook"]["tool_name"], "bash");
@@ -137,41 +148,41 @@ mod tests {
     }
 
     #[test]
-    fn event_type_normalization() {
+    fn activity_state_normalization() {
         let cases = [
-            ("session_start", "lifecycle.start"),
-            ("SessionStart", "lifecycle.start"),
-            ("session_end", "lifecycle.end"),
-            ("SessionEnd", "lifecycle.end"),
-            ("tool_start", "lifecycle.running"),
-            ("thinking", "lifecycle.running"),
-            ("tool_end", "lifecycle.idle"),
-            ("idle", "lifecycle.idle"),
-            ("error", "lifecycle.error"),
-            ("PermissionRequest", "activity.waiting_approval"),
-            ("UserPromptSubmit", "activity.user_input"),
-            ("PostToolUseFailure", "lifecycle.error"),
-            ("PreCompact", "lifecycle.compacting"),
-            ("Stop", "activity.waiting_input"),
-            ("SubagentStop", "activity.waiting_input"),
-            ("PreToolUse", "activity.running"),
-            ("PostToolUse", "activity.running"),
+            ("session_start", ActivityState::Running),
+            ("SessionStart", ActivityState::Running),
+            ("session_end", ActivityState::Idle),
+            ("SessionEnd", ActivityState::Idle),
+            ("tool_start", ActivityState::Running),
+            ("thinking", ActivityState::Running),
+            ("tool_end", ActivityState::Idle),
+            ("idle", ActivityState::Idle),
+            ("error", ActivityState::Error),
+            ("PermissionRequest", ActivityState::WaitingApproval),
+            ("UserPromptSubmit", ActivityState::Running),
+            ("PostToolUseFailure", ActivityState::Error),
+            ("PreCompact", ActivityState::Unknown),
+            ("Stop", ActivityState::WaitingInput),
+            ("SubagentStop", ActivityState::WaitingInput),
+            ("PreToolUse", ActivityState::Running),
+            ("PostToolUse", ActivityState::Running),
         ];
         for (hook_type, expected) in cases {
             let raw = sample_event(hook_type, None);
             let ev = translate(&raw);
             assert_eq!(
-                ev.event_type, expected,
-                "hook_type={hook_type} should map to {expected}"
+                ev.activity_state, expected,
+                "hook_type={hook_type} should map to {expected:?}"
             );
         }
     }
 
     #[test]
-    fn unknown_hook_type_maps_to_lifecycle_unknown() {
+    fn unknown_hook_type_maps_to_unknown() {
         let raw = sample_event("some_future_hook", None);
         let ev = translate(&raw);
-        assert_eq!(ev.event_type, "lifecycle.unknown");
+        assert_eq!(ev.activity_state, ActivityState::Unknown);
     }
 
     #[test]
@@ -217,14 +228,14 @@ mod tests {
     fn notification_idle_prompt() {
         let raw = notification_event(Some("idle_prompt"));
         let ev = translate(&raw);
-        assert_eq!(ev.event_type, "activity.waiting_input");
+        assert_eq!(ev.activity_state, ActivityState::WaitingInput);
     }
 
     #[test]
     fn notification_permission_prompt() {
         let raw = notification_event(Some("permission_prompt"));
         let ev = translate(&raw);
-        assert_eq!(ev.event_type, "activity.waiting_approval");
+        assert_eq!(ev.activity_state, ActivityState::WaitingApproval);
         assert_eq!(
             ev.payload["claude_hook"]["notification_type"],
             "permission_prompt"
@@ -235,25 +246,25 @@ mod tests {
     fn notification_unknown_type() {
         let raw = notification_event(Some("some_future_notification"));
         let ev = translate(&raw);
-        assert_eq!(ev.event_type, "lifecycle.notification");
+        assert_eq!(ev.activity_state, ActivityState::Unknown);
     }
 
     #[test]
     fn notification_no_type_field() {
         let raw = notification_event(None);
         let ev = translate(&raw);
-        assert_eq!(ev.event_type, "lifecycle.notification");
+        assert_eq!(ev.activity_state, ActivityState::Unknown);
     }
 
     // ── T-E06: PreToolUse / PostToolUse mapping ───────────────────────────────
 
     #[test]
     fn notification_non_string_type_field() {
-        // notification_type present but not a string (e.g. integer or null) → lifecycle.notification
+        // notification_type present but not a string (e.g. integer or null) → Unknown
         let mut raw = notification_event(None);
         raw.data = serde_json::json!({ "notification_type": 42 });
         let ev = translate(&raw);
-        assert_eq!(ev.event_type, "lifecycle.notification");
+        assert_eq!(ev.activity_state, ActivityState::Unknown);
     }
 
     #[test]
@@ -261,7 +272,7 @@ mod tests {
         let mut raw = notification_event(None);
         raw.data = serde_json::json!({ "notification_type": null });
         let ev = translate(&raw);
-        assert_eq!(ev.event_type, "lifecycle.notification");
+        assert_eq!(ev.activity_state, ActivityState::Unknown);
     }
 
     // ── T-E06: PreToolUse / PostToolUse mapping ───────────────────────────────
@@ -270,7 +281,7 @@ mod tests {
     fn pre_tool_use_maps_to_running() {
         let raw = sample_event("PreToolUse", None);
         let ev = translate(&raw);
-        assert_eq!(ev.event_type, "activity.running");
+        assert_eq!(ev.activity_state, ActivityState::Running);
         assert_eq!(ev.payload["claude_hook"]["hook_type"], "PreToolUse");
     }
 
@@ -278,7 +289,7 @@ mod tests {
     fn post_tool_use_maps_to_running() {
         let raw = sample_event("PostToolUse", None);
         let ev = translate(&raw);
-        assert_eq!(ev.event_type, "activity.running");
+        assert_eq!(ev.activity_state, ActivityState::Running);
         assert_eq!(ev.payload["claude_hook"]["hook_type"], "PostToolUse");
     }
 
@@ -291,7 +302,7 @@ mod tests {
             "description": "Run npm install"
         });
         let ev = translate(&raw);
-        assert_eq!(ev.event_type, "activity.waiting_approval");
+        assert_eq!(ev.activity_state, ActivityState::WaitingApproval);
         assert_eq!(ev.payload["claude_hook"]["hook_type"], "PermissionRequest");
         assert_eq!(ev.payload["claude_hook"]["tool_name"], "Bash");
         assert_eq!(ev.payload["claude_hook"]["request_id"], "req-123");
@@ -302,7 +313,7 @@ mod tests {
     fn stop_payload_preserves_hook_type_for_v3_normalization() {
         let raw = sample_event("Stop", Some("%4"));
         let ev = translate(&raw);
-        assert_eq!(ev.event_type, "activity.waiting_input");
+        assert_eq!(ev.activity_state, ActivityState::WaitingInput);
         assert_eq!(ev.payload["claude_hook"]["hook_type"], "Stop");
     }
 }

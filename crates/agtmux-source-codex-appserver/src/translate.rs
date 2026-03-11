@@ -1,6 +1,9 @@
 //! Translates raw Codex appserver lifecycle events into [`SourceEventV2`].
 
-use agtmux_core_v5::types::{EvidenceTier, Provider, SourceEventV2, SourceKind};
+use agtmux_core_v5::{
+    sync_v2_compat,
+    types::{ActivityState, EvidenceTier, Provider, SourceEventV2, SourceKind},
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -45,7 +48,7 @@ pub struct CodexRawEvent {
 /// - `event_id` = `"codex-app-{raw.id}"`
 /// - `session_key` = `raw.session_id`
 /// - `observed_at` = `raw.timestamp`
-/// - `event_type` = `raw.event_type`
+/// - `activity_state` = normalized from `raw.event_type`
 /// - `confidence` = `1.0` (deterministic source)
 /// - `pane_id` = `raw.pane_id`
 pub fn translate(raw: &CodexRawEvent) -> SourceEventV2 {
@@ -60,11 +63,20 @@ pub fn translate(raw: &CodexRawEvent) -> SourceEventV2 {
         pane_generation: raw.pane_generation,
         pane_birth_ts: raw.pane_birth_ts,
         source_event_id: Some(raw.id.clone()),
-        event_type: raw.event_type.clone(),
+        activity_state: raw_event_type_to_activity_state(&raw.event_type),
         payload: raw.payload.clone(),
         confidence: 1.0,
         is_heartbeat: raw.is_heartbeat,
         actual_activity_at: raw.actual_activity_at,
+    }
+}
+
+fn raw_event_type_to_activity_state(event_type: &str) -> ActivityState {
+    match event_type {
+        "session.start" | "task.running" => ActivityState::Running,
+        "session.end" | "task.idle" => ActivityState::Idle,
+        "task.error" => ActivityState::Error,
+        other => sync_v2_compat::parse_activity_state(other),
     }
 }
 
@@ -110,7 +122,7 @@ mod tests {
         assert_eq!(translated.tier, EvidenceTier::Deterministic);
         assert_eq!(translated.session_key, "sess-abc");
         assert_eq!(translated.observed_at, raw.timestamp);
-        assert_eq!(translated.event_type, "session.start");
+        assert_eq!(translated.activity_state, ActivityState::Running);
         assert!((translated.confidence - 1.0).abs() < f64::EPSILON);
         assert_eq!(translated.pane_id, Some("%1".to_string()));
         assert_eq!(translated.source_event_id, Some("evt-1".to_string()));
@@ -134,7 +146,7 @@ mod tests {
     }
 
     #[test]
-    fn event_type_preservation() {
+    fn event_type_activity_state_mapping() {
         let types = [
             "session.start",
             "session.end",
@@ -142,10 +154,17 @@ mod tests {
             "task.idle",
             "task.error",
         ];
-        for ty in types {
+        let expected = [
+            ActivityState::Running,
+            ActivityState::Idle,
+            ActivityState::Running,
+            ActivityState::Idle,
+            ActivityState::Error,
+        ];
+        for (ty, expected) in types.into_iter().zip(expected) {
             let raw = make_raw("x", ty, None);
             let translated = translate(&raw);
-            assert_eq!(translated.event_type, ty);
+            assert_eq!(translated.activity_state, expected);
         }
     }
 
@@ -167,6 +186,7 @@ mod tests {
         let translated = translate(&raw);
         assert_eq!(translated.pane_generation, Some(3));
         assert_eq!(translated.pane_birth_ts, Some(now));
+        assert_eq!(translated.activity_state, ActivityState::Running);
     }
 
     #[test]

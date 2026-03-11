@@ -1,3 +1,4 @@
+use agtmux_core_v5::sync_v2_compat;
 use agtmux_core_v5::sync_v3::{
     AgentLifecycleV3, PendingRequestKindV3, PendingRequestSourceV3, PendingRequestStatusV3,
     PendingRequestV3, ThreadExecutionV3, ThreadLifecycleV3, TurnOutcomeV3,
@@ -290,7 +291,7 @@ impl CodexSemanticEvent {
     fn provider_raw(&self, event: &SourceEventV2, updated_at: DateTime<Utc>) -> serde_json::Value {
         serde_json::json!({
             "source_kind": event.source_kind.as_str(),
-            "event_type": event.event_type.as_str(),
+            "event_type": sync_v2_compat::activity_event_type(event.activity_state),
             "observed_at": event.observed_at.to_rfc3339_opts(SecondsFormat::Millis, true),
             "actual_activity_at": updated_at.to_rfc3339_opts(SecondsFormat::Millis, true),
             "semantic_event": {
@@ -368,7 +369,7 @@ mod tests {
         AgentStateV3, AttentionSummaryV3, FreshnessSummaryV3, PresenceV3, ProviderRawEnvelopeV3,
         SyncV3PaneSnapshot, ThreadBlockingV3, ThreadFlagsV3, ThreadStateV3, TurnStateV3,
     };
-    use agtmux_core_v5::types::{EvidenceTier, PaneInstanceId};
+    use agtmux_core_v5::types::{ActivityState, EvidenceTier, PaneInstanceId};
     use chrono::TimeZone;
 
     fn ts(second: u32) -> DateTime<Utc> {
@@ -418,16 +419,16 @@ mod tests {
         actual_activity_at: DateTime<Utc>,
         extra: serde_json::Value,
     ) -> SourceEventV2 {
-        codex_event_with_compat_event_type(
-            "activity.unknown",
+        codex_event_with_activity_state(
+            ActivityState::Unknown,
             inner_type,
             actual_activity_at,
             extra,
         )
     }
 
-    fn codex_event_with_compat_event_type(
-        compat_event_type: &str,
+    fn codex_event_with_activity_state(
+        activity_state: ActivityState,
         inner_type: &str,
         actual_activity_at: DateTime<Utc>,
         extra: serde_json::Value,
@@ -463,9 +464,7 @@ mod tests {
             pane_generation: Some(7),
             pane_birth_ts: Some(ts(0)),
             source_event_id: None,
-            // Legacy compat string is still carried for sync-v2 consumers, but the
-            // v3 reducer should derive semantics from `payload.codex_jsonl`.
-            event_type: compat_event_type.to_string(),
+            activity_state,
             payload: serde_json::json!({
                 "fsm_state": "legacy",
                 "codex_jsonl": semantic
@@ -623,8 +622,8 @@ mod tests {
     #[test]
     fn task_complete_ignores_contradictory_compat_event_type_when_payload_truth_exists() {
         let mut reducer = SyncV3Reducer::new(base_snapshot());
-        let event = codex_event_with_compat_event_type(
-            "activity.running",
+        let event = codex_event_with_activity_state(
+            ActivityState::Running,
             "task_complete",
             ts(16),
             serde_json::json!({"turn_id": "turn-1"}),

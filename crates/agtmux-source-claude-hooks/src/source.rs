@@ -149,9 +149,15 @@ mod tests {
 
         assert_eq!(resp.events.len(), 2);
         assert_eq!(resp.events[0].event_id, "claude-hooks-e1");
-        assert_eq!(resp.events[0].event_type, "lifecycle.start");
+        assert_eq!(
+            resp.events[0].activity_state,
+            agtmux_core_v5::types::ActivityState::Running
+        );
         assert_eq!(resp.events[1].event_id, "claude-hooks-e2");
-        assert_eq!(resp.events[1].event_type, "lifecycle.running");
+        assert_eq!(
+            resp.events[1].activity_state,
+            agtmux_core_v5::types::ActivityState::Running
+        );
         assert_eq!(resp.next_cursor, Some("claude-hooks:2".to_string())); // caught up: returns current pos
         assert_eq!(resp.source_health.status, SourceHealthStatus::Healthy);
     }

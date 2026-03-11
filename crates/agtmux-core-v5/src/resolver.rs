@@ -305,6 +305,7 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ActivityState;
     use chrono::TimeDelta;
 
     // ─── Test Helpers ────────────────────────────────────────────
@@ -327,7 +328,7 @@ mod tests {
             pane_generation: Some(1),
             pane_birth_ts: Some(observed_at),
             source_event_id: Some(format!("src-{event_id}")),
-            event_type: "lifecycle.running".to_string(),
+            activity_state: ActivityState::Running,
             payload: serde_json::json!({"status": "running"}),
             confidence: 1.0,
             is_heartbeat: false,

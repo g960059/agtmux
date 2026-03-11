@@ -3,12 +3,9 @@
 
 use std::collections::HashMap;
 
-use agtmux_core_v5::{
-    sync_v2_compat,
-    types::{
-        ActivityState, EvidenceTier, Provider, PullEventsRequest, PullEventsResponse,
-        SourceEventV2, SourceHealthReport, SourceHealthStatus, SourceKind,
-    },
+use agtmux_core_v5::types::{
+    ActivityState, EvidenceTier, Provider, PullEventsRequest, PullEventsResponse, SourceEventV2,
+    SourceHealthReport, SourceHealthStatus, SourceKind,
 };
 use chrono::{DateTime, Utc};
 use tracing::warn;
@@ -274,7 +271,7 @@ fn bootstrap_event(
         pane_generation: discovery.pane_generation,
         pane_birth_ts: discovery.pane_birth_ts,
         source_event_id: None,
-        event_type: sync_v2_compat::activity_event_type(ActivityState::Idle).to_owned(),
+        activity_state: ActivityState::Idle,
         payload: serde_json::json!({
             "line_type": "assistant",
             "claude_jsonl": {
@@ -317,7 +314,7 @@ fn ambiguous_cwd_bootstrap(
         pane_generation: discovery.pane_generation,
         pane_birth_ts: discovery.pane_birth_ts,
         source_event_id: None,
-        event_type: sync_v2_compat::activity_event_type(ActivityState::Idle).to_owned(),
+        activity_state: ActivityState::Idle,
         payload: serde_json::json!({}),
         confidence: 1.0,
         is_heartbeat: true, // KEY: does NOT write last_real_activity
@@ -345,7 +342,7 @@ fn idle_heartbeat(discovery: &SessionDiscovery, now: DateTime<Utc>) -> SourceEve
         pane_generation: discovery.pane_generation,
         pane_birth_ts: discovery.pane_birth_ts,
         source_event_id: None,
-        event_type: sync_v2_compat::activity_event_type(ActivityState::Idle).to_owned(),
+        activity_state: ActivityState::Idle,
         payload: serde_json::json!({}),
         confidence: 1.0,
         is_heartbeat: true,
@@ -377,7 +374,7 @@ mod tests {
             pane_generation: Some(1),
             pane_birth_ts: None,
             source_event_id: Some(id.to_owned()),
-            event_type: sync_v2_compat::activity_event_type(ActivityState::Running).to_owned(),
+            activity_state: ActivityState::Running,
             payload: serde_json::json!({"line_type": "tool_use"}),
             confidence: 1.0,
             is_heartbeat: false,
@@ -509,11 +506,11 @@ mod tests {
         let events = ClaudeJsonlSourceState::poll_files(&mut watchers, &discoveries, now());
         // user + tool_use = 2 real events; no heartbeat because emitted_real_event = true
         assert_eq!(events.len(), 2);
-        assert_eq!(events[0].event_type, "activity.user_input");
+        assert_eq!(events[0].activity_state, ActivityState::Running);
         assert_eq!(events[0].provider, Provider::Claude);
         assert_eq!(events[0].source_kind, SourceKind::ClaudeJsonl);
         assert_eq!(events[0].tier, EvidenceTier::Deterministic);
-        assert_eq!(events[1].event_type, "activity.running");
+        assert_eq!(events[1].activity_state, ActivityState::Running);
         assert!(!events[0].is_heartbeat);
         assert!(!events[1].is_heartbeat);
 
@@ -563,7 +560,7 @@ mod tests {
             !boot.is_heartbeat,
             "first poll must emit bootstrap (is_heartbeat=false)"
         );
-        assert_eq!(boot.event_type, "activity.idle");
+        assert_eq!(boot.activity_state, ActivityState::Idle);
         assert_eq!(boot.provider, Provider::Claude);
         assert_eq!(boot.source_kind, SourceKind::ClaudeJsonl);
         assert_eq!(boot.tier, EvidenceTier::Deterministic);
@@ -591,7 +588,7 @@ mod tests {
             hb.is_heartbeat,
             "subsequent polls must emit heartbeat (is_heartbeat=true)"
         );
-        assert_eq!(hb.event_type, "activity.idle");
+        assert_eq!(hb.activity_state, ActivityState::Idle);
         assert!(
             hb.payload.get("claude_jsonl").is_none(),
             "ordinary idle heartbeat should remain compat-only"
@@ -652,7 +649,7 @@ mod tests {
             !events[0].is_heartbeat,
             "first poll must be bootstrap (is_heartbeat=false)"
         );
-        assert_eq!(events[0].event_type, "activity.idle");
+        assert_eq!(events[0].activity_state, ActivityState::Idle);
         assert_eq!(events[0].payload["line_type"], "assistant");
         assert_eq!(events[0].payload["claude_jsonl"]["line_type"], "assistant");
         assert_eq!(events[0].payload["claude_jsonl"]["session_id"], "meta-sess");
@@ -730,7 +727,7 @@ mod tests {
                 "pane {} with shared CWD must emit ambiguous bootstrap (is_heartbeat=true)",
                 ev.pane_id.as_deref().unwrap_or("?")
             );
-            assert_eq!(ev.event_type, "activity.idle");
+            assert_eq!(ev.activity_state, ActivityState::Idle);
             assert!(
                 ev.payload.get("claude_jsonl").is_none(),
                 "ambiguous bootstrap must stay semantic-empty"
@@ -962,12 +959,16 @@ mod tests {
             "should return at least one activity event"
         );
         assert!(
-            events.iter().any(|e| e.event_type == "activity.idle"),
+            events
+                .iter()
+                .any(|e| e.activity_state == ActivityState::Idle),
             "assistant line should produce activity.idle"
         );
         // custom-title lines do NOT produce events
         assert!(
-            events.iter().all(|e| e.event_type != "custom-title"),
+            events
+                .iter()
+                .all(|e| e.payload["line_type"] != "custom-title"),
             "custom-title lines should not produce events"
         );
 

@@ -5,12 +5,9 @@
 //! processes tmux pane snapshots, detects agents via heuristic pattern
 //! matching, and produces typed source events for the gateway.
 
-use agtmux_core_v5::{
-    sync_v2_compat,
-    types::{
-        ActivityState, EvidenceTier, Provider, PullEventsRequest, PullEventsResponse,
-        SourceEventV2, SourceHealthReport, SourceHealthStatus, SourceKind,
-    },
+use agtmux_core_v5::types::{
+    ActivityState, EvidenceTier, Provider, PullEventsRequest, PullEventsResponse, SourceEventV2,
+    SourceHealthReport, SourceHealthStatus, SourceKind,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -146,7 +143,7 @@ pub fn poll_pane(snapshot: &PaneSnapshot) -> Option<PollResult> {
         pane_generation: None,
         pane_birth_ts: None,
         source_event_id: None,
-        event_type: sync_v2_compat::activity_event_type(activity_state).to_string(),
+        activity_state,
         payload,
         confidence: detect_result.confidence,
         is_heartbeat: false, // Poller events are never heartbeats
@@ -318,7 +315,7 @@ mod tests {
         assert_eq!(result.provider, Provider::Claude);
         assert_eq!(result.activity_state, ActivityState::Running);
         assert_eq!(result.pane_id, "%1");
-        assert_eq!(result.event.event_type, "activity.running");
+        assert_eq!(result.event.activity_state, ActivityState::Running);
     }
 
     // ── 2. poll_pane with Codex pane returns appropriate event ──────
@@ -331,7 +328,7 @@ mod tests {
         assert_eq!(result.provider, Provider::Codex);
         assert_eq!(result.activity_state, ActivityState::Running);
         assert_eq!(result.pane_id, "%2");
-        assert_eq!(result.event.event_type, "activity.running");
+        assert_eq!(result.event.activity_state, ActivityState::Running);
     }
 
     // ── 3. poll_pane with no agent returns None ─────────────────────
@@ -495,40 +492,13 @@ mod tests {
         assert_eq!(resp.source_health.checked_at, now());
     }
 
-    // ── 9. Activity state mapping to event_type ─────────────────────
+    // ── 9. Activity state passthrough ───────────────────────────────
 
     #[test]
-    fn sync_v2_compat_activity_state_mapping_to_event_type() {
-        // Running
-        assert_eq!(
-            sync_v2_compat::activity_event_type(ActivityState::Running),
-            "activity.running"
-        );
-        // Idle
-        assert_eq!(
-            sync_v2_compat::activity_event_type(ActivityState::Idle),
-            "activity.idle"
-        );
-        // WaitingInput
-        assert_eq!(
-            sync_v2_compat::activity_event_type(ActivityState::WaitingInput),
-            "activity.waiting_input"
-        );
-        // WaitingApproval
-        assert_eq!(
-            sync_v2_compat::activity_event_type(ActivityState::WaitingApproval),
-            "activity.waiting_approval"
-        );
-        // Error
-        assert_eq!(
-            sync_v2_compat::activity_event_type(ActivityState::Error),
-            "activity.error"
-        );
-        // Unknown
-        assert_eq!(
-            sync_v2_compat::activity_event_type(ActivityState::Unknown),
-            "activity.unknown"
-        );
+    fn poll_pane_preserves_activity_state_on_event() {
+        let snapshot = claude_snapshot();
+        let result = poll_pane(&snapshot).expect("should detect Claude");
+        assert_eq!(result.activity_state, result.event.activity_state);
     }
 
     // ── Verify correct event_type for idle snapshot ─────────────────
@@ -545,7 +515,7 @@ mod tests {
         };
         let result = poll_pane(&snapshot).expect("should detect Claude");
         assert_eq!(result.activity_state, ActivityState::Idle);
-        assert_eq!(result.event.event_type, "activity.idle");
+        assert_eq!(result.event.activity_state, ActivityState::Idle);
     }
 
     // ── 10. Confidence from detection passed through ────────────────
@@ -584,7 +554,7 @@ mod tests {
         let result =
             poll_pane(&snapshot).expect("should detect Claude even without activity match");
         assert_eq!(result.activity_state, ActivityState::Unknown);
-        assert_eq!(result.event.event_type, "activity.unknown");
+        assert_eq!(result.event.activity_state, ActivityState::Unknown);
     }
 
     // ── poll_batch with empty snapshots ─────────────────────────────
@@ -911,7 +881,7 @@ mod tests {
             ActivityState::Running,
             "spinner in title should upgrade Unknown → Running"
         );
-        assert_eq!(result.event.event_type, "activity.running");
+        assert_eq!(result.event.activity_state, ActivityState::Running);
     }
 
     #[test]

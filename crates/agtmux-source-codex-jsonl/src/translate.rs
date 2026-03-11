@@ -1,9 +1,6 @@
 //! Translation from Codex JSONL FSM state to SourceEventV2.
 
-use agtmux_core_v5::{
-    sync_v2_compat,
-    types::{ActivityState, EvidenceTier, Provider, SourceEventV2, SourceKind},
-};
+use agtmux_core_v5::types::{ActivityState, EvidenceTier, Provider, SourceEventV2, SourceKind};
 use chrono::{DateTime, Utc};
 
 use crate::fsm::{CodexJsonlEvent, CodexSessionState};
@@ -22,7 +19,7 @@ pub fn translate_state_change(
     observed_at: DateTime<Utc>,
     event_seq: u64,
 ) -> Option<SourceEventV2> {
-    let event_type = state_to_event_type(new_state)?;
+    let activity_state = state_to_activity_state(new_state)?;
 
     Some(SourceEventV2 {
         event_id: format!("codex-jsonl-{pane_id}-{event_seq}"),
@@ -35,7 +32,7 @@ pub fn translate_state_change(
         pane_generation,
         pane_birth_ts,
         source_event_id: None,
-        event_type: event_type.to_owned(),
+        activity_state,
         payload: build_payload(new_state, Some(event), false),
         confidence: 1.0,
         is_heartbeat: false,
@@ -54,7 +51,7 @@ pub fn bootstrap_event(
     pane_birth_ts: Option<DateTime<Utc>>,
     observed_at: DateTime<Utc>,
 ) -> Option<SourceEventV2> {
-    let event_type = state_to_event_type(state)?;
+    let activity_state = state_to_activity_state(state)?;
 
     Some(SourceEventV2 {
         event_id: format!("codex-jsonl-boot-{pane_id}"),
@@ -67,7 +64,7 @@ pub fn bootstrap_event(
         pane_generation,
         pane_birth_ts,
         source_event_id: None,
-        event_type: event_type.to_owned(),
+        activity_state,
         payload: build_payload(state, transition_event, true),
         confidence: 1.0,
         is_heartbeat: false,
@@ -97,7 +94,7 @@ pub fn idle_heartbeat(
         pane_generation,
         pane_birth_ts,
         source_event_id: None,
-        event_type: sync_v2_compat::activity_event_type(ActivityState::Idle).to_owned(),
+        activity_state: ActivityState::Idle,
         payload: serde_json::json!({}),
         confidence: 1.0,
         is_heartbeat: true,
@@ -105,20 +102,16 @@ pub fn idle_heartbeat(
     }
 }
 
-/// Map FSM state to event_type string.
+/// Map FSM state to the collapsed activity state used by SourceEventV2.
 ///
 /// Returns `None` for states that don't produce events.
-fn state_to_event_type(state: CodexSessionState) -> Option<&'static str> {
+fn state_to_activity_state(state: CodexSessionState) -> Option<ActivityState> {
     match state {
         CodexSessionState::Running | CodexSessionState::ToolExecuting => {
-            Some(sync_v2_compat::activity_event_type(ActivityState::Running))
+            Some(ActivityState::Running)
         }
-        CodexSessionState::WaitingApproval => Some(sync_v2_compat::activity_event_type(
-            ActivityState::WaitingApproval,
-        )),
-        CodexSessionState::WaitingInput => Some(sync_v2_compat::activity_event_type(
-            ActivityState::WaitingInput,
-        )),
+        CodexSessionState::WaitingApproval => Some(ActivityState::WaitingApproval),
+        CodexSessionState::WaitingInput => Some(ActivityState::WaitingInput),
         CodexSessionState::Ended => None,
         CodexSessionState::Init => None,
     }
@@ -166,7 +159,7 @@ mod tests {
     }
 
     #[test]
-    fn running_state_produces_activity_running() {
+    fn running_state_produces_running_activity_state() {
         let ev = translate_state_change(
             CodexSessionState::Running,
             &CodexJsonlEvent {
@@ -183,7 +176,7 @@ mod tests {
         );
         assert!(ev.is_some());
         let ev = ev.expect("should have event");
-        assert_eq!(ev.event_type, "activity.running");
+        assert_eq!(ev.activity_state, ActivityState::Running);
         assert_eq!(ev.provider, Provider::Codex);
         assert_eq!(ev.source_kind, SourceKind::CodexJsonl);
         assert_eq!(ev.tier, EvidenceTier::Deterministic);
@@ -197,7 +190,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_executing_state_produces_activity_running() {
+    fn tool_executing_state_produces_running_activity_state() {
         let ev = translate_state_change(
             CodexSessionState::ToolExecuting,
             &CodexJsonlEvent {
@@ -214,7 +207,7 @@ mod tests {
         );
         assert!(ev.is_some());
         let ev = ev.expect("event");
-        assert_eq!(ev.event_type, "activity.running");
+        assert_eq!(ev.activity_state, ActivityState::Running);
         assert_eq!(ev.payload["codex_jsonl"]["inner_type"], "function_call");
         assert_eq!(ev.payload["codex_jsonl"]["tool_name"], "shell_command");
         assert_eq!(ev.payload["codex_jsonl"]["call_id"], "call-1");
@@ -236,7 +229,7 @@ mod tests {
             now(),
         );
         let ev = ev.expect("event");
-        assert_eq!(ev.event_type, "activity.waiting_input");
+        assert_eq!(ev.activity_state, ActivityState::WaitingInput);
         assert!(!ev.is_heartbeat);
         assert_eq!(ev.actual_activity_at, Some(now()));
         assert_eq!(ev.payload["codex_jsonl"]["inner_type"], "task_complete");
@@ -266,7 +259,7 @@ mod tests {
         );
         assert!(ev.is_some());
         let ev = ev.expect("event");
-        assert_eq!(ev.event_type, "activity.waiting_approval");
+        assert_eq!(ev.activity_state, ActivityState::WaitingApproval);
         assert_eq!(
             ev.payload["codex_jsonl"]["review_target_type"],
             "uncommittedChanges"
@@ -278,7 +271,7 @@ mod tests {
     }
 
     #[test]
-    fn waiting_input_produces_activity_waiting_input() {
+    fn waiting_input_produces_waiting_input_activity_state() {
         let ev = translate_state_change(
             CodexSessionState::WaitingInput,
             &CodexJsonlEvent {
@@ -294,7 +287,10 @@ mod tests {
             4,
         );
         assert!(ev.is_some());
-        assert_eq!(ev.expect("event").event_type, "activity.waiting_input");
+        assert_eq!(
+            ev.expect("event").activity_state,
+            ActivityState::WaitingInput
+        );
     }
 
     #[test]
@@ -338,7 +334,7 @@ mod tests {
     #[test]
     fn idle_heartbeat_has_correct_fields() {
         let hb = idle_heartbeat("sess-1", "%5", Some(2), None, now());
-        assert_eq!(hb.event_type, "activity.idle");
+        assert_eq!(hb.activity_state, ActivityState::Idle);
         assert_eq!(hb.provider, Provider::Codex);
         assert_eq!(hb.source_kind, SourceKind::CodexJsonl);
         assert_eq!(hb.tier, EvidenceTier::Deterministic);

@@ -929,7 +929,7 @@ pub(crate) fn build_summary_changed(state: &DaemonState, since_version: u64) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agtmux_core_v5::types::{EvidenceTier, Provider, SourceEventV2, SourceKind};
+    use agtmux_core_v5::types::{ActivityState, EvidenceTier, Provider, SourceEventV2, SourceKind};
     use agtmux_daemon_v5::projection::ReplayCursor;
     use agtmux_tmux_v5::TmuxPaneInfo;
     use chrono::Utc;
@@ -954,7 +954,7 @@ mod tests {
             pane_generation: None,
             pane_birth_ts: None,
             source_event_id: None,
-            event_type: "activity.unknown".to_string(),
+            activity_state: ActivityState::Unknown,
             payload: serde_json::json!({
                 "codex_jsonl": {
                     "top_type": "event_msg",
@@ -1775,7 +1775,7 @@ mod tests {
         state.generation_tracker.update(&["%1"], now);
 
         let mut event = codex_v3_event("%1", "task_complete", now);
-        event.event_type = "activity.waiting_input".to_string();
+        event.activity_state = ActivityState::WaitingInput;
 
         state.daemon.apply_events(vec![event.clone()], now);
         state

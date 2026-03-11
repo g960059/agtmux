@@ -221,7 +221,7 @@ impl CodexJsonlSourceState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agtmux_core_v5::types::{EvidenceTier, Provider, SourceKind};
+    use agtmux_core_v5::types::{ActivityState, EvidenceTier, Provider, SourceKind};
     use chrono::TimeZone;
     use std::fs;
     use std::io::Write;
@@ -296,7 +296,7 @@ mod tests {
         // Should emit activity.running for task_started (Init → Running transition)
         let running_events: Vec<_> = events
             .iter()
-            .filter(|e| e.event_type == "activity.running")
+            .filter(|e| e.activity_state == ActivityState::Running)
             .collect();
         assert!(
             !running_events.is_empty(),
@@ -344,7 +344,7 @@ mod tests {
         // activity.waiting_input (from WaitingInput) should be present as a non-heartbeat event
         let waiting_input_real: Vec<_> = events
             .iter()
-            .filter(|e| e.event_type == "activity.waiting_input" && !e.is_heartbeat)
+            .filter(|e| e.activity_state == ActivityState::WaitingInput && !e.is_heartbeat)
             .collect();
         assert!(
             !waiting_input_real.is_empty(),
@@ -387,7 +387,7 @@ mod tests {
 
         let approval_events: Vec<_> = events
             .iter()
-            .filter(|e| e.event_type == "activity.waiting_approval")
+            .filter(|e| e.activity_state == ActivityState::WaitingApproval)
             .collect();
         assert!(
             !approval_events.is_empty(),
@@ -424,7 +424,7 @@ mod tests {
         let events = source.poll_files(&mut watchers, &discoveries, now());
 
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].event_type, "activity.running");
+        assert_eq!(events[0].activity_state, ActivityState::Running);
         assert!(!events[0].is_heartbeat);
         assert_eq!(
             events[0].payload["codex_jsonl"]["inner_type"],
@@ -461,7 +461,7 @@ mod tests {
 
         let mut source = CodexJsonlSourceState::new();
         let first = source.poll_files(&mut watchers, &discoveries, now());
-        assert_eq!(first[0].event_type, "activity.running");
+        assert_eq!(first[0].activity_state, ActivityState::Running);
         assert_eq!(
             first[0].payload["codex_jsonl"]["inner_type"],
             "task_started"
@@ -482,12 +482,12 @@ mod tests {
         assert!(
             second
                 .iter()
-                .any(|e| e.event_type == "activity.waiting_input" && !e.is_heartbeat),
+                .any(|e| e.activity_state == ActivityState::WaitingInput && !e.is_heartbeat),
             "task_complete after historical running state should still transition"
         );
         let task_complete = second
             .iter()
-            .find(|e| e.event_type == "activity.waiting_input" && !e.is_heartbeat)
+            .find(|e| e.activity_state == ActivityState::WaitingInput && !e.is_heartbeat)
             .expect("task_complete event");
         assert_eq!(
             task_complete.payload["codex_jsonl"]["inner_type"],
@@ -566,7 +566,7 @@ mod tests {
         let events2 = source.poll_files(&mut watchers, &discoveries, now());
         let running: Vec<_> = events2
             .iter()
-            .filter(|e| e.event_type == "activity.running")
+            .filter(|e| e.activity_state == ActivityState::Running)
             .collect();
         assert!(
             !running.is_empty(),
@@ -611,7 +611,7 @@ mod tests {
             pane_generation: None,
             pane_birth_ts: None,
             source_event_id: None,
-            event_type: "activity.running".to_owned(),
+            activity_state: ActivityState::Running,
             payload: serde_json::json!({}),
             confidence: 1.0,
             is_heartbeat: false,

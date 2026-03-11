@@ -982,18 +982,11 @@ Phase 7 (Distribution) と独立して実施可能。
 2. Phase 2 (v2 RPC endpoints) — T-SV2-P2 — blocked_by T-XTERM-A3〜A8 + agtmux-term v3-only migration
 3. `agtmux-core-v5::sync_v2_compat` module itself — T-SV2-P3 — blocked_by T-SV2-P2
 
-- [ ] T-SV2-P1 (P2) sync-v2 compat: remove event_type string round-trip from source adapters
-  - 目的: source adapters (poller, claude-hooks, claude-jsonl, codex-jsonl) が `ActivityState` を一度 legacy `event_type` 文字列に変換し、projection が再度 parse するという不要な round-trip を除去する
-  - 対象ファイル (compat-only layer):
-    - `crates/agtmux-source-poller/src/source.rs` — `sync_v2_compat::activity_event_type()` 呼び出し
-    - `crates/agtmux-source-claude-jsonl/src/source.rs` — 同上
-    - `crates/agtmux-source-codex-jsonl/src/translate.rs` — 同上
-    - `crates/agtmux-source-claude-hooks/src/translate.rs` — `sync_v2_compat::claude_hook_event_type()` / `claude_notification_event_type()`
-    - `crates/agtmux-daemon-v5/src/projection.rs` — `sync_v2_compat::parse_activity_state()` による再parse
-  - 方針: `PaneSyncEvent.event_type: String` フィールドを `ActivityState` 直接に変更するか、強型化された enum variant に切り替える
-  - Gate: `just verify` PASS; 既存の projection/source tests が全て通過
-  - Notes: `agtmux-core-v5::sync_v2_compat` module は Phase 2 完了後まで存続。Phase 1 でこのモジュール自体は削除しない
-  - blocked_by: なし（T-VERIFY-FIX 完了済みで just verify green）
+- [x] T-SV2-P1 (P2) sync-v2 compat: remove event_type string round-trip from source adapters — DONE (2026-03-11)
+  - `SourceEventV2.event_type: String` → `activity_state: ActivityState` に置き換え（17 ファイル）
+  - source adapters が `ActivityState` を直接設定; projection が `event.activity_state` を直接参照
+  - Gate: `just verify` PASS (967 tests) ✅
+  - RP: `docs/85_reviews/RP-T-SV2-P1-event-type-round-trip-removal.md`
 
 - [ ] T-SV2-P2 (P2) sync-v2 compat: remove `ui.bootstrap.v2` / `ui.changes.v2` RPC endpoints
   - 目的: `agtmux-term` が sync-v3 only に移行完了した後、daemon から v2 wire endpoints を削除し、`agtmux-runtime::sync_v2_compat` module ごと除去する

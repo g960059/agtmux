@@ -932,8 +932,13 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
     // Also evict stale hints on SessionEnd.
     for event in &claude_response.events {
         if let Some(pane_id) = &event.pane_id {
-            match event.event_type.as_str() {
-                "lifecycle.start" => {
+            match event
+                .payload
+                .get("claude_hook")
+                .and_then(|hook| hook.get("hook_type"))
+                .and_then(serde_json::Value::as_str)
+            {
+                Some("session_start" | "SessionStart") => {
                     if let Some(path_str) = event
                         .payload
                         .get("transcript_path")
@@ -944,10 +949,10 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
                             .insert(pane_id.clone(), std::path::PathBuf::from(path_str));
                     }
                 }
-                "lifecycle.end" => {
+                Some("session_end" | "SessionEnd") => {
                     st.transcript_path_hints.remove(pane_id);
                 }
-                _ => {}
+                Some(_) | None => {}
             }
         }
     }
@@ -1183,7 +1188,7 @@ mod tests {
     use super::*;
     use crate::server::build_ui_bootstrap_v3;
     use agtmux_core_v5::sync_v3::{ThreadExecutionV3, ThreadLifecycleV3, UiBootstrapV3};
-    use agtmux_core_v5::types::{EvidenceTier, Provider, SourceEventV2, SourceKind};
+    use agtmux_core_v5::types::{ActivityState, EvidenceTier, Provider, SourceEventV2, SourceKind};
     use agtmux_tmux_v5::error::TmuxError;
     use chrono::DateTime;
     use std::collections::HashMap;
@@ -1300,9 +1305,7 @@ mod tests {
             pane_generation: None,
             pane_birth_ts: None,
             source_event_id: None,
-            // Legacy compat string stays present for old projection paths, but
-            // these runtime fixtures carry native Codex JSONL semantics too.
-            event_type: "activity.unknown".to_string(),
+            activity_state: ActivityState::Unknown,
             payload: serde_json::json!({
                 "codex_jsonl": {
                     "top_type": "event_msg",

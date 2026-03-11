@@ -317,7 +317,7 @@ mod tests {
             pane_generation: None,
             pane_birth_ts: None,
             source_event_id: Some(event_id.to_string()),
-            event_type: "lifecycle.running".to_string(),
+            activity_state: agtmux_core_v5::types::ActivityState::Running,
             payload: serde_json::json!({}),
             confidence: 1.0,
             is_heartbeat: false,

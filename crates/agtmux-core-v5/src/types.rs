@@ -192,7 +192,7 @@ pub struct SourceEventV2 {
     pub pane_generation: Option<u64>,
     pub pane_birth_ts: Option<DateTime<Utc>>,
     pub source_event_id: Option<String>,
-    pub event_type: String,
+    pub activity_state: ActivityState,
     pub payload: serde_json::Value,
     pub confidence: f64,
     /// Periodic freshness keep-alive event, not real activity.
@@ -423,7 +423,7 @@ mod tests {
             pane_generation: Some(1),
             pane_birth_ts: Some(Utc::now()),
             source_event_id: Some("src-evt-001".into()),
-            event_type: "lifecycle.running".into(),
+            activity_state: ActivityState::Running,
             payload: serde_json::json!({"status": "running"}),
             confidence: 1.0,
             is_heartbeat: false,
