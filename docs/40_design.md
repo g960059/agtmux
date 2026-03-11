@@ -7,6 +7,22 @@
 
 ## Main (MVP Slice)
 
+### Truth Boundary (current)
+
+- `agtmux` daemon is the canonical semantic truth producer for product metadata.
+- Current product truth is `sync-v3` only:
+  - exact identity
+  - provider / presence
+  - agent / thread lifecycle
+  - blocking / execution
+  - pending requests
+  - attention summary
+  - freshness
+  - provider-native raw payloads
+- `sync-v2`, collapsed `ActivityState`, and legacy compat `event_type` strings are compatibility plumbing only.
+- Consumers must not use sync-v2/legacy collapse as a product fallback when sync-v3 truth is unavailable or incomplete.
+- Consumers must not reconstruct semantic truth from `provider_raw`; `provider_raw` is debug/detail only.
+
 ### 1) Interfaces / APIs (MVP)
 
 #### Source Server -> Gateway

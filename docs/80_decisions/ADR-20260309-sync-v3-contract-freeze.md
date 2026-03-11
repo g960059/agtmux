@@ -10,6 +10,9 @@
 
 ## Decision
 - Phase 0 freeze lives in this repo.
+- `agtmux` daemon is the canonical producer of sync-v3 semantic truth.
+- Downstream consumers are expected to treat sync-v3 as product truth and must not fall back to sync-v2 / collapsed legacy status when sync-v3 is missing or incompatible.
+- `provider_raw` remains additive debug detail only and must not be used to reconstruct canonical semantic truth in consumers.
 - The frozen bootstrap contract for this slice is:
 
 ```json
