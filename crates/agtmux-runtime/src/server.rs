@@ -13,8 +13,6 @@ use agtmux_core_v5::title::{TitleInput, resolve_title};
 use agtmux_core_v5::types::{EvidenceMode, PanePresence};
 
 use crate::poll_loop::DaemonState;
-use crate::sync_v2_compat::{build_ui_bootstrap_v2, build_ui_changes_v2, parse_replay_cursor};
-
 const REPLAY_HEALTHY_LAG_WINDOW: u64 = 10;
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -269,12 +267,6 @@ async fn handle_connection(
             let health = st.gateway.list_source_health();
             serde_json::to_value(health)?
         }
-        "ui.bootstrap.v2" => {
-            let mut st = state.lock().await;
-            let replay_cursor = st.daemon.replay_cursor();
-            st.daemon.acknowledge_replay_cursor(replay_cursor);
-            build_ui_bootstrap_v2(&st)
-        }
         "ui.bootstrap.v3" => {
             let mut st = state.lock().await;
             build_ui_bootstrap_v3(&mut st)
@@ -289,17 +281,6 @@ async fn handle_connection(
                 .clamp(1, 1000);
             let mut st = state.lock().await;
             build_ui_changes_v3(&mut st, cursor, limit)
-        }
-        "ui.changes.v2" => {
-            let params = &request["params"];
-            let cursor = parse_replay_cursor(&params["cursor"]);
-            let limit = params["limit"]
-                .as_u64()
-                .and_then(|n| usize::try_from(n).ok())
-                .unwrap_or(100)
-                .clamp(1, 1000);
-            let mut st = state.lock().await;
-            build_ui_changes_v2(&mut st, cursor, limit)
         }
         "ui.health.v1" => {
             let st = state.lock().await;
@@ -930,7 +911,6 @@ pub(crate) fn build_summary_changed(state: &DaemonState, since_version: u64) -> 
 mod tests {
     use super::*;
     use agtmux_core_v5::types::{ActivityState, EvidenceTier, Provider, SourceEventV2, SourceKind};
-    use agtmux_daemon_v5::projection::ReplayCursor;
     use agtmux_tmux_v5::TmuxPaneInfo;
     use chrono::Utc;
 
@@ -1400,205 +1380,6 @@ mod tests {
     }
 
     #[test]
-    fn ui_bootstrap_v2_includes_required_fields() {
-        let state = make_managed_state();
-
-        let result = build_ui_bootstrap_v2(&state);
-        assert_eq!(result["epoch"], 1);
-        assert_eq!(result["snapshot_seq"], state.daemon.version());
-        assert!(result["panes"].is_array());
-        assert!(result["sessions"].is_array());
-        assert!(result.get("generated_at").is_some());
-        assert_eq!(result["replay_cursor"]["epoch"], 1);
-        assert_eq!(result["replay_cursor"]["seq"], state.daemon.version());
-    }
-
-    // FR-066 regression: sync-v2 bootstrap panes must not contain legacy identity aliases.
-    #[test]
-    fn ui_bootstrap_v2_pane_no_legacy_session_id() {
-        let mut state = make_managed_state();
-        // Add an unmanaged pane to cover both branches.
-        state.last_panes.push(TmuxPaneInfo {
-            pane_id: "%99".to_string(),
-            session_id: "$99".to_string(),
-            session_name: "other".to_string(),
-            window_id: "@99".to_string(),
-            window_name: "misc".to_string(),
-            current_cmd: "zsh".to_string(),
-            ..Default::default()
-        });
-
-        let result = build_ui_bootstrap_v2(&state);
-        let panes = result["panes"].as_array().expect("panes array");
-        assert!(!panes.is_empty(), "must have managed panes");
-
-        // No legacy session_id in any pane.
-        for pane in panes {
-            assert!(
-                pane.get("session_id").is_none(),
-                "sync-v2 pane must not contain legacy 'session_id' field (FR-066): pane_id={}",
-                pane["pane_id"]
-            );
-        }
-    }
-
-    #[test]
-    fn ui_bootstrap_v2_includes_unmanaged_pane_with_exact_identity() {
-        let mut state = make_state();
-        let now = Utc::now();
-        state.last_panes.push(TmuxPaneInfo {
-            pane_id: "%99".to_string(),
-            session_name: "other".to_string(),
-            window_id: "@99".to_string(),
-            window_name: "misc".to_string(),
-            current_cmd: "zsh".to_string(),
-            current_path: "/tmp".to_string(),
-            ..Default::default()
-        });
-        state.generation_tracker.update(&["%99"], now);
-
-        let result = build_ui_bootstrap_v2(&state);
-        let panes = result["panes"].as_array().expect("panes array");
-        let unmanaged = panes
-            .iter()
-            .find(|pane| pane["pane_id"] == "%99")
-            .expect("unmanaged pane in bootstrap");
-
-        assert_eq!(unmanaged["presence"], "unmanaged");
-        assert_eq!(unmanaged["session_name"], "other");
-        assert_eq!(unmanaged["window_id"], "@99");
-        assert_eq!(unmanaged["session_key"], "poller-%99");
-        assert_eq!(unmanaged["pane_instance_id"]["pane_id"], "%99");
-        assert!(unmanaged["pane_instance_id"]["generation"].is_number());
-        assert!(unmanaged["pane_instance_id"]["birth_ts"].is_string());
-        assert_eq!(unmanaged["current_cmd"], "zsh");
-    }
-
-    // FR-065 regression: managed pane in sync-v2 bootstrap must carry all required identity fields.
-    #[test]
-    fn ui_bootstrap_v2_managed_pane_required_identity_fields_present() {
-        let state = make_managed_state();
-
-        let result = build_ui_bootstrap_v2(&state);
-        let panes = result["panes"].as_array().expect("panes array");
-        let managed = panes
-            .iter()
-            .find(|p| p["presence"] == "managed")
-            .expect("managed pane");
-
-        assert!(
-            managed.get("pane_id").is_some() && !managed["pane_id"].is_null(),
-            "pane_id required"
-        );
-        assert!(
-            managed.get("session_key").is_some() && !managed["session_key"].is_null(),
-            "session_key required"
-        );
-        assert!(
-            managed.get("session_name").is_some() && !managed["session_name"].is_null(),
-            "session_name required"
-        );
-        assert!(managed.get("window_id").is_some(), "window_id required");
-        assert!(
-            !managed["window_id"].is_null(),
-            "window_id must not be null"
-        );
-        assert!(
-            managed.get("pane_instance_id").is_some() && managed["pane_instance_id"].is_object(),
-            "pane_instance_id required and must be object"
-        );
-        assert!(
-            managed["pane_instance_id"].get("pane_id").is_some(),
-            "pane_instance_id.pane_id required"
-        );
-        assert!(
-            managed["pane_instance_id"].get("generation").is_some(),
-            "pane_instance_id.generation required"
-        );
-        assert!(
-            managed["pane_instance_id"].get("birth_ts").is_some(),
-            "pane_instance_id.birth_ts required"
-        );
-        assert_eq!(
-            managed["session_key"], "poller-%0",
-            "sync-v2 managed pane session_key must stay pane-stable across source transitions"
-        );
-    }
-
-    // FR-065 regression: unresolved exact location must exclude the managed pane from sync-v2.
-    #[test]
-    fn ui_bootstrap_v2_excludes_managed_pane_when_exact_location_is_unresolved() {
-        let mut state = make_managed_state();
-        state.last_panes.clear();
-
-        let result = build_ui_bootstrap_v2(&state);
-        let panes = result["panes"].as_array().expect("panes array");
-
-        assert!(
-            panes.iter().all(|pane| pane["pane_id"] != "%0"),
-            "managed pane with unresolved exact location must be excluded from sync-v2 bootstrap"
-        );
-        assert!(
-            panes
-                .iter()
-                .all(|pane| !pane["session_name"].is_null() && !pane["window_id"].is_null()),
-            "sync-v2 bootstrap must not emit null exact-location fields"
-        );
-    }
-
-    // FR-066 regression: ui.changes.v2 change entries must not contain legacy session_id.
-    #[test]
-    fn ui_changes_v2_no_legacy_session_id() {
-        let mut state = make_managed_state();
-
-        let result = build_ui_changes_v2(&mut state, Some(ReplayCursor { epoch: 1, seq: 0 }), 10);
-        let changes = result["changes"].as_array().expect("changes array");
-        assert!(!changes.is_empty(), "must have changes");
-
-        for change in changes {
-            assert!(
-                change.get("session_id").is_none(),
-                "sync-v2 change entry must not contain legacy 'session_id' field (FR-066)"
-            );
-        }
-    }
-
-    #[test]
-    fn ui_changes_v2_returns_ordered_changes() {
-        let mut state = make_managed_state();
-
-        let result = build_ui_changes_v2(&mut state, Some(ReplayCursor { epoch: 1, seq: 0 }), 10);
-        let changes = result["changes"].as_array().expect("changes array");
-
-        assert_eq!(result["epoch"], 1);
-        assert_eq!(result["from_seq"], 1);
-        assert_eq!(result["to_seq"], state.daemon.version());
-        assert_eq!(result["next_cursor"]["epoch"], 1);
-        assert_eq!(result["next_cursor"]["seq"], state.daemon.version());
-        assert_eq!(changes.len(), 2);
-        assert_eq!(changes[0]["seq"], 1);
-        assert_eq!(changes[1]["seq"], 2);
-        assert!(changes[0]["session"].is_object());
-        assert!(changes[1]["pane"].is_object());
-    }
-
-    #[test]
-    fn ui_changes_v2_pane_change_uses_pane_stable_session_key() {
-        let mut state = make_managed_state();
-
-        let result = build_ui_changes_v2(&mut state, Some(ReplayCursor { epoch: 1, seq: 0 }), 10);
-        let changes = result["changes"].as_array().expect("changes array");
-        let pane_change = changes
-            .iter()
-            .find(|c| c.get("pane").is_some())
-            .expect("pane change present");
-
-        assert_eq!(pane_change["pane_id"], "%0");
-        assert_eq!(pane_change["session_key"], "poller-%0");
-        assert_eq!(pane_change["pane"]["session_key"], "poller-%0");
-    }
-
-    #[test]
     fn ui_health_v1_reports_component_statuses() {
         let mut state = make_managed_state();
         let now = Utc::now();
@@ -1709,22 +1490,6 @@ mod tests {
         let panes = resp["result"].as_array().expect("array");
         assert_eq!(panes.len(), 1);
         assert_eq!(panes[0]["pane_id"], "%41");
-    }
-
-    #[tokio::test]
-    async fn ui_bootstrap_v2_handler_returns_snapshot() {
-        let state = Arc::new(Mutex::new(make_managed_state()));
-        let request = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "ui.bootstrap.v2",
-            "id": 92,
-            "params": {}
-        });
-
-        let resp = call_handler(Arc::clone(&state), request).await;
-        assert_eq!(resp["result"]["epoch"], 1);
-        assert!(resp["result"]["panes"].is_array());
-        assert!(resp["result"]["sessions"].is_array());
     }
 
     #[test]
@@ -2294,153 +2059,6 @@ mod tests {
             "invalid_cursor"
         );
         assert_eq!(resp["result"]["version"], 3);
-    }
-
-    #[tokio::test]
-    async fn ui_changes_v2_handler_resyncs_on_epoch_mismatch() {
-        let state = Arc::new(Mutex::new(make_managed_state()));
-        let request = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "ui.changes.v2",
-            "id": 93,
-            "params": {
-                "cursor": {"epoch": 99, "seq": 0},
-                "limit": 100
-            }
-        });
-
-        let resp = call_handler(Arc::clone(&state), request).await;
-        assert_eq!(
-            resp["result"]["resync_required"]["reason"],
-            "epoch_mismatch"
-        );
-        assert_eq!(resp["result"]["resync_required"]["current_epoch"], 1);
-    }
-
-    #[tokio::test]
-    async fn ui_changes_v2_handler_resyncs_on_trimmed_cursor() {
-        let mut state = make_managed_state();
-        state.daemon.trim_replay_before(1);
-        let state = Arc::new(Mutex::new(state));
-        let request = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "ui.changes.v2",
-            "id": 94,
-            "params": {
-                "cursor": {"epoch": 1, "seq": 0},
-                "limit": 100
-            }
-        });
-
-        let resp = call_handler(Arc::clone(&state), request).await;
-        assert_eq!(
-            resp["result"]["resync_required"]["reason"],
-            "trimmed_cursor"
-        );
-        assert_eq!(resp["result"]["resync_required"]["latest_snapshot_seq"], 2);
-    }
-
-    #[tokio::test]
-    async fn ui_changes_v2_handler_resyncs_on_invalid_cursor() {
-        let state = Arc::new(Mutex::new(make_managed_state()));
-        let request = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "ui.changes.v2",
-            "id": 95,
-            "params": {
-                "cursor": {"epoch": 1},
-                "limit": 100
-            }
-        });
-
-        let resp = call_handler(Arc::clone(&state), request).await;
-        assert_eq!(
-            resp["result"]["resync_required"]["reason"],
-            "invalid_cursor"
-        );
-        assert_eq!(resp["result"]["resync_required"]["current_epoch"], 1);
-    }
-
-    #[tokio::test]
-    async fn ui_bootstrap_v2_handler_compacts_sync_v2_without_touching_sync_v3_cursor() {
-        let mut state = make_bootstrap_v3_codex_completed_state();
-        let expected_v3_cursor = {
-            let payload: UiBootstrapV3 = serde_json::from_value(build_ui_bootstrap_v3(&mut state))
-                .expect("ui.bootstrap.v3 should parse");
-            payload.replay_cursor.expect("v3 replay cursor")
-        };
-        populate_sync_v2_replay(&mut state);
-        let state = Arc::new(Mutex::new(state));
-        let request = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "ui.bootstrap.v2",
-            "id": 96,
-            "params": {}
-        });
-
-        let resp = call_handler(Arc::clone(&state), request).await;
-        assert_eq!(resp["result"]["epoch"], 1);
-
-        let st = state.lock().await;
-        assert_eq!(st.daemon.replay_len(), 0, "sync-v2 replay should compact");
-        assert!(
-            !st.daemon.changes_since(0).is_empty(),
-            "legacy change log must remain available"
-        );
-        assert_eq!(
-            st.sync_v3.current_cursor(),
-            expected_v3_cursor,
-            "ui.bootstrap.v2 must not perturb the sync-v3 replay cursor"
-        );
-    }
-
-    #[tokio::test]
-    async fn ui_changes_v2_handler_acknowledges_sync_v2_without_touching_sync_v3_cursor() {
-        let mut state = make_bootstrap_v3_codex_completed_state();
-        let expected_v3_cursor = {
-            let payload: UiBootstrapV3 = serde_json::from_value(build_ui_bootstrap_v3(&mut state))
-                .expect("ui.bootstrap.v3 should parse");
-            payload.replay_cursor.expect("v3 replay cursor")
-        };
-        populate_sync_v2_replay(&mut state);
-        let state = Arc::new(Mutex::new(state));
-        let request = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "ui.changes.v2",
-            "id": 196,
-            "params": {
-                "cursor": {"epoch": 1, "seq": 0},
-                "limit": 100
-            }
-        });
-
-        let resp = call_handler(Arc::clone(&state), request).await;
-        assert_eq!(resp["result"]["epoch"], 1);
-        assert!(resp["result"]["changes"].is_array());
-
-        let ack_request = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "ui.changes.v2",
-            "id": 197,
-            "params": {
-                "cursor": resp["result"]["next_cursor"].clone(),
-                "limit": 100
-            }
-        });
-        let ack_resp = call_handler(Arc::clone(&state), ack_request).await;
-        assert_eq!(ack_resp["result"]["epoch"], 1);
-
-        let st = state.lock().await;
-        assert_eq!(
-            st.daemon.replay_len(),
-            0,
-            "sync-v2 replay should acknowledge and compact"
-        );
-        assert_eq!(
-            st.sync_v3.current_cursor(),
-            expected_v3_cursor,
-            "ui.changes.v2 must not perturb the sync-v3 replay cursor"
-        );
     }
 
     #[tokio::test]

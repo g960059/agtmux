@@ -988,13 +988,15 @@ Phase 7 (Distribution) と独立して実施可能。
   - Gate: `just verify` PASS (967 tests) ✅
   - RP: `docs/85_reviews/RP-T-SV2-P1-event-type-round-trip-removal.md`
 
-- [ ] T-SV2-P2 (P2) sync-v2 compat: remove `ui.bootstrap.v2` / `ui.changes.v2` RPC endpoints
+- [x] T-SV2-P2 (P2) sync-v2 compat: remove `ui.bootstrap.v2` / `ui.changes.v2` RPC endpoints — DONE (2026-03-11)
   - 目的: `agtmux-term` が sync-v3 only に移行完了した後、daemon から v2 wire endpoints を削除し、`agtmux-runtime::sync_v2_compat` module ごと除去する
   - 対象:
-    - `crates/agtmux-runtime/src/server.rs` — `ui.bootstrap.v2` / `ui.changes.v2` handlers
-    - `crates/agtmux-runtime/src/sync_v2_compat.rs` — `build_ui_bootstrap_v2()` / `build_ui_changes_v2()` / `build_sync_v2_pane_list()`
-  - Gate: agtmux-term の全 live tests が `ui.bootstrap.v3` / `ui.changes.v3` のみで通過すること
-  - blocked_by: T-XTERM-A3, T-XTERM-A4, T-XTERM-A5, T-XTERM-A7, T-XTERM-A8 (agtmux-term full v3 migration)
+    - `crates/agtmux-runtime/src/server.rs` — `ui.bootstrap.v2` / `ui.changes.v2` handlers (削除済み)
+    - `crates/agtmux-runtime/src/sync_v2_compat.rs` — `build_ui_bootstrap_v2()` / `build_ui_changes_v2()` / `build_sync_v2_pane_list()` (削除済み; module stub 5行のみ残存)
+  - Gate: agtmux-term product path v3-only migration 完了 (commit `7f2bf36` on 2026-03-11) ✅
+  - Gate: `just verify` PASS (953 tests) ✅
+  - RP: `docs/85_reviews/RP-T-SV2-P2-v2-endpoint-removal.md`
+  - blocked_by: T-XTERM-A3 (DONE), T-XTERM-A4 (DONE), T-XTERM-A5 (DONE), T-XTERM-A7 (DONE), T-XTERM-A8 (DONE)
 
 - [ ] T-SV2-P3 (P2) sync-v2 compat: delete `agtmux-core-v5::sync_v2_compat` module
   - 目的: T-SV2-P1 + T-SV2-P2 完了後、core module 自体を除去する
