@@ -6,6 +6,29 @@
 
 ---
 
+## 2026-03-11 — T-SV2 deletion chain + T-term01 + P3 follow-ups (session closeout)
+
+### What landed
+- T-SV2-P2: removed `ui.bootstrap.v2` / `ui.changes.v2` RPC endpoints from daemon (commit `9e4fb9e`)
+- T-SV2-P3: deleted `agtmux-core-v5::sync_v2_compat` module (commit `02ffdd5`)
+- agtmux-term T-150/T-151: removed term-side sync-v2 compat layer (pushed `288238f` via Codex %2)
+- T-term01 (agtmux-term): hook setup status check + Register/Unregister sidebar UI (commit `288238f`)
+  - `HookSetupStatus` enum, `@Published hookSetupStatus`, startup check, `HookWarningBanner` in SidebarView
+- T-D01–T-D05: confirmed all Phase 7 distribution infra already present (no new code needed)
+- T-E03a: `check_hooks_at_path()` refactor + filesystem integration test
+- T-E03b: `poll_tick_session_start_populates_transcript_path_hint` test in poll_loop
+- T-codex03a: explicit `sleep 4` in test-claude-approval.sh Phase 3
+- T-E05a: closed as structural guarantee (claude signals have no WaitingInput patterns by design)
+
+### Gate
+- `just verify` PASS (agtmux, final commit `030732b`)
+- `swift build` + `swift test` 296/296 deterministic PASS (agtmux-term `288238f`)
+- T-XTERM-A2/A3/A4/A5/A6 all DONE; T-SV2-P1/P2/P3 all DONE
+
+### Open backlog
+- T-E04 (Post-MVP): OSC Tap source — new crate, deferred
+- T-codex03b (P3): codex-title.sh online re-verification — needs live Codex session
+
 ## 2026-03-10 — Codex exec parity landed on the deterministic JSONL path
 
 ### Summary
