@@ -648,25 +648,16 @@ Phase 7 (Distribution) と独立して実施可能。
   - Scratch handover: `/tmp/agtmux-v2-a2-cross-repo-handover-20260306.md`
   - blocked_by: T-XTERM-A1, T-XTERM-A3
 
-- [ ] T-XTERM-A7 (P0) Cross-repo: exact-row managed demotion and same-session same-provider no-bleed
-  - 目的: direct `ui.bootstrap.v2` truth で、agent exit 後の shell demotion を exact row に反映し、同一 session 内の sibling Codex pane へ `running` を bleed させない
-  - Fresh downstream evidence (2026-03-09):
-    - app-owned daemon socket direct probe shows `vm agtmux-term %6` as `presence=managed provider=codex activity=Running current_cmd=zsh`
-    - the same session surfaces `%2`, `%5`, and `%6` all as `provider=codex activity=Running`
-    - this is producer truth before `agtmux-term` renders it
-  - Deliverables:
-    - exact pane row demotes to `presence=unmanaged provider=null activity_state=null|unknown` once the pane has returned to shell after agent exit / `Ctrl-C`
-    - one Codex pane becoming `running` does not relabel sibling Codex panes in the same session unless their own exact row truth also changed
-    - online E2E exists for:
-      - same-session multi-Codex no-bleed
-      - managed-exit shell demotion for both Codex and Claude
-  - Acceptance:
-    - direct `ui.bootstrap.v2` never reports `presence=managed` for a pane whose `current_cmd` is already `zsh` after agent termination
-    - direct `ui.bootstrap.v2` can represent one running Codex pane while sibling Codex panes in the same session remain `idle` or `unmanaged`
-  - Scratch handover: `/tmp/agtmux-a7-managed-demotion-and-same-session-codex-bleed-20260309.md`
-  - blocked_by: T-XTERM-A5
+- [x] T-XTERM-A7 (P0) Cross-repo: exact-row managed demotion and same-session same-provider no-bleed — DONE (2026-03-11)
+  - 目的: agent exit 後の shell demotion を exact row に反映し、同一 session 内の sibling Codex pane へ `running` を bleed させない
+  - Resolution:
+    - Managed-exit demotion: T-XTERM-A5 (`detect.rs` shell_hint fix) により `process_hint=None + current_cmd=zsh` のケースが正しく demote される
+    - No-bleed: `scripts/tests/e2e/scenarios/same-session-codex-no-bleed.sh` E2E が存在、`run-all.sh` に含まれる
+    - Managed-exit E2E: `scripts/tests/e2e/scenarios/managed-exit.sh` が存在、`run-all.sh` に含まれる（provider-generic）
+  - Gate: `just verify` PASS (213 tests via T-XTERM-A5)、online E2E scripts in run-all.sh
+  - blocked_by: T-XTERM-A5 (DONE)
 
-- [ ] T-XTERM-A8 (P0) Cross-repo: shell demotion when a non-agent child remains under the shell
+- [x] T-XTERM-A8 (P0) Cross-repo: shell demotion when a non-agent child remains under the shell — DONE (2026-03-11)
   - 目的: pane が shell (`current_cmd=zsh`) に戻ったあと、残っている child process が agent ではない場合まで stale managed/provider truth を保持しないようにする
   - Fresh downstream evidence (2026-03-09, after A7 fixes + fresh desktop daemon restart):
     - direct desktop daemon probe no longer shows same-session running bleed:
