@@ -626,9 +626,16 @@ fn reconcile_sync_v3(state: &mut DaemonState, now: chrono::DateTime<chrono::Utc>
     let managed_refs = managed.iter().collect::<Vec<_>>();
     let last_panes = state.last_panes.clone();
     let generation_tracker = state.generation_tracker.clone();
-    state
-        .sync_v3
-        .reconcile(&managed_refs, &last_panes, &generation_tracker, now);
+    let conversation_titles = state.conversation_titles.clone();
+    let conversation_subtitles = state.conversation_subtitles.clone();
+    state.sync_v3.reconcile(
+        &managed_refs,
+        &last_panes,
+        &generation_tracker,
+        &conversation_titles,
+        &conversation_subtitles,
+        now,
+    );
 }
 
 pub(crate) fn build_ui_bootstrap_v3(state: &mut DaemonState) -> serde_json::Value {

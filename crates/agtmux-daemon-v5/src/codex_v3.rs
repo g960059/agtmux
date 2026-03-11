@@ -401,6 +401,8 @@ mod tests {
                 birth_ts: ts(0),
             },
             provider: Some(Provider::Codex),
+            conversation_title: None,
+            session_subtitle: None,
             presence: PresenceV3::Managed,
             agent: AgentStateV3 {
                 lifecycle: AgentLifecycleV3::Running,

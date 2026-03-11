@@ -1203,8 +1203,16 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
     let managed_refs = managed.iter().collect::<Vec<_>>();
     let last_panes = st.last_panes.clone();
     let generation_tracker = st.generation_tracker.clone();
-    st.sync_v3
-        .reconcile(&managed_refs, &last_panes, &generation_tracker, now);
+    let conversation_titles = st.conversation_titles.clone();
+    let conversation_subtitles = st.conversation_subtitles.clone();
+    st.sync_v3.reconcile(
+        &managed_refs,
+        &last_panes,
+        &generation_tracker,
+        &conversation_titles,
+        &conversation_subtitles,
+        now,
+    );
 
     // 11. Compact consumed events to prevent unbounded memory growth.
     // Poller: trim events up to the gateway's source cursor.

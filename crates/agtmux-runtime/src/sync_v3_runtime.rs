@@ -104,6 +104,8 @@ impl SyncV3LiveState {
         managed_fallbacks: &[&PaneRuntimeState],
         tmux_panes: &[TmuxPaneInfo],
         generation_tracker: &PaneGenerationTracker,
+        conversation_titles: &HashMap<String, String>,
+        conversation_subtitles: &HashMap<String, String>,
         now: DateTime<Utc>,
     ) {
         let next_rows = compose_rows(
@@ -111,6 +113,8 @@ impl SyncV3LiveState {
             &self.reducers,
             tmux_panes,
             generation_tracker,
+            conversation_titles,
+            conversation_subtitles,
             now,
         );
         let mut changes = Vec::new();
@@ -197,6 +201,8 @@ fn compose_rows(
     reducers: &BTreeMap<String, SyncV3Reducer>,
     tmux_panes: &[TmuxPaneInfo],
     generation_tracker: &PaneGenerationTracker,
+    conversation_titles: &HashMap<String, String>,
+    conversation_subtitles: &HashMap<String, String>,
     now: DateTime<Utc>,
 ) -> BTreeMap<SyncV3RowKey, SyncV3PaneSnapshot> {
     let managed_by_id = managed_fallbacks
@@ -220,10 +226,41 @@ fn compose_rows(
             continue;
         };
 
-        let snapshot = if let Some(reducer) = reducers.get(&tmux_pane.pane_id) {
-            build_managed_snapshot(reducer.snapshot(), tmux_pane, pane_instance_id, now)
-        } else if let Some(managed) = managed_by_id.get(tmux_pane.pane_id.as_str()) {
-            build_managed_fallback_snapshot(tmux_pane, pane_instance_id, managed, now)
+        let managed = managed_by_id.get(tmux_pane.pane_id.as_str()).copied();
+        let reducer = reducers.get(&tmux_pane.pane_id);
+        let conversation_title = lookup_session_metadata(
+            conversation_titles,
+            [
+                managed.map(|pane| pane.session_key.as_str()),
+                reducer.map(|entry| entry.snapshot().session_key.as_str()),
+            ],
+        );
+        let session_subtitle = lookup_session_metadata(
+            conversation_subtitles,
+            [
+                managed.map(|pane| pane.session_key.as_str()),
+                reducer.map(|entry| entry.snapshot().session_key.as_str()),
+            ],
+        );
+
+        let snapshot = if let Some(reducer) = reducer {
+            build_managed_snapshot(
+                reducer.snapshot(),
+                tmux_pane,
+                pane_instance_id,
+                conversation_title,
+                session_subtitle,
+                now,
+            )
+        } else if let Some(managed) = managed {
+            build_managed_fallback_snapshot(
+                tmux_pane,
+                pane_instance_id,
+                managed,
+                conversation_title,
+                session_subtitle,
+                now,
+            )
         } else {
             build_unmanaged_snapshot(tmux_pane, pane_instance_id)
         };
@@ -318,7 +355,10 @@ fn diff_field_groups(
     if previous.presence != next.presence {
         groups.push(SyncV3FieldGroupV3::Presence);
     }
-    if previous.provider != next.provider {
+    if previous.provider != next.provider
+        || previous.conversation_title != next.conversation_title
+        || previous.session_subtitle != next.session_subtitle
+    {
         groups.push(SyncV3FieldGroupV3::Provider);
     }
     if previous.agent != next.agent {
@@ -400,6 +440,8 @@ fn new_managed_snapshot(
         pane_id: tmux_pane.pane_id.clone(),
         pane_instance_id,
         provider: Some(provider),
+        conversation_title: None,
+        session_subtitle: None,
         presence: PresenceV3::Managed,
         agent: AgentStateV3 {
             lifecycle: AgentLifecycleV3::Unknown,
@@ -423,6 +465,8 @@ fn build_managed_snapshot(
     snapshot: &SyncV3PaneSnapshot,
     tmux_pane: &TmuxPaneInfo,
     pane_instance_id: PaneInstanceId,
+    conversation_title: Option<String>,
+    session_subtitle: Option<String>,
     now: DateTime<Utc>,
 ) -> SyncV3PaneSnapshot {
     let mut pane = snapshot.clone();
@@ -434,6 +478,8 @@ fn build_managed_snapshot(
         .unwrap_or_else(|| format!("managed:{}", tmux_pane.pane_id));
     pane.pane_id = tmux_pane.pane_id.clone();
     pane.pane_instance_id = pane_instance_id;
+    pane.conversation_title = conversation_title;
+    pane.session_subtitle = session_subtitle;
     pane.presence = PresenceV3::Managed;
     pane.freshness = freshness_for_managed_snapshot(&pane, now);
     pane.pending_requests
@@ -445,6 +491,8 @@ fn build_managed_fallback_snapshot(
     tmux_pane: &TmuxPaneInfo,
     pane_instance_id: PaneInstanceId,
     managed: &PaneRuntimeState,
+    conversation_title: Option<String>,
+    session_subtitle: Option<String>,
     now: DateTime<Utc>,
 ) -> SyncV3PaneSnapshot {
     SyncV3PaneSnapshot {
@@ -457,6 +505,8 @@ fn build_managed_fallback_snapshot(
         pane_id: tmux_pane.pane_id.clone(),
         pane_instance_id,
         provider: managed.provider,
+        conversation_title,
+        session_subtitle,
         presence: PresenceV3::Managed,
         agent: AgentStateV3 {
             lifecycle: AgentLifecycleV3::Unknown,
@@ -489,6 +539,8 @@ fn build_unmanaged_snapshot(
         pane_id: tmux_pane.pane_id.clone(),
         pane_instance_id,
         provider: None,
+        conversation_title: None,
+        session_subtitle: None,
         presence: PresenceV3::Unmanaged,
         agent: AgentStateV3 {
             lifecycle: AgentLifecycleV3::Unknown,
@@ -506,6 +558,19 @@ fn build_unmanaged_snapshot(
         provider_raw: ProviderRawEnvelopeV3::default(),
         updated_at,
     }
+}
+
+fn lookup_session_metadata<'a, I>(
+    metadata: &HashMap<String, String>,
+    session_keys: I,
+) -> Option<String>
+where
+    I: IntoIterator<Item = Option<&'a str>>,
+{
+    session_keys
+        .into_iter()
+        .flatten()
+        .find_map(|session_key| metadata.get(session_key).cloned())
 }
 
 fn empty_turn() -> TurnStateV3 {
@@ -582,6 +647,33 @@ mod tests {
         }
     }
 
+    fn claude_event(hook_type: &str, pane_id: &str, observed_at: DateTime<Utc>) -> SourceEventV2 {
+        let mut payload = serde_json::json!({});
+        payload["claude_hook"] = serde_json::json!({
+            "hook_id": format!("hook-{}", observed_at.timestamp()),
+            "hook_type": hook_type,
+            "session_id": "claude-session-1",
+            "timestamp": observed_at,
+        });
+        SourceEventV2 {
+            event_id: format!("claude-hook-{hook_type}-{}", observed_at.timestamp()),
+            provider: Provider::Claude,
+            source_kind: SourceKind::ClaudeHooks,
+            tier: EvidenceTier::Deterministic,
+            observed_at,
+            session_key: format!("claude:{pane_id}"),
+            pane_id: Some(pane_id.to_string()),
+            pane_generation: None,
+            pane_birth_ts: None,
+            source_event_id: Some(format!("hook-{}", observed_at.timestamp())),
+            activity_state: ActivityState::Unknown,
+            payload,
+            confidence: 1.0,
+            is_heartbeat: false,
+            actual_activity_at: Some(observed_at),
+        }
+    }
+
     fn codex_event(inner_type: &str, pane_id: &str, observed_at: DateTime<Utc>) -> SourceEventV2 {
         codex_event_with_activity_state(ActivityState::Unknown, inner_type, pane_id, observed_at)
     }
@@ -630,7 +722,14 @@ mod tests {
             &panes,
             &tracker,
         );
-        live.reconcile(&[], &panes, &tracker, ts(11));
+        live.reconcile(
+            &[],
+            &panes,
+            &tracker,
+            &HashMap::new(),
+            &HashMap::new(),
+            ts(11),
+        );
 
         let payload = live.build_bootstrap(ts(11));
         payload.validate().expect("payload should validate");
@@ -658,7 +757,14 @@ mod tests {
             codex_event_with_activity_state(ActivityState::Running, "task_complete", "%18", ts(10));
 
         live.apply_events(&[event], &panes, &tracker);
-        live.reconcile(&[], &panes, &tracker, ts(11));
+        live.reconcile(
+            &[],
+            &panes,
+            &tracker,
+            &HashMap::new(),
+            &HashMap::new(),
+            ts(11),
+        );
 
         let payload = live.build_bootstrap(ts(11));
         payload.validate().expect("payload should validate");
@@ -676,7 +782,14 @@ mod tests {
         let panes = vec![pane];
         let mut tracker = PaneGenerationTracker::new();
         tracker.update(&["%45"], ts(0));
-        live.reconcile(&[], &panes, &tracker, ts(12));
+        live.reconcile(
+            &[],
+            &panes,
+            &tracker,
+            &HashMap::new(),
+            &HashMap::new(),
+            ts(12),
+        );
 
         let payload = live.build_bootstrap(ts(12));
         payload.validate().expect("payload should validate");
@@ -706,7 +819,14 @@ mod tests {
             &panes,
             &tracker,
         );
-        live.reconcile(&[], &panes, &tracker, ts(11));
+        live.reconcile(
+            &[],
+            &panes,
+            &tracker,
+            &HashMap::new(),
+            &HashMap::new(),
+            ts(11),
+        );
 
         let payload = live.build_bootstrap(ts(11));
         payload.validate().expect("payload should validate");
@@ -749,10 +869,24 @@ mod tests {
             &panes,
             &tracker,
         );
-        live.reconcile(&[], &panes, &tracker, ts(11));
+        live.reconcile(
+            &[],
+            &panes,
+            &tracker,
+            &HashMap::new(),
+            &HashMap::new(),
+            ts(11),
+        );
 
         let remaining = vec![tmux_pane("%52", "primary", "@9", "node")];
-        live.reconcile(&[], &remaining, &tracker, ts(12));
+        live.reconcile(
+            &[],
+            &remaining,
+            &tracker,
+            &HashMap::new(),
+            &HashMap::new(),
+            ts(12),
+        );
 
         let payload = live.build_changes(Some(SyncV3CursorV3 { seq: 2 }), 10);
         payload.validate().expect("changes should validate");
@@ -793,7 +927,14 @@ mod tests {
             updated_at: ts(8),
         };
 
-        live.reconcile(&[&managed], &panes, &tracker, ts(12));
+        live.reconcile(
+            &[&managed],
+            &panes,
+            &tracker,
+            &HashMap::new(),
+            &HashMap::new(),
+            ts(12),
+        );
 
         let payload = live.build_bootstrap(ts(12));
         payload.validate().expect("payload should validate");
@@ -836,13 +977,27 @@ mod tests {
             updated_at: ts(10),
         };
 
-        live.reconcile(&[&managed], &panes, &tracker, ts(11));
+        live.reconcile(
+            &[&managed],
+            &panes,
+            &tracker,
+            &HashMap::new(),
+            &HashMap::new(),
+            ts(11),
+        );
         let fresh_payload = live.build_bootstrap(ts(11));
         let fresh_pane = &fresh_payload.panes[0];
         assert_eq!(fresh_pane.thread.lifecycle, ThreadLifecycleV3::NotLoaded);
         assert_eq!(fresh_pane.freshness.snapshot, FreshnessState::Fresh);
 
-        live.reconcile(&[&managed], &panes, &tracker, ts(26));
+        live.reconcile(
+            &[&managed],
+            &panes,
+            &tracker,
+            &HashMap::new(),
+            &HashMap::new(),
+            ts(26),
+        );
         let down_payload = live.build_bootstrap(ts(26));
         let down_pane = &down_payload.panes[0];
         assert_eq!(down_pane.thread.lifecycle, ThreadLifecycleV3::NotLoaded);
@@ -870,6 +1025,8 @@ mod tests {
                 pane_id: "%88".to_string(),
                 pane_instance_id: pane_instance_id.clone(),
                 provider: Some(Provider::Codex),
+                conversation_title: None,
+                session_subtitle: None,
                 presence: PresenceV3::Managed,
                 agent: AgentStateV3 {
                     lifecycle: AgentLifecycleV3::Completed,
@@ -893,12 +1050,78 @@ mod tests {
                 updated_at: ts(10),
             };
 
-            let pane = build_managed_snapshot(&snapshot, &pane, pane_instance_id.clone(), ts(30));
+            let pane = build_managed_snapshot(
+                &snapshot,
+                &pane,
+                pane_instance_id.clone(),
+                None,
+                None,
+                ts(30),
+            );
             assert_eq!(pane.thread.lifecycle, lifecycle);
             assert_eq!(pane.freshness.snapshot, FreshnessState::Fresh);
             assert_eq!(pane.freshness.blocking, FreshnessState::Fresh);
             assert_eq!(pane.freshness.execution, FreshnessState::Fresh);
         }
+    }
+
+    #[test]
+    fn reconcile_uses_projection_session_key_for_conversation_metadata_lookup() {
+        let mut live = SyncV3LiveState::default();
+        let panes = vec![tmux_pane("%34", "review", "@7", "claude")];
+        let mut tracker = PaneGenerationTracker::new();
+        tracker.update(&["%34"], ts(0));
+
+        let managed = PaneRuntimeState {
+            pane_instance_id: PaneInstanceId {
+                pane_id: "%34".to_string(),
+                generation: 2,
+                birth_ts: ts(0),
+            },
+            presence: PanePresence::Managed,
+            evidence_mode: agtmux_core_v5::types::EvidenceMode::Deterministic,
+            signature_class: PaneSignatureClass::Deterministic,
+            signature_reason: "deterministic".to_string(),
+            signature_confidence: 1.0,
+            no_agent_streak: 0,
+            signature_inputs: SignatureInputsCompact::default(),
+            activity_state: agtmux_core_v5::types::ActivityState::Idle,
+            provider: Some(Provider::Claude),
+            session_key: "claude-session-123".to_string(),
+            updated_at: ts(10),
+        };
+        let conversation_titles = HashMap::from([(
+            "claude-session-123".to_string(),
+            "Review exact identity".to_string(),
+        )]);
+        let conversation_subtitles = HashMap::from([(
+            "claude-session-123".to_string(),
+            "Check sync-v3 metadata bridge".to_string(),
+        )]);
+
+        live.apply_events(&[claude_event("stop", "%34", ts(10))], &panes, &tracker);
+        live.reconcile(
+            &[&managed],
+            &panes,
+            &tracker,
+            &conversation_titles,
+            &conversation_subtitles,
+            ts(11),
+        );
+
+        let payload = live.build_bootstrap(ts(11));
+        payload.validate().expect("payload should validate");
+
+        let pane = &payload.panes[0];
+        assert_eq!(pane.session_key, "claude:%34");
+        assert_eq!(
+            pane.conversation_title.as_deref(),
+            Some("Review exact identity")
+        );
+        assert_eq!(
+            pane.session_subtitle.as_deref(),
+            Some("Check sync-v3 metadata bridge")
+        );
     }
 
     #[test]
@@ -908,7 +1131,14 @@ mod tests {
         let mut tracker = PaneGenerationTracker::new();
         tracker.update(&["%34"], ts(0));
 
-        live.reconcile(&[], &panes, &tracker, ts(1));
+        live.reconcile(
+            &[],
+            &panes,
+            &tracker,
+            &HashMap::new(),
+            &HashMap::new(),
+            ts(1),
+        );
 
         let managed = PaneRuntimeState {
             pane_instance_id: PaneInstanceId {
@@ -929,7 +1159,14 @@ mod tests {
             updated_at: ts(10),
         };
 
-        live.reconcile(&[&managed], &panes, &tracker, ts(11));
+        live.reconcile(
+            &[&managed],
+            &panes,
+            &tracker,
+            &HashMap::new(),
+            &HashMap::new(),
+            ts(11),
+        );
 
         let payload = live.build_changes(Some(SyncV3CursorV3 { seq: 1 }), 10);
         payload.validate().expect("changes should validate");
@@ -967,7 +1204,14 @@ mod tests {
             &panes,
             &tracker,
         );
-        live.reconcile(&[], &panes, &tracker, ts(11));
+        live.reconcile(
+            &[],
+            &panes,
+            &tracker,
+            &HashMap::new(),
+            &HashMap::new(),
+            ts(11),
+        );
 
         let payload = live.build_changes(Some(SyncV3CursorV3 { seq: 0 }), 10);
         payload.validate().expect("changes should validate");
@@ -996,14 +1240,28 @@ mod tests {
         let mut tracker = PaneGenerationTracker::new();
         tracker.update(&["%12"], ts(0));
 
-        live.reconcile(&[], &panes, &tracker, ts(1));
+        live.reconcile(
+            &[],
+            &panes,
+            &tracker,
+            &HashMap::new(),
+            &HashMap::new(),
+            ts(1),
+        );
         let shell_row = live.build_bootstrap(ts(1)).panes[0].clone();
         live.apply_events(
             &[codex_event("task_started", "%12", ts(10))],
             &panes,
             &tracker,
         );
-        live.reconcile(&[], &panes, &tracker, ts(11));
+        live.reconcile(
+            &[],
+            &panes,
+            &tracker,
+            &HashMap::new(),
+            &HashMap::new(),
+            ts(11),
+        );
         let managed_row = live.build_bootstrap(ts(11)).panes[0].clone();
 
         let payload = live.build_changes(Some(SyncV3CursorV3 { seq: 1 }), 10);
@@ -1067,10 +1325,17 @@ mod tests {
             &panes,
             &tracker,
         );
-        live.reconcile(&[], &panes, &tracker, ts(11));
+        live.reconcile(
+            &[],
+            &panes,
+            &tracker,
+            &HashMap::new(),
+            &HashMap::new(),
+            ts(11),
+        );
 
         live.retain_inventory(&[]);
-        live.reconcile(&[], &[], &tracker, ts(12));
+        live.reconcile(&[], &[], &tracker, &HashMap::new(), &HashMap::new(), ts(12));
 
         let payload = live.build_changes(Some(SyncV3CursorV3 { seq: 1 }), 10);
         payload.validate().expect("remove change should validate");

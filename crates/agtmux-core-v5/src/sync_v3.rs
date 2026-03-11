@@ -240,6 +240,10 @@ pub struct SyncV3PaneSnapshot {
     pub pane_id: String,
     pub pane_instance_id: PaneInstanceId,
     pub provider: Option<Provider>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversation_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_subtitle: Option<String>,
     pub presence: PresenceV3,
     pub agent: AgentStateV3,
     pub thread: ThreadStateV3,
