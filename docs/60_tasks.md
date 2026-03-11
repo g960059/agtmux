@@ -281,7 +281,7 @@ Phase 7 (Distribution) と独立して実施可能。
   - 2行 sidebar VStack は T-SM03 で 1行レイアウト再設計するため未実装
   - Gate: 299/299 deterministic tests PASS
 
-- [ ] T-SM03 (P3) agtmux-term: sidebar 1行 compact レイアウト — TODO
+- [x] T-SM03 (P3) agtmux-term: sidebar 1行 compact レイアウト — DONE (2026-03-11, commit 8c13aef)
   - **ユーザー要望**: pane は 1行表示 (pane数が多いため compact 必要); provider mark を LEFT に、status は provider mark 周りの ring/circular progress で表示
   - **変更ファイル**:
     - `SidebarView.swift`: 新 `ProviderStatusBadge` + `SpinnerRing` view 追加; `PaneRowView` の LEFT を `stateIndicator` → `ProviderStatusBadge` に置換; RIGHT の `ProviderIcon` 削除

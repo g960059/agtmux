@@ -16,8 +16,10 @@
 - Tasks: T-SM01 (daemon) + T-SM02 (agtmux-term), both added to docs/60_tasks.md
 - Handoff: `agtmux-term/docs/handoffs/T-SM02-session-subtitle.md`
 
-### Status
-- T-SM01 implementation delegated to Codex (background)
+### Landed
+- T-SM01: daemon `session_subtitle` field (commit 38d1f93, agtmux)
+- T-SM02: model improvements — dir fallback title, always-visible age, `sessionSubtitle` decode (commit cae749a, agtmux-term)
+- T-SM03: sidebar 1-line compact layout — `ProviderStatusBadge` on LEFT with animated status ring (commit 8c13aef, agtmux-term)
 
 ---
 
