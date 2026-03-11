@@ -6,6 +6,21 @@
 
 ---
 
+## 2026-03-11 — Phase 10: Session Metadata Display plan finalized
+
+### Design Decision (synthesized from Codex + Claude independent proposals)
+- **Option A** (single `session_subtitle` field) chosen unanimously
+- **De-duplication on daemon side**: subtitle = first candidate from (summary, first_prompt) that differs from conversation_title
+- **2-line sidebar row** for managed panes only: title (13pt bold) + subtitle (11pt, opacity 0.45), fixed row height
+- Research doc: `docs/research/20260311/session-metadata-display.md`
+- Tasks: T-SM01 (daemon) + T-SM02 (agtmux-term), both added to docs/60_tasks.md
+- Handoff: `agtmux-term/docs/handoffs/T-SM02-session-subtitle.md`
+
+### Status
+- T-SM01 implementation delegated to Codex (background)
+
+---
+
 ## 2026-03-11 — T-SV2 deletion chain + T-term01 + P3 follow-ups (session closeout)
 
 ### What landed

@@ -256,6 +256,35 @@ Phase 7 (Distribution) と独立して実施可能。
 
 ## DOING
 
+### Phase 10 — Session Metadata Display (2-line sidebar)
+
+- [ ] T-SM01 (P3) Daemon: session_subtitle フィールド追加 — TODO
+  - **目的**: sidebar 2行表示のために daemon が `session_subtitle` を計算・送信する
+  - **設計決定**: Option A — 単一フィールド `session_subtitle` (Codex/Claude 両案で合意)
+  - **Subtitle 解決ロジック** (daemon 側で実施、クライアントに責務を持たせない):
+    - Claude: `summary != conversation_title` → subtitle = summary; else `first_prompt != conversation_title` → subtitle = first_prompt; else None
+    - Codex: `last_first_prompt != conversation_title` → subtitle = last_first_prompt; else None
+  - **変更ファイル**:
+    - `crates/agtmux-runtime/src/poll_loop.rs`: `DaemonState` に `conversation_subtitles: HashMap<String, String>` 追加 + 各 provider の populate ロジック
+    - `crates/agtmux-runtime/src/server.rs`: `build_pane_list` に `"session_subtitle": state.conversation_subtitles.get(&pane.session_key)` 追加
+  - **テスト**:
+    - `server_build_pane_list_includes_session_subtitle` (unit)
+    - `poll_tick_session_subtitle_deduplicates_when_summary_equals_title` (unit)
+  - **Gate**: `just verify` PASS
+  - blocked_by: なし
+
+- [ ] T-SM02 (P3) agtmux-term: 2行 sidebar 表示 — TODO
+  - **目的**: managed pane 行で title + subtitle を 2行表示する
+  - **変更ファイル**:
+    - `Sources/AgtmuxTermCore/CoreModels.swift`: `AgtmuxPane` に `sessionSubtitle: String?` 追加 + RawPane DTO + 全 factory method を更新
+    - `Sources/AgtmuxTerm/SidebarView.swift`: `PaneRowView.body` の `Text(paneDisplayTitle)` を VStack に置き換え — managed pane のみ subtitle 行 (11pt, opacity 0.45) を追加; 行高さ固定 (layout jump 防止)
+  - **詳細仕様**: `docs/handoffs/T-SM02-session-subtitle.md` 参照 (agtmux-term repo)
+  - **テスト**:
+    - `AgtmuxPane` decode test: `sessionSubtitle` フィールド
+    - `PaneRowView` preview: subtitle あり/なし両方
+  - **Gate**: `swift build` PASS + `swift test` PASS (deterministic tests)
+  - blocked_by: T-SM01 (daemon 側の `session_subtitle` フィールドが必要)
+
 ### Clippy fix — just verify ブロッカー解消 ✅ DONE
 
 - [x] T-VERIFY-FIX + T-VERIFY-FIX-B (P0) clippy 修正 + narrower poll_loop fix — DONE (2026-03-10)
