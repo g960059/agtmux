@@ -290,6 +290,26 @@ Phase 7 (Distribution) と独立して実施可能。
   - **Gate**: `swift build` PASS + `swift test` 299+ PASS
   - blocked_by: T-SM02 (DONE)
 
+- [x] T-SM04 (P3) agtmux: Claude JSONL watcher に last_user_prompt 追加 — DONE (2026-03-11, commit 189102c)
+  - `last_user_prompt: Option<String>` フィールド追加 (watcher.rs)
+  - `scan_historical` でも backfill; `source.rs` で user メッセージごとに更新
+  - title chain: custom-title > summary > last_user_prompt > first_prompt
+  - `sync_conversation_subtitle` の候補リストにも追加
+  - Gate: `cargo test -p agtmux-source-claude-jsonl` PASS, `just verify` PASS
+
+- [x] T-SM05 (P3) agtmux-term: primaryLabel fallback chain 修正 — DONE (2026-03-11, commit 9e07def)
+  - **問題**: conversationTitle = nil のとき folder名 ("agtmux") にフォールバックし全 pane 同じ表示
+  - **修正**: `conversationTitle → sessionSubtitle → provider.rawValue → paneId`
+  - **変更ファイル**: `CoreModels.swift` (primaryLabel), `AgtmuxSnapshotDecodeCompatibilityTests.swift`, `AppViewModelA0Tests.swift`
+  - Gate: `swift test --filter Decode/testDecodePreserves...` PASS
+
+- [ ] T-SM06 (P2) agtmux + agtmux-term: sync-v3 に conversation_title/session_subtitle を通す — IN PROGRESS
+  - **問題**: `SyncV3PaneSnapshot` に title フィールドがないため、daemon が title を持っていても Swift クライアントに届かない
+  - **修正**:
+    - Rust: `SyncV3PaneSnapshot` に `conversation_title + session_subtitle` 追加; `reconcile_sync_v3` で `DaemonState.conversation_titles/subtitles` を渡す
+    - Swift: `AgtmuxSyncV3PaneSnapshot` に `conversationTitle` 追加; `localMetadataOverlay` で `AgtmuxPane.conversationTitle` に設定
+  - **根本解決**: hooks 登録 + JSONL discovery がある pane ではtitle が表示されるようになる
+  - blocked_by: T-SM05 (DONE)
 
 ### Clippy fix — just verify ブロッカー解消 ✅ DONE
 

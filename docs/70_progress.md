@@ -20,6 +20,14 @@
 - T-SM01: daemon `session_subtitle` field (commit 38d1f93, agtmux)
 - T-SM02: model improvements — dir fallback title, always-visible age, `sessionSubtitle` decode (commit cae749a, agtmux-term)
 - T-SM03: sidebar 1-line compact layout — `ProviderStatusBadge` on LEFT with animated status ring (commit 8c13aef, agtmux-term)
+- T-SM04: `last_user_prompt` tracking in Claude JSONL watcher for fresher titles (commit 189102c, agtmux)
+- T-SM05: `primaryLabel` fallback chain fix — `conversationTitle → sessionSubtitle → provider.rawValue → paneId` (commit 9e07def, agtmux-term)
+  - Root finding: both title AND subtitle are nil when JSONL not discovered — T-SM06 needed to fix transport gap
+
+### Transport gap (T-SM06, in progress)
+- `SyncV3PaneSnapshot` (Rust) doesn't carry `conversation_title`/`session_subtitle` → titles never reach Swift client via sync-v3 even when daemon has them
+- Fix: add fields to Rust core struct + populate from `DaemonState.conversation_titles` in `reconcile_sync_v3`; add `conversationTitle` to Swift `AgtmuxSyncV3PaneSnapshot` + wire through `localMetadataOverlay`
+- Codex subagent running (task b53sb34z8)
 
 ---
 
