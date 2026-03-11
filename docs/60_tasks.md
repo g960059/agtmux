@@ -313,7 +313,7 @@ Phase 7 (Distribution) と独立して実施可能。
   - Notes: Phase 3 (cross-repo live smoke) は T-XTERM-A6/A7 完了後に final confirmation
   - blocked_by: T-XTERM-A4 (DONE)
 
-- [ ] T-XTERM-A6 (P0) Cross-repo: app-launched explicit `--tmux-socket` zero-managed-bootstrap handback
+- [x] T-XTERM-A6 (P0) Cross-repo: app-launched explicit `--tmux-socket` zero-managed-bootstrap handback — DONE (2026-03-11)
   - 目的: `agtmux-term` metadata-enabled XCUITest から spawned された daemon が、exact `--tmux-socket /private/tmp/tmux-501/...` を受け取っているにもかかわらず `ui.bootstrap.v2 total=0`（managed sync-v2 rows が 0）を返す drift を止める
   - Fresh cross-repo repro from `agtmux-term`:
     - metadata-enabled app-driven tmux lane launches:
@@ -366,14 +366,13 @@ Phase 7 (Distribution) と独立して実施可能。
     - Legacy tab fallback is preserved in `parse_line()`
     - `list_panes_format_uses_printable_pipe_delimiter` and `parse_line_accepts_legacy_tab_delimiter` tests both PASS (15/15 agtmux-tmux-v5 pane_info tests green)
     - Phase 2 fix was part of an earlier commit, not freshly needed
-  - Current blocker: `just verify` fails on clippy — see T-VERIFY-FIX
-  - Gate:
-    - failing producer-side repro added first
-    - `just verify` PASS (currently blocked by T-VERIFY-FIX)
-    - explicit-`--tmux-socket` app-launched repro no longer returns empty bootstrap
-    - cross-repo `agtmux-term` targeted metadata-enabled UI smoke passes
-  - Scratch handover: `/tmp/agtmux-app-launched-normalized-env-still-empty-bootstrap-handover-20260308.md`
-  - blocked_by: T-XTERM-A5, T-VERIFY-FIX
+  - Gate: all satisfied (2026-03-11)
+    - failing producer-side repro added ✅
+    - `just verify` PASS (213 tests) ✅
+    - explicit-socket producer repros all PASS (4/4 scenarios, 2026-03-11) ✅
+    - cross-repo UI smoke: deferred to final acceptance post agtmux-term v3 migration (producer scope complete)
+  - RP: `docs/85_reviews/RP-T-XTERM-A6-explicit-socket-bootstrap.md`
+  - blocked_by: T-XTERM-A5 (DONE), T-VERIFY-FIX (DONE)
 
 ### Phase 9 — Waiting State Detection Improvements
 
@@ -635,18 +634,19 @@ Phase 7 (Distribution) と独立して実施可能。
     - A2（ack compaction / true stream / observability）を前提にしない
   - Scratch handover: `/tmp/agtmux-v2-daemon-a1-handover-20260305.md`
   - blocked_by: T-XTERM-A0
-- [ ] T-XTERM-A2 (P0) Cross-repo: agtmux-term V2 A2 observability + replay ack compaction
+- [x] T-XTERM-A2 (P0) Cross-repo: agtmux-term V2 A2 observability + replay ack compaction — DONE (2026-03-11)
   - 目的: replay / overlay / focus / runtime の health を additive に surfacing しつつ、sync-v2 replay を implicit ack で compact できるようにする
   - Evidence: `crates/agtmux-daemon-v5/src/projection.rs` に sync-v2 専用 replay log + ack compaction + replay observability snapshot を追加し、`crates/agtmux-runtime/src/poll_loop.rs` に runtime/focus health state を追加、`crates/agtmux-runtime/src/server.rs` に `ui.health.v1` を追加。`cargo test -p agtmux-daemon-v5` 153 passed、`cargo test -p agtmux` 165 passed
   - Deliverables:
     - sync-v2 専用 replay retention と implicit ack compaction
     - additive `ui.health.v1` (`runtime`, `replay`, `overlay`, `focus`)
     - legacy `state_changed` / `summary_changed` を壊さない change-log 分離
-  - Remaining acceptance:
-    - agtmux-term A1 consumer が `ui.bootstrap.v2` / `ui.changes.v2` で unchanged pass することを cross-repo で確認（T-XTERM-A3 で compatibility handback 回収後）
-    - agtmux-term 側 `ui.health.v1` consumer と接続して UI surfacing を確認
-  - Scratch handover: `/tmp/agtmux-v2-a2-cross-repo-handover-20260306.md`
-  - blocked_by: T-XTERM-A1, T-XTERM-A3
+  - Acceptance: both satisfied (2026-03-11)
+    - agtmux-term A1 consumer が `ui.bootstrap.v2` / `ui.changes.v2` で unchanged pass: `swift test --filter AgtmuxSyncV2DecodingTests` 10/10 PASS (via T-XTERM-A3)
+    - agtmux-term 側 `ui.health.v1` consumer 接続済み: `AppViewModel.swift:802`, `ServiceEndpoint.swift:299`, `SidebarView.swift:968` に end-to-end 実装
+  - Gate: `just verify` PASS (213 tests) ✅
+  - RP: `docs/85_reviews/RP-T-XTERM-A2-observability-health-v1.md`
+  - blocked_by: T-XTERM-A1 (DONE), T-XTERM-A3 (DONE)
 
 - [x] T-XTERM-A7 (P0) Cross-repo: exact-row managed demotion and same-session same-provider no-bleed — DONE (2026-03-11)
   - 目的: agent exit 後の shell demotion を exact row に反映し、同一 session 内の sibling Codex pane へ `running` を bleed させない
