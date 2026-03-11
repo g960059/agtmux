@@ -164,13 +164,15 @@ impl ClaudeJsonlSourceState {
                             }
                             continue; // no activity event from summary events
                         }
-                        // Capture first user prompt text as lowest-priority title fallback.
+                        // Capture first and latest user prompt text as title fallbacks.
                         if parsed.line_type == "user"
-                            && watcher.last_first_prompt().is_none()
                             && let Some(ref msg) = parsed.message
                             && let Some(text) = extract_user_text(msg)
                         {
-                            watcher.set_first_prompt(text);
+                            watcher.set_user_prompt(text.clone());
+                            if watcher.last_first_prompt().is_none() {
+                                watcher.set_first_prompt(text);
+                            }
                         }
                         if let Some(event) = translate::translate(&parsed, &ctx) {
                             emitted_real_event = true;
@@ -979,6 +981,53 @@ mod tests {
             Some("Updated Title"),
             "last_title should be the final custom-title seen"
         );
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn poll_files_tracks_last_user_prompt_from_user_messages() {
+        use std::fs;
+        use std::io::Write;
+
+        let tmp = std::env::temp_dir().join("agtmux-test-last-user-prompt");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).expect("test");
+
+        let jsonl_path = tmp.join("user-prompt-session.jsonl");
+        let mut f = fs::File::create(&jsonl_path).expect("test");
+        writeln!(
+            f,
+            r#"{{"type":"user","message":{{"role":"user","content":"first prompt"}}}}"#
+        )
+        .expect("test");
+        writeln!(
+            f,
+            r#"{{"type":"user","message":{{"role":"user","content":"latest prompt"}}}}"#
+        )
+        .expect("test");
+        drop(f);
+
+        let discoveries = vec![SessionDiscovery {
+            pane_id: "%12".to_owned(),
+            session_id: "user-sess".to_owned(),
+            jsonl_path: jsonl_path.clone(),
+            pane_generation: Some(1),
+            pane_birth_ts: None,
+            cwd_candidate_count: 1,
+        }];
+
+        let mut watchers = HashMap::new();
+        watchers.insert(
+            "%12".to_owned(),
+            SessionFileWatcher::new_from_start(jsonl_path),
+        );
+
+        let _ = ClaudeJsonlSourceState::poll_files(&mut watchers, &discoveries, now());
+
+        let watcher = watchers.get("%12").expect("watcher must exist");
+        assert_eq!(watcher.last_first_prompt(), Some("first prompt"));
+        assert_eq!(watcher.last_user_prompt(), Some("latest prompt"));
 
         let _ = fs::remove_dir_all(&tmp);
     }

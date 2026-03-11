@@ -30,6 +30,9 @@ pub struct SessionFileWatcher {
     last_summary: Option<String>,
     /// First user prompt text extracted from this JSONL file (lowest-priority title fallback).
     last_first_prompt: Option<String>,
+    /// Most recent user message seen in this JSONL file.
+    /// Updated on every user message (unlike last_first_prompt, which is set once).
+    last_user_prompt: Option<String>,
     /// Timestamp of the last real-activity JSONL line seen during the historical scan.
     /// Used to populate `actual_activity_at` on bootstrap events so that `updated_at`
     /// in the projection reflects actual last-activity time, not daemon restart time.
@@ -41,7 +44,7 @@ impl SessionFileWatcher {
     ///
     /// Seeks to EOF so that future activity events are tracked from now on.
     /// Performs a one-time historical scan of existing content to backfill
-    /// `last_title`, `last_summary`, and `last_first_prompt` — ensuring that
+    /// `last_title`, `last_summary`, `last_first_prompt`, and `last_user_prompt` — ensuring that
     /// sessions already running at daemon start still get a conversation title.
     pub fn new(path: PathBuf) -> Self {
         let (seek_pos, inode) = match file_metadata(&path) {
@@ -52,6 +55,7 @@ impl SessionFileWatcher {
         let mut last_title = None;
         let mut last_summary = None;
         let mut last_first_prompt = None;
+        let mut last_user_prompt = None;
         let mut last_event_ts = None;
 
         if seek_pos > 0 {
@@ -61,6 +65,7 @@ impl SessionFileWatcher {
                 &mut last_title,
                 &mut last_summary,
                 &mut last_first_prompt,
+                &mut last_user_prompt,
                 &mut last_event_ts,
             );
         }
@@ -74,6 +79,7 @@ impl SessionFileWatcher {
             last_title,
             last_summary,
             last_first_prompt,
+            last_user_prompt,
             last_event_ts,
         }
     }
@@ -120,6 +126,16 @@ impl SessionFileWatcher {
         }
     }
 
+    /// Return the most recent user prompt text seen in this JSONL file.
+    pub fn last_user_prompt(&self) -> Option<&str> {
+        self.last_user_prompt.as_deref()
+    }
+
+    /// Update the most recent user prompt for this session.
+    pub fn set_user_prompt(&mut self, prompt: String) {
+        self.last_user_prompt = Some(prompt);
+    }
+
     /// The timestamp of the last real-activity event seen during the historical scan.
     pub fn last_event_ts(&self) -> Option<DateTime<Utc>> {
         self.last_event_ts
@@ -138,6 +154,7 @@ impl SessionFileWatcher {
             last_title: None,
             last_summary: None,
             last_first_prompt: None,
+            last_user_prompt: None,
             last_event_ts: None,
         }
     }
@@ -231,6 +248,7 @@ const REAL_EVENT_TYPES: &[&str] = &["user", "assistant", "tool_use", "tool_resul
 /// - Finds the LAST `custom-title` → `last_title` (newest explicit title wins)
 /// - Finds the LAST `summary` → `last_summary` (newest AI summary wins)
 /// - Finds the FIRST `user` message text → `last_first_prompt` (first message as fallback)
+/// - Finds the LAST `user` message text → `last_user_prompt` (fresh fallback above first prompt)
 /// - Finds the LAST `timestamp` on a real-activity line → `last_event_ts`
 ///
 /// Does not change the watcher's `seek_pos`; only populates the title fields.
@@ -240,6 +258,7 @@ fn scan_historical(
     last_title: &mut Option<String>,
     last_summary: &mut Option<String>,
     last_first_prompt: &mut Option<String>,
+    last_user_prompt: &mut Option<String>,
     last_event_ts: &mut Option<DateTime<Utc>>,
 ) {
     let Ok(file) = File::open(path) else { return };
@@ -275,9 +294,13 @@ fn scan_historical(
                     *last_summary = Some(truncate_title(s));
                 }
             }
-            Some("user") if last_first_prompt.is_none() => {
+            Some("user") => {
                 if let Some(text) = extract_user_text(&v["message"]) {
-                    *last_first_prompt = Some(truncate_title(&text));
+                    let truncated = truncate_title(&text);
+                    if last_first_prompt.is_none() {
+                        *last_first_prompt = Some(truncated.clone());
+                    }
+                    *last_user_prompt = Some(truncated);
                 }
             }
             _ => {}
@@ -562,6 +585,38 @@ mod tests {
 
         let watcher = SessionFileWatcher::new(path.clone());
         assert_eq!(watcher.last_first_prompt(), Some("array prompt"));
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn last_user_prompt_tracks_most_recent_user_message() {
+        let path = temp_jsonl("test-last-user-prompt.jsonl");
+        fs::write(&path, "").expect("test");
+
+        let mut watcher = SessionFileWatcher::new_from_start(path.clone());
+        watcher.set_user_prompt("first prompt".to_string());
+        watcher.set_user_prompt("latest prompt".to_string());
+
+        assert_eq!(watcher.last_user_prompt(), Some("latest prompt"));
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn historical_scan_backfills_last_user_prompt() {
+        let path = temp_jsonl("test-scan-historical-last-user-prompt.jsonl");
+        fs::write(
+            &path,
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"first prompt\"}}\n\
+             {\"type\":\"assistant\",\"timestamp\":\"2026-02-25T10:00:01Z\"}\n\
+             {\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"latest prompt\"}}\n",
+        )
+        .expect("test");
+
+        let watcher = SessionFileWatcher::new(path.clone());
+        assert_eq!(watcher.last_first_prompt(), Some("first prompt"));
+        assert_eq!(watcher.last_user_prompt(), Some("latest prompt"));
 
         let _ = fs::remove_file(&path);
     }

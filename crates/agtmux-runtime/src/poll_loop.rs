@@ -853,8 +853,9 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
             //   1. custom-title (explicit user action)             → insert (always wins)
             //   2. summary from watcher (real-time AI summary)     → insert
             //   3. summary from sessions-index.json (historical)   → insert
-            //   4. firstPrompt from sessions-index.json            → or_insert
-            //   5. first_prompt from watcher history               → or_insert (baseline)
+            //   4. last_user_prompt from watcher                   → insert
+            //   5. firstPrompt from sessions-index.json            → or_insert
+            //   6. first_prompt from watcher history               → or_insert (baseline)
 
             // Collect all title signals from watchers before mutating conversation_titles
             // (borrow checker: cannot hold &st.claude_jsonl_watchers while mutating st).
@@ -865,6 +866,54 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
                         .get(&disc.pane_id)
                         .and_then(|w| w.last_first_prompt())
                         .map(|p| (disc.session_id.clone(), p.to_string()))
+                })
+                .collect();
+            let user_prompts: HashMap<String, String> = discoveries
+                .iter()
+                .filter_map(|disc| {
+                    st.claude_jsonl_watchers
+                        .get(&disc.pane_id)
+                        .and_then(|w| w.last_user_prompt())
+                        .map(|p| (disc.session_id.clone(), p.to_string()))
+                })
+                .collect();
+            let session_index_entries: HashMap<
+                String,
+                agtmux_source_claude_jsonl::discovery::SessionIndexEntry,
+            > = discoveries
+                .iter()
+                .filter_map(|disc| {
+                    disc.jsonl_path.parent().and_then(|project_dir| {
+                        agtmux_source_claude_jsonl::discovery::read_session_index_entry(
+                            project_dir,
+                            &disc.session_id,
+                        )
+                        .map(|entry| (disc.session_id.clone(), entry))
+                    })
+                })
+                .collect();
+            let session_index_first_prompts: HashMap<String, String> = session_index_entries
+                .iter()
+                .filter_map(|(session_id, entry)| {
+                    entry
+                        .first_prompt
+                        .clone()
+                        .filter(|s| !s.is_empty())
+                        .map(|p| (session_id.clone(), p))
+                })
+                .collect();
+            let session_index_summaries: HashMap<String, String> = discoveries
+                .iter()
+                .filter_map(|disc| {
+                    session_index_entries
+                        .get(&disc.session_id)
+                        .and_then(|entry| {
+                            entry
+                                .summary
+                                .clone()
+                                .filter(|s| !s.is_empty())
+                                .map(|s| (disc.session_id.clone(), s))
+                        })
                 })
                 .collect();
             let summaries: HashMap<String, String> = discoveries
@@ -887,9 +936,9 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
                 .collect();
 
             // Apply in reverse-priority order (lowest first, `insert` overwrites lower tiers).
-            // Priority: custom-title > summary(watcher) > summary(idx) > firstPrompt > first_prompt
+            // Priority: custom-title > summary(watcher) > summary(idx) > last_user_prompt > firstPrompt > first_prompt
 
-            // 5 (lowest baseline): first user prompt from JSONL watcher history.
+            // 6 (lowest baseline): first user prompt from JSONL watcher history.
             for disc in &discoveries {
                 if let Some(prompt) = first_prompts.get(&disc.session_id) {
                     st.conversation_titles
@@ -898,23 +947,28 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
                 }
             }
 
-            // 4+3: sessions-index.json (firstPrompt or_insert, then summary insert).
+            // 5: sessions-index.json firstPrompt.
             for disc in &discoveries {
-                if let Some(project_dir) = disc.jsonl_path.parent()
-                    && let Some(entry) =
-                        agtmux_source_claude_jsonl::discovery::read_session_index_entry(
-                            project_dir,
-                            &disc.session_id,
-                        )
-                {
-                    if let Some(p) = entry.first_prompt.filter(|s| !s.is_empty()) {
-                        st.conversation_titles
-                            .entry(disc.session_id.clone())
-                            .or_insert(p);
-                    }
-                    if let Some(s) = entry.summary.filter(|s| !s.is_empty()) {
-                        st.conversation_titles.insert(disc.session_id.clone(), s);
-                    }
+                if let Some(prompt) = session_index_first_prompts.get(&disc.session_id) {
+                    st.conversation_titles
+                        .entry(disc.session_id.clone())
+                        .or_insert_with(|| prompt.clone());
+                }
+            }
+
+            // 4: most recent user prompt from the watcher.
+            for disc in &discoveries {
+                if let Some(prompt) = user_prompts.get(&disc.session_id) {
+                    st.conversation_titles
+                        .insert(disc.session_id.clone(), prompt.clone());
+                }
+            }
+
+            // 3: sessions-index.json summary.
+            for disc in &discoveries {
+                if let Some(summary) = session_index_summaries.get(&disc.session_id) {
+                    st.conversation_titles
+                        .insert(disc.session_id.clone(), summary.clone());
                 }
             }
 
@@ -942,6 +996,7 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
                     conversation_title.as_deref(),
                     [
                         summaries.get(&disc.session_id).map(String::as_str),
+                        user_prompts.get(&disc.session_id).map(String::as_str),
                         first_prompts.get(&disc.session_id).map(String::as_str),
                     ],
                 );
@@ -2327,6 +2382,58 @@ mod tests {
                 .get(session_key_b)
                 .map(String::as_str),
             Some("AI summary B")
+        );
+
+        drop(st);
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[tokio::test]
+    async fn poll_tick_session_title_prefers_last_user_prompt_before_first_prompt() {
+        let _env_lock = ENV_LOCK.lock().expect("env lock");
+        let temp = temp_dir("claude-last-user-title");
+        let home_dir = temp.join("home");
+        let project_dir = temp.join("project");
+        fs::create_dir_all(&project_dir).expect("project dir");
+
+        let session_path = write_claude_session_file_named(
+            &home_dir,
+            &project_dir,
+            "last-user-title.jsonl",
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"First prompt"}}"#,
+                r#"{"type":"assistant","timestamp":"2026-03-10T15:03:06.628Z","uuid":"claude-a-1","sessionId":"claude-sess-1"}"#,
+                r#"{"type":"user","message":{"role":"user","content":"Latest prompt"}}"#,
+            ],
+        );
+
+        let _home = TestEnvGuard::set("HOME", home_dir.to_str().expect("utf8 path"));
+        let backend = Arc::new(FakeTmuxBackend::new().with_pane_cwd(
+            "%153",
+            "main",
+            "claude",
+            "╭ Claude Code",
+            project_dir.to_str().expect("utf8 path"),
+        ));
+        let state = new_state();
+
+        poll_tick(&backend, &state).await.expect("tick");
+
+        let st = state.lock().await;
+        let session_key = session_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .expect("session key");
+
+        assert_eq!(
+            st.conversation_titles.get(session_key).map(String::as_str),
+            Some("Latest prompt")
+        );
+        assert_eq!(
+            st.conversation_subtitles
+                .get(session_key)
+                .map(String::as_str),
+            Some("First prompt")
         );
 
         drop(st);
