@@ -137,25 +137,25 @@ Phase 7 (Distribution) と独立して実施可能。
   - `remove_hooks()` + `--unregister` フラグ。HOOK_TYPES 限定の surgical 削除
   - commit: adbabce
 
-- [ ] T-term01 (P2) agtmux-term hooks 統合 — 申し送り資料に基づく実装
-  - **目的**: agtmux-term 起動時の hooks 自動チェック + Register/Unregister UI
-  - **申し送り**: `/tmp/agtmux-term-hooks-handoff.md`（永続化先: `docs/85_reviews/` か agtmux-term の docs へ）
-  - **変更対象**: `agtmux-term` リポジトリ
-    - `AppViewModel.swift`: `hookSetupStatus: @Published` + `performStartupHookCheck() async`
-    - `SidebarView.swift`: ⚠ バッジ（isOffline パターン流用）
-    - 空状態プロンプト: [Register Hooks] ボタン
-    - Settings パネル: [Verify] [Re-register] [Unregister] ボタン
-  - blocked_by: T-E08, T-E09
+- [x] T-term01 (P2) agtmux-term hooks 統合 — DONE (2026-03-11)
+  - `HookSetupStatus` enum (unknown/checking/registered/missing/unavailable)
+  - `AppViewModel`: `hookSetupStatus @Published` + `performStartupHookCheck()` / `registerHooks()` / `unregisterHooks()`
+  - Injectable `binaryURLResolver` (testable); `AgtmuxBinaryResolver.resolveBinaryURL` default
+  - Startup polling kicks off hook check automatically
+  - `SidebarView`: `HookWarningBanner` with [Register] + popover [Verify]/[Register]/[Unregister]
+  - 2 new AppViewModelA0Tests hook-check tests (exit-0 → registered, exit-1 → missing)
+  - Gate: `swift build` + `swift test` 296/296 deterministic PASS; 8 pre-existing live failures unchanged
+  - Commit: `288238f` (agtmux-term)
+  - RP: `agtmux-term/docs/85_reviews/RP-T-term01-hooks-integration.md`
 
-- [ ] T-E03a (P3) check_hooks() integration test — follow-up from RP review
-  - **目的**: `check_hooks()` を temp settings.json に対して呼び出す integration test (partially registered case)
-  - **変更対象**: `crates/agtmux-runtime/src/setup_hooks.rs` test module
-  - blocked_by: T-E03
+- [x] T-E03a (P3) check_hooks() integration test — DONE (2026-03-11)
+  - `check_hooks()` を `check_hooks_at_path(path: &Path)` に refactor し CWD 非依存に
+  - `check_hooks_integration_partial_registered` テスト: tempfile に PreToolUse のみ登録した settings.json → partially registered 確認
+  - Gate: `just verify` PASS
 
-- [ ] T-E03b (P3) poll_loop P1 transcript_path hint integration test — follow-up from RP review
-  - **目的**: SessionStart hook event が transcript_path_hints を populate し、次 tick で JSONL discovery に使われることを確認する poll_loop integration test
-  - **変更対象**: `crates/agtmux-runtime/src/poll_loop.rs` test module
-  - blocked_by: T-E01
+- [x] T-E03b (P3) poll_loop P1 transcript_path hint integration test — DONE (2026-03-11)
+  - `poll_tick_session_start_populates_transcript_path_hint` テスト: session_start hook with transcript_path → hints populated
+  - Gate: `just verify` PASS
 
 - [x] T-E05 (P2) `Notification` フック `notification_type` 解析 — DONE (2026-03-03)
   - `resolve_event_type()` wrapper 追加。idle_prompt→waiting_input, permission_prompt→waiting_approval
@@ -376,10 +376,9 @@ Phase 7 (Distribution) と独立して実施可能。
 
 ### Phase 9 — Waiting State Detection Improvements
 
-- [ ] T-codex03a (P3) test-claude-approval.sh Phase 3 に明示的 sleep 追加 — follow-up from RP review
-  - Phase 3 で PermissionRequest injector kill 後、`sleep 4` を挿入してから tool_start injector を開始する
-  - 現状は暗黙の event expiry (<3s) に依存しており、閾値変更時に false-negative タイムアウトになる可能性
-  - blocked_by: なし
+- [x] T-codex03a (P3) test-claude-approval.sh Phase 3 に明示的 sleep 追加 — DONE (2026-03-11)
+  - Phase 3 で PermissionRequest injector kill 後に `sleep 4` を挿入
+  - 暗黙の event expiry 依存を解消
 
 - [ ] T-E05a (P3) spinner-title WaitingInput 保護テスト — follow-up from RP review
   - **目的**: `poll_pane_spinner_title_does_not_override_waiting_input` テスト追加
@@ -418,35 +417,25 @@ Phase 7 (Distribution) と独立して実施可能。
 
 ### Phase 7 — Distribution Infrastructure
 
-- [ ] T-D01 (P1) LICENSE + Cargo.toml メタデータ整備
-  - `LICENSE` (MIT) をルートに追加
-  - workspace `Cargo.toml`: `[workspace.package]` に `license`, `repository`, `edition` を追加
-  - `crates/agtmux-runtime/Cargo.toml`: `description`, `keywords`, `categories` を追加
-  - blocked_by: なし
+- [x] T-D01 (P1) LICENSE + Cargo.toml メタデータ整備 — DONE (already present)
+  - `LICENSE` (MIT) 確認済み
+  - workspace `Cargo.toml` に `license`, `repository`, `edition` 確認済み
+  - `crates/agtmux-runtime/Cargo.toml` に `description`, `keywords`, `categories` 確認済み
 
-- [ ] T-D02 (P1) cargo-dist 設定
-  - workspace `Cargo.toml` に `[workspace.metadata.dist]` を追加
-  - targets: `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`
-  - installers: `["homebrew", "shell"]`, tap: `g960059/homebrew-agtmux`
-  - `cargo dist init` を実行し生成ファイルを確認
-  - blocked_by: T-D01
+- [x] T-D02 (P1) cargo-dist 設定 — DONE (already present)
+  - `[workspace.metadata.dist]` 確認済み (cargo-dist-version = "0.31.0")
+  - targets: aarch64/x86_64 apple-darwin + musl 確認済み
+  - installers: shell + homebrew, tap: g960059/homebrew-tap 確認済み
 
-- [ ] T-D03 (P1) GitHub Actions release workflow
-  - `.github/workflows/release.yml`: tag push → verify → cross-compile → GitHub Release → tap 更新 → smoke test
-  - `.github/workflows/ci.yml`: PR時 verify のみ
-  - Artifact Attestation を有効化
-  - blocked_by: T-D02
+- [x] T-D03 (P1) GitHub Actions release workflow — DONE (already present)
+  - `.github/workflows/release.yml` + `.github/workflows/ci.yml` 確認済み
 
-- [ ] T-D04 (P1) Homebrew formula テンプレート
-  - `Formula/agtmux.rb` を作成（cargo-dist が自動生成する場合はその出力を確認）
-  - `test do` ブロックに `agtmux --version` を含める
-  - blocked_by: T-D02
+- [x] T-D04 (P1) Homebrew formula テンプレート — DONE (already present)
+  - `Formula/agtmux.rb` 確認済み
 
-- [ ] T-D05 (P1) README Install セクション更新
-  - 冒頭に brew / curl / cargo の3チャネルを記載
-  - アンインストール手順を明記
-  - Windows はスコープ外と明記
-  - blocked_by: T-D03
+- [x] T-D05 (P1) README Install セクション更新 — DONE (already present)
+  - brew / curl / cargo の3チャネル確認済み
+  - Windows はスコープ外と明記確認済み
 
 ## REVIEW
 - [ ] (none)

@@ -266,10 +266,15 @@ impl HookCheckResult {
 /// Returns HookCheckResult with per-hook status.
 pub fn check_hooks(scope: &str) -> anyhow::Result<HookCheckResult> {
     let path = settings_path(scope)?;
+    check_hooks_at_path(&path)
+}
 
+/// Check the current hook registration status at an explicit settings.json path.
+/// Returns HookCheckResult with per-hook status.
+pub(crate) fn check_hooks_at_path(path: &Path) -> anyhow::Result<HookCheckResult> {
     // Read existing settings; if not present, all hooks are missing.
     let settings: serde_json::Value = if path.exists() {
-        let content = std::fs::read_to_string(&path)?;
+        let content = std::fs::read_to_string(path)?;
         serde_json::from_str(&content)?
     } else {
         serde_json::json!({})
@@ -300,6 +305,7 @@ pub fn check_hooks(scope: &str) -> anyhow::Result<HookCheckResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     // ── Pure value-logic tests (no file I/O, no CWD, safe to run in parallel) ──
 
@@ -315,6 +321,16 @@ mod tests {
                 hook_type: [{"type": "command", "command": "other-tool-hook.sh"}]
             }
         })
+    }
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("valid unix epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("agtmux-{label}-{nonce}"));
+        fs::create_dir_all(&dir).expect("temp dir");
+        dir
     }
 
     // ── merge_hooks_into_settings (T-E08) ─────────────────────────────
@@ -563,6 +579,38 @@ mod tests {
         };
         assert!(!result.all_registered());
         assert_eq!(result.missing(), vec!["SessionEnd"]);
+    }
+
+    #[test]
+    fn check_hooks_integration_partial_registered() {
+        let temp = temp_dir("check-hooks-partial");
+        let settings_path = temp.join(".claude").join("settings.json");
+        fs::create_dir_all(settings_path.parent().expect("settings parent"))
+            .expect("create .claude dir");
+        fs::write(
+            &settings_path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "hooks": {
+                    "PreToolUse": [{
+                        "type": "command",
+                        "command": "AGTMUX_HOOK_TYPE=PreToolUse agtmux-claude-hook.sh"
+                    }]
+                }
+            }))
+            .expect("serialize settings"),
+        )
+        .expect("write settings");
+
+        let result = check_hooks_at_path(&settings_path).expect("check hooks");
+
+        assert!(!result.all_registered());
+        assert_eq!(result.statuses[0], ("PreToolUse", HookStatus::Registered));
+        let missing = result.missing();
+        assert!(missing.contains(&"PostToolUse"));
+        assert!(missing.contains(&"SessionStart"));
+        assert!(!missing.contains(&"PreToolUse"));
+
+        let _ = fs::remove_dir_all(temp);
     }
 
     // ── MT-5: B-1 fix — remove_hooks must not delete third-party empty arrays ──

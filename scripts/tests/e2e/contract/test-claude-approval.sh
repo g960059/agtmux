@@ -79,6 +79,9 @@ pass "Phase 2: PermissionRequest → waiting_approval"
 
 kill "$INJECTOR_PID" 2>/dev/null || true
 INJECTOR_PID=""
+# Wait for PermissionRequest events to expire before starting tool_start injector.
+# Explicit sleep avoids relying on implicit <3s event-expiry threshold.
+sleep 4
 
 INJECTOR_PID=$(inject_claude_event_loop "$SOCKET" "tool_start" "$SESSION_ID" "$PANE_ID")
 log "Phase 3: recovery tool_start injector PID=$INJECTOR_PID"

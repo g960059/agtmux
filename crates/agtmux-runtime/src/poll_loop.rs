@@ -1836,6 +1836,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn poll_tick_session_start_populates_transcript_path_hint() {
+        use agtmux_source_claude_hooks::translate::ClaudeHookEvent;
+
+        let backend = Arc::new(FakeTmuxBackend::new().with_pane("%0", "main", "node", "$ ls"));
+        let state = new_state();
+
+        {
+            let mut st = state.lock().await;
+            st.claude_source.ingest(ClaudeHookEvent {
+                hook_id: "h-session-start".to_string(),
+                hook_type: "session_start".to_string(),
+                session_id: "claude-sess-hint".to_string(),
+                timestamp: Utc::now(),
+                pane_id: Some("%0".to_string()),
+                data: serde_json::json!({
+                    "transcript_path": "/tmp/test-transcript.jsonl"
+                }),
+            });
+        }
+
+        poll_tick(&backend, &state).await.expect("tick");
+
+        let st = state.lock().await;
+        assert_eq!(
+            st.transcript_path_hints.get("%0"),
+            Some(&PathBuf::from("/tmp/test-transcript.jsonl"))
+        );
+    }
+
+    #[tokio::test]
     async fn poll_tick_pulls_from_codex_jsonl_source() {
         let backend = Arc::new(FakeTmuxBackend::new().with_pane("%0", "main", "node", "$ ls"));
         let state = new_state();
