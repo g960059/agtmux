@@ -80,7 +80,9 @@ jq_get() {
 
 daemon_rpc() {
     local socket="$1" method="$2"
-    local params="${3:-{}}"
+    local params
+    params="${3:-}"
+    [ -z "$params" ] && params="{}"
 
     if command -v python3 >/dev/null 2>&1; then
         python3 - "$socket" "$method" "$params" <<'PY'
