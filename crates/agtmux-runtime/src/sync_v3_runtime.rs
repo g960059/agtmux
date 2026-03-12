@@ -164,6 +164,10 @@ impl SyncV3LiveState {
         SyncV3CursorV3 { seq: self.head_seq }
     }
 
+    pub fn head_seq(&self) -> u64 {
+        self.head_seq
+    }
+
     pub fn build_bootstrap(&self, now: DateTime<Utc>) -> UiBootstrapV3 {
         let mut payload = UiBootstrapV3::new(now, self.rows.values().cloned().collect());
         payload.replay_cursor = Some(self.current_cursor());

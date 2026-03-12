@@ -36,6 +36,7 @@ TESTS=(
     "$SCRIPT_DIR/test-multi-pane.sh"
     "$SCRIPT_DIR/test-freshness-fallback.sh"
     "$SCRIPT_DIR/test-daemon-info.sh"
+    "$SCRIPT_DIR/test-long-poll.sh"
     "$SCRIPT_DIR/test-provider-field.sh"
     "$SCRIPT_DIR/test-source-lifecycle.sh"
     "$SCRIPT_DIR/test-invalid-jsonrpc.sh"

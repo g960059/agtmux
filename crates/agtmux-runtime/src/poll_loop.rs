@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use chrono::{TimeDelta, Utc};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use tokio::time::{Duration, interval};
 
 use agtmux_core_v5::types::{GatewayPullRequest, PullEventsRequest, SourceKind};
@@ -178,6 +178,9 @@ pub async fn run_daemon(opts: DaemonOpts, socket_path: &str) -> anyhow::Result<(
     let executor = Arc::new(build_executor(&opts));
     let state = Arc::new(Mutex::new(DaemonState::new()));
     let pane_cache = server::new_pane_cache();
+    let change_notify = Arc::new(Notify::new());
+    let server_notify = Arc::clone(&change_notify);
+    let poll_notify = Arc::clone(&change_notify);
 
     {
         let st = state.lock().await;
@@ -189,7 +192,9 @@ pub async fn run_daemon(opts: DaemonOpts, socket_path: &str) -> anyhow::Result<(
     let server_cache = Arc::clone(&pane_cache);
     let server_socket = socket_path.to_string();
     let server_handle = tokio::spawn(async move {
-        if let Err(e) = server::run_server(&server_socket, server_state, server_cache).await {
+        if let Err(e) =
+            server::run_server(&server_socket, server_state, server_cache, server_notify).await
+        {
             tracing::error!("UDS server error: {e}");
         }
     });
@@ -200,7 +205,7 @@ pub async fn run_daemon(opts: DaemonOpts, socket_path: &str) -> anyhow::Result<(
     let poll_executor = Arc::clone(&executor);
     let poll_ms = opts.poll_interval_ms;
     let poll_handle = tokio::spawn(async move {
-        run_poll_loop(poll_executor, poll_state, poll_cache, poll_ms).await;
+        run_poll_loop(poll_executor, poll_state, poll_cache, poll_ms, poll_notify).await;
     });
 
     // Wait for shutdown signal (ctrl-c or SIGTERM)
@@ -278,14 +283,21 @@ async fn run_poll_loop<R: TmuxCommandRunner + 'static>(
     state: Arc<Mutex<DaemonState>>,
     pane_cache: server::SharedPaneCache,
     poll_ms: u64,
+    change_notify: Arc<Notify>,
 ) {
     let mut ticker = interval(Duration::from_millis(poll_ms));
 
     loop {
         ticker.tick().await;
+        let prev_head = { state.lock().await.sync_v3.head_seq() };
 
         if let Err(e) = poll_tick_with_cache(&executor, &state, &pane_cache).await {
             tracing::warn!("poll tick failed: {e}");
+        }
+
+        let new_head = { state.lock().await.sync_v3.head_seq() };
+        if new_head > prev_head {
+            change_notify.notify_waiters();
         }
     }
 }

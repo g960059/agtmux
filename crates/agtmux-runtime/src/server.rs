@@ -7,7 +7,7 @@ use agtmux_core_v5::sync_v3::{SyncV3CursorV3, UiBootstrapV3, UiChangesV3};
 use serde::Serialize;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 use agtmux_core_v5::title::{TitleInput, resolve_title};
 use agtmux_core_v5::types::{EvidenceMode, PanePresence};
@@ -148,6 +148,7 @@ pub async fn run_server(
     socket_path: &str,
     state: Arc<Mutex<DaemonState>>,
     pane_cache: SharedPaneCache,
+    change_notify: Arc<Notify>,
 ) -> anyhow::Result<()> {
     // Create socket directory with mode 0700
     let socket_dir = std::path::Path::new(socket_path)
@@ -232,8 +233,9 @@ pub async fn run_server(
         let (stream, _) = listener.accept().await?;
         let state = Arc::clone(&state);
         let pane_cache = Arc::clone(&pane_cache);
+        let change_notify = Arc::clone(&change_notify);
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, state, pane_cache).await {
+            if let Err(e) = handle_connection(stream, state, pane_cache, change_notify).await {
                 tracing::debug!("connection error: {e}");
             }
         });
@@ -244,6 +246,7 @@ async fn handle_connection(
     stream: tokio::net::UnixStream,
     state: Arc<Mutex<DaemonState>>,
     pane_cache: SharedPaneCache,
+    change_notify: Arc<Notify>,
 ) -> anyhow::Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -281,6 +284,28 @@ async fn handle_connection(
                 .clamp(1, 1000);
             let mut st = state.lock().await;
             build_ui_changes_v3(&mut st, cursor, limit)
+        }
+        "ui.wait_for_changes.v1" => {
+            let params = &request["params"];
+            let timeout_ms = params["timeout_ms"].as_u64().unwrap_or(2000).clamp(1, 5000);
+            let cursor = parse_sync_v3_cursor(&params["cursor"]);
+
+            let immediate = {
+                let mut st = state.lock().await;
+                build_ui_changes_v3(&mut st, cursor, 256)
+            };
+
+            if ui_changes_v3_has_content(&immediate) {
+                immediate
+            } else {
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_millis(timeout_ms),
+                    change_notify.notified(),
+                )
+                .await;
+                let mut st = state.lock().await;
+                build_ui_changes_v3(&mut st, cursor, 256)
+            }
         }
         "ui.health.v1" => {
             let st = state.lock().await;
@@ -614,6 +639,17 @@ fn parse_sync_v3_cursor(value: &serde_json::Value) -> Option<SyncV3CursorV3> {
     Some(SyncV3CursorV3 {
         seq: value.get("seq")?.as_u64()?,
     })
+}
+
+fn ui_changes_v3_has_content(v: &serde_json::Value) -> bool {
+    if let Some(changes) = v.get("changes").and_then(|changes| changes.as_array())
+        && !changes.is_empty()
+    {
+        return true;
+    }
+
+    v.get("resync_required")
+        .is_some_and(|value| !value.is_null())
 }
 
 fn reconcile_sync_v3(state: &mut DaemonState, now: chrono::DateTime<chrono::Utc>) {
@@ -2098,6 +2134,7 @@ mod tests {
         request: serde_json::Value,
     ) -> serde_json::Value {
         let pane_cache = new_pane_cache();
+        let change_notify = Arc::new(Notify::new());
         {
             let st = state.lock().await;
             refresh_pane_cache(&pane_cache, &st, Utc::now());
@@ -2123,7 +2160,7 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(buf.trim()).expect("parse response")
         };
 
-        let handle_fut = handle_connection(server, state, pane_cache);
+        let handle_fut = handle_connection(server, state, pane_cache, change_notify);
 
         let (_, response, _) = tokio::join!(write_fut, read_fut, handle_fut);
         response
