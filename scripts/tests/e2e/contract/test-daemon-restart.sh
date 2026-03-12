@@ -53,6 +53,9 @@ cleanup_restart() {
 }
 trap cleanup_restart EXIT
 
+# Make the pane look like a node process (prevents shell-truth demotion).
+make_pane_node_like "$PANE_ID"
+
 # ── Phase 1: Start daemon, inject events, verify managed ─────────────
 
 daemon_start "$SOCKET" 500

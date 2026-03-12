@@ -44,6 +44,9 @@ cleanup_approval() {
 }
 trap cleanup_approval EXIT
 
+# Make the pane look like a node process (prevents shell-truth demotion).
+make_pane_node_like "$PANE_ID"
+
 daemon_start "$SOCKET" 500
 sleep 1
 

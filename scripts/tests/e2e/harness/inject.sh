@@ -73,6 +73,28 @@ inject_claude_event() {
     _uds_send "$socket" "$payload"
 }
 
+# make_pane_node_like TMUX_PANE_ID
+# Replace the shell in the pane with a process named "node" (via exec -a).
+# This prevents the shell-truth demotion in poll_loop (step 10c) from kicking
+# out managed state — shell cmds (zsh/bash/…) are overridden even when hook
+# events are fresh, but "node" is not in SHELL_CMDS.
+# Must be called BEFORE starting the daemon or injecting events.
+make_pane_node_like() {
+    local pane_id="$1"
+    tmux send-keys -t "$pane_id" "exec -a node sleep 9999" Enter
+    # Wait up to 3s for current_cmd to become "node"
+    local i=0
+    while [ "$i" -lt 30 ]; do
+        local cmd
+        cmd=$(tmux list-panes -a -F '#{pane_id} #{pane_current_command}' 2>/dev/null \
+            | awk -v p="$pane_id" '$1==p {print $2}')
+        [ "$cmd" = "node" ] && return 0
+        sleep 0.1
+        i=$((i + 1))
+    done
+    log "WARN: make_pane_node_like: pane $pane_id current_cmd did not become 'node' within 3s"
+}
+
 # inject_claude_event_loop SOCKET HOOK_TYPE SESSION_ID PANE_ID [INTERVAL_S]
 # Injects claude events continuously in the background.
 # The resolver requires events < 3s old; continuous injection ensures freshness.

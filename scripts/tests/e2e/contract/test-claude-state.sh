@@ -36,6 +36,10 @@ cleanup_tmux() {
 }
 trap cleanup_tmux EXIT
 
+# Make the pane look like a node process so shell-truth demotion (step 10c)
+# does not override the managed state from hook events.
+make_pane_node_like "$PANE_ID"
+
 daemon_start "$SOCKET" 500
 sleep 1  # Let daemon do its first poll
 

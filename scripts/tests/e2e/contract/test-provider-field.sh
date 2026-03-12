@@ -45,6 +45,9 @@ cleanup_tmux() {
 }
 trap cleanup_tmux EXIT
 
+# Make managed pane look like a node process (prevents shell-truth demotion).
+make_pane_node_like "$PANE1"
+
 daemon_start "$SOCKET" 500
 sleep 1
 
