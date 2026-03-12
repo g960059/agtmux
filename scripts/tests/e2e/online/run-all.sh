@@ -15,6 +15,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../harness/common.sh"
 
+# Prevent CLAUDECODE env var from blocking nested claude launches.
+# Tests are often run inside Claude Code where CLAUDECODE=1 is set; child
+# claude processes would detect it and refuse to start.
+unset CLAUDECODE 2>/dev/null || true
+
 PROVIDER="${PROVIDER:-claude}"
 SKIP_SCENARIOS="${E2E_SKIP_SCENARIOS:-}"
 

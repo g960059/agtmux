@@ -18,8 +18,10 @@ CLAUDE_MODEL_VALUE="${CLAUDE_MODEL:-claude-sonnet-4-6}"
 launch_provider() {
     local pane_id="$1" workdir="$2"
     local task="${3:-Step 1: use bash to run 'sleep 15'. Step 2: use bash to count lines in /etc/hosts. Step 3: use bash to count lines in /etc/shells. Write both counts to result.txt}"
+    # Unset CLAUDECODE to prevent nested-session detection blocking claude launch
+    # (tests run inside Claude Code inherit CLAUDECODE=1 which causes claude to refuse to start)
     tmux send-keys -t "$pane_id" \
-        "cd $(printf '%q' "$workdir") && claude --dangerously-skip-permissions --model $(printf '%q' "$CLAUDE_MODEL_VALUE") -p $(printf '%q' "$task")" \
+        "cd $(printf '%q' "$workdir") && unset CLAUDECODE && claude --dangerously-skip-permissions --model $(printf '%q' "$CLAUDE_MODEL_VALUE") -p $(printf '%q' "$task")" \
         Enter
 }
 
