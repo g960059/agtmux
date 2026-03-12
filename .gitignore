@@ -25,3 +25,9 @@ coverage.out
 
 # Rust build artifacts
 target/
+
+# Local scratch / research
+*.trace/
+docs/research/
+create_icon.py
+package-lock.json
