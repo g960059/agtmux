@@ -6,6 +6,41 @@
 
 ---
 
+## 2026-03-12 — A+B+C Performance + Correctness + Long-Poll landed
+
+### What landed
+
+- **A**: os.signpost instrumentation (commit `768059e`, agtmux-term)
+  - `AgtmuxSignpost.swift` — 6 OSSignposter categories: GhosttyTick, SurfaceDraw, FetchAll, MetadataSync, TmuxRunner, Publish
+  - Call sites: `tick()`, `fetchAll()`, `publishFromSnapshotCache()`, `scheduleLocalMetadataRefreshIfNeeded`, `TmuxCommandRunner.run()`
+- **B**: `reconcileSessionOrder` diff guard (commit `759c5e8`, agtmux-term)
+  - One-liner: `if updated != sessionOrderBySource { sessionOrderBySource = updated }`
+  - Eliminates spurious `@Published` fires for content-only pane changes
+- **C Rust**: `ui.wait_for_changes.v1` long-poll daemon endpoint (commit `4a94bae`, agtmux)
+  - `Arc<Notify>` threaded from `run_daemon` → `run_poll_loop` + `run_server`
+  - Poll loop notifies waiters when `sync_v3.head_seq()` advances after `poll_tick_with_cache`
+  - Server handler: immediate check → wait up to `timeout_ms` (1-5000ms) → final fetch
+  - `head_seq()` accessor added to `SyncV3LiveState` in `sync_v3_runtime.rs`
+  - `test-long-poll.sh` e2e contract test added
+- **C Swift**: Coordinator long-poll + AppViewModel flag (commit `6b16d36`, agtmux-term)
+  - `AgtmuxSyncV3Transport.waitForChangesV1` protocol method + default fallback
+  - `LocalMetadataRefreshCoordinator.runStep` tries long-poll first, falls back on `DaemonError.isSyncV3MethodNotFound` or `LocalMetadataClientError`
+  - `AppViewModel.localMetadataUseLongPoll: Bool?` — nil=optimistic, true=confirmed, false=disabled
+  - Long-poll success uses 50ms next-refresh interval (server already held for 3s)
+  - `disableLongPoll: Bool` added to `LocalMetadataRefreshPlan`
+- **harness fix**: `${3:-{}}` bash expansion appended spurious `}` to params (commit `2d46f5b`, agtmux)
+  - Fix: `params="${3:-}"; [ -z "$params" ] && params="{}"`
+
+### Gate
+
+- `just verify` PASS (agtmux, 205+ tests)
+- `swift test --skip AppViewModelLiveManagedAgentTests` 298/299 PASS, 1 pre-existing failure (`testFetchAllKeepsSessionGroupAliasesAsDistinctSessions`)
+- `test-long-poll.sh` PASS
+- Contract tests passing: test-schema, test-daemon-info, test-source-lifecycle, test-invalid-jsonrpc, explicit-tmux-socket-app-child-late-server
+- Contract pre-existing failures (unrelated): test-claude-state, test-list-consistency, test-multi-pane, test-freshness-fallback, test-provider-field, test-daemon-restart, test-claude-approval
+
+---
+
 ## 2026-03-11 — Phase 10: Session Metadata Display plan finalized
 
 ### Design Decision (synthesized from Codex + Claude independent proposals)
