@@ -726,6 +726,8 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
                 pane_id: pane.pane_id.clone(),
                 pane_pid: pane.pane_pid,
                 cwd: pane.current_path.clone(),
+                pane_active: pane.active,
+                session_attached: pane.session_attached,
                 explicit_jsonl_path: explicit_spool_hint
                     .as_ref()
                     .map(|hint| hint.jsonl_path.clone()),
@@ -1365,17 +1367,21 @@ mod tests {
             self.with_pane_cwd(pane_id, session, cmd, capture, "/home")
         }
 
-        fn with_pane_cwd(
+        fn with_pane_cwd_flags(
             mut self,
             pane_id: &str,
             session: &str,
             cmd: &str,
             capture: &str,
             cwd: &str,
+            active: bool,
+            session_attached: bool,
         ) -> Self {
-            // Append a list-panes line in tab-delimited format
-            let line =
-                format!("$0\t{session}\t@0\tdev\t{pane_id}\t{cmd}\t{cwd}\t{cmd}\t200\t50\t1\t1");
+            let active = if active { 1 } else { 0 };
+            let session_attached = if session_attached { 1 } else { 0 };
+            let line = format!(
+                "$0\t{session}\t@0\tdev\t{pane_id}\t{cmd}\t{cwd}\t{cmd}\t200\t50\t{active}\t{session_attached}"
+            );
             if !self.list_panes_output.is_empty() {
                 self.list_panes_output.push('\n');
             }
@@ -1383,6 +1389,17 @@ mod tests {
             self.captures
                 .insert(pane_id.to_string(), capture.to_string());
             self
+        }
+
+        fn with_pane_cwd(
+            self,
+            pane_id: &str,
+            session: &str,
+            cmd: &str,
+            capture: &str,
+            cwd: &str,
+        ) -> Self {
+            self.with_pane_cwd_flags(pane_id, session, cmd, capture, cwd, true, true)
         }
 
         fn with_list_panes_error(mut self, err: &str) -> Self {
@@ -1499,7 +1516,12 @@ mod tests {
         dir
     }
 
-    fn write_codex_session_file(codex_home: &Path, cwd: &Path, lines: &[&str]) -> PathBuf {
+    fn write_codex_session_file_named(
+        codex_home: &Path,
+        cwd: &Path,
+        file_name: &str,
+        lines: &[&str],
+    ) -> PathBuf {
         let day_dir = codex_home
             .join("sessions")
             .join("2026")
@@ -1507,7 +1529,7 @@ mod tests {
             .join("09");
         fs::create_dir_all(&day_dir).expect("sessions dir");
 
-        let session_path = day_dir.join("midflight-proof.jsonl");
+        let session_path = day_dir.join(file_name);
         let mut payload = Vec::with_capacity(lines.len() + 1);
         payload.push(format!(
             r#"{{"type":"session_meta","payload":{{"type":"session_meta","cwd":"{}","sessionId":"sess-1"}}}}"#,
@@ -1516,6 +1538,10 @@ mod tests {
         payload.extend(lines.iter().map(|line| (*line).to_string()));
         fs::write(&session_path, payload.join("\n") + "\n").expect("session file");
         session_path
+    }
+
+    fn write_codex_session_file(codex_home: &Path, cwd: &Path, lines: &[&str]) -> PathBuf {
+        write_codex_session_file_named(codex_home, cwd, "midflight-proof.jsonl", lines)
     }
 
     fn write_claude_session_file_named(
@@ -2074,6 +2100,60 @@ mod tests {
             "Codex JSONL discovery should manage node runtime"
         );
         assert_eq!(managed[0].provider.map(|p| p.as_str()), Some("codex"));
+
+        drop(st);
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[tokio::test]
+    async fn poll_tick_same_cwd_codex_bootstrap_prefers_active_pane_for_newest_transcript() {
+        let _env_lock = ENV_LOCK.lock().expect("env lock");
+        let temp = temp_dir("codex-same-cwd-active");
+        let codex_home = temp.join("codex-home");
+        let project_dir = temp.join("project");
+        fs::create_dir_all(&project_dir).expect("project dir");
+
+        let _old_session = write_codex_session_file_named(
+            &codex_home,
+            &project_dir,
+            "rollout-old.jsonl",
+            &[
+                r#"{"type":"event_msg","payload":{"type":"task_started"}}"#,
+                r#"{"type":"event_msg","payload":{"type":"task_complete"}}"#,
+            ],
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let _new_session = write_codex_session_file_named(
+            &codex_home,
+            &project_dir,
+            "rollout-new.jsonl",
+            &[r#"{"type":"event_msg","payload":{"type":"task_started"}}"#],
+        );
+
+        let _codex_home = TestEnvGuard::set("CODEX_HOME", codex_home.to_str().expect("utf8 path"));
+        let cwd = project_dir.to_str().expect("utf8 path");
+        let backend = Arc::new(
+            FakeTmuxBackend::new()
+                .with_pane_cwd_flags("%1", "main", "node", "$ ", cwd, false, true)
+                .with_pane_cwd_flags("%2", "main", "node", "$ ", cwd, true, true),
+        );
+        let state = new_state();
+
+        poll_tick(&backend, &state).await.expect("tick");
+
+        let st = state.lock().await;
+        let managed = st.daemon.list_panes();
+        let pane1 = managed
+            .iter()
+            .find(|pane| pane.pane_instance_id.pane_id == "%1")
+            .expect("inactive pane row");
+        let pane2 = managed
+            .iter()
+            .find(|pane| pane.pane_instance_id.pane_id == "%2")
+            .expect("active pane row");
+
+        assert_eq!(pane1.activity_state, ActivityState::WaitingInput);
+        assert_eq!(pane2.activity_state, ActivityState::Running);
 
         drop(st);
         let _ = fs::remove_dir_all(temp);

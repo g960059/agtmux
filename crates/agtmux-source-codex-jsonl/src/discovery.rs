@@ -23,6 +23,16 @@ pub struct CodexPaneHint {
     pub pane_pid: Option<u32>,
     /// Fallback CWD from tmux (used if lsof fails).
     pub cwd: String,
+    /// Latest tmux `pane_active` bit for this pane.
+    ///
+    /// Used only to rank ambiguous same-CWD bootstrap assignments so the hottest
+    /// visible pane claims the newest transcript before colder siblings do.
+    pub pane_active: bool,
+    /// Latest tmux `session_attached` bit for this pane.
+    ///
+    /// Used only to rank ambiguous same-CWD bootstrap assignments in favor of
+    /// sessions that still have a live client attached.
+    pub session_attached: bool,
     /// Explicit pane-bound JSONL path. When present, discovery binds this exact
     /// path to the pane and must not silently fall back to same-CWD candidates.
     pub explicit_jsonl_path: Option<PathBuf>,
@@ -158,6 +168,8 @@ pub fn discover_sessions_in_dir(
             }
         }
 
+        sort_pending_hints_for_bootstrap(&mut pending_hints);
+
         // Then assign remaining panes to the next-unused newest sessions.
         for hint in pending_hints {
             let Some((path, _)) = candidates
@@ -212,6 +224,17 @@ pub fn discovery_from_jsonl_path(
         pane_generation,
         pane_birth_ts,
     })
+}
+
+fn sort_pending_hints_for_bootstrap(hints: &mut Vec<&CodexPaneHint>) {
+    hints.sort_by(|a, b| {
+        b.pane_active
+            .cmp(&a.pane_active)
+            .then_with(|| b.session_attached.cmp(&a.session_attached))
+            .then_with(|| b.pane_birth_ts.cmp(&a.pane_birth_ts))
+            .then_with(|| b.pane_generation.cmp(&a.pane_generation))
+            .then_with(|| a.pane_id.cmp(&b.pane_id))
+    });
 }
 
 /// Build an index mapping `session_cwd → (jsonl_path, mtime)` by scanning all
@@ -395,6 +418,20 @@ fn codex_home_dir_from_env(env: &HashMap<String, String>) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{TimeZone, Utc};
+
+    fn ts(
+        year: i32,
+        month: u32,
+        day: u32,
+        hour: u32,
+        minute: u32,
+        second: u32,
+    ) -> chrono::DateTime<chrono::Utc> {
+        Utc.with_ymd_and_hms(year, month, day, hour, minute, second)
+            .single()
+            .expect("valid datetime")
+    }
 
     fn temp_sessions_dir(label: &str) -> PathBuf {
         let nonce = std::time::SystemTime::now()
@@ -452,6 +489,8 @@ mod tests {
             pane_id: "%5".to_owned(),
             pane_pid: None,
             cwd: cwd.to_owned(),
+            pane_active: false,
+            session_attached: false,
             explicit_jsonl_path: None,
             session_key_override: None,
             existing_jsonl_path: None,
@@ -485,6 +524,8 @@ mod tests {
             pane_id: "%3".to_owned(),
             pane_pid: None,
             cwd: cwd.to_owned(),
+            pane_active: false,
+            session_attached: false,
             explicit_jsonl_path: None,
             session_key_override: None,
             existing_jsonl_path: None,
@@ -517,6 +558,8 @@ mod tests {
             pane_id: "%9".to_owned(),
             pane_pid: None,
             cwd: "/Users/vm/my-project".to_owned(),
+            pane_active: false,
+            session_attached: false,
             explicit_jsonl_path: None,
             session_key_override: None,
             existing_jsonl_path: None,
@@ -549,6 +592,8 @@ mod tests {
             pane_id: "%1".to_owned(),
             pane_pid: None,
             cwd: cwd.to_owned(),
+            pane_active: false,
+            session_attached: false,
             explicit_jsonl_path: None,
             session_key_override: None,
             existing_jsonl_path: None,
@@ -612,6 +657,8 @@ mod tests {
                 pane_id: "%1".to_owned(),
                 pane_pid: None,
                 cwd: cwd.to_owned(),
+                pane_active: false,
+                session_attached: false,
                 explicit_jsonl_path: None,
                 session_key_override: None,
                 existing_jsonl_path: None,
@@ -622,6 +669,8 @@ mod tests {
                 pane_id: "%2".to_owned(),
                 pane_pid: None,
                 cwd: cwd.to_owned(),
+                pane_active: false,
+                session_attached: false,
                 explicit_jsonl_path: None,
                 session_key_override: None,
                 existing_jsonl_path: None,
@@ -647,6 +696,63 @@ mod tests {
     }
 
     #[test]
+    fn discover_sessions_prefers_active_attached_pane_for_newest_same_cwd_session() {
+        let tmp = temp_sessions_dir("discover-active-bootstrap");
+        let sessions_dir = tmp.join("sessions");
+        let day_dir = sessions_dir.join("2026").join("03").join("01");
+        fs::create_dir_all(&day_dir).expect("test");
+
+        let cwd = "/Users/vm/project";
+        let old_path = write_session_meta(&day_dir, "rollout-old.jsonl", cwd);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let new_path = write_session_meta(&day_dir, "rollout-new.jsonl", cwd);
+
+        let hints = vec![
+            CodexPaneHint {
+                pane_id: "%1".to_owned(),
+                pane_pid: None,
+                cwd: cwd.to_owned(),
+                pane_active: false,
+                session_attached: true,
+                explicit_jsonl_path: None,
+                session_key_override: None,
+                existing_jsonl_path: None,
+                pane_generation: Some(1),
+                pane_birth_ts: Some(ts(2026, 3, 1, 9, 0, 0)),
+            },
+            CodexPaneHint {
+                pane_id: "%2".to_owned(),
+                pane_pid: None,
+                cwd: cwd.to_owned(),
+                pane_active: true,
+                session_attached: true,
+                explicit_jsonl_path: None,
+                session_key_override: None,
+                existing_jsonl_path: None,
+                pane_generation: Some(2),
+                pane_birth_ts: Some(ts(2026, 3, 1, 9, 5, 0)),
+            },
+        ];
+
+        let discoveries = discover_sessions_in_dir(&hints, &sessions_dir);
+        assert_eq!(discoveries.len(), 2);
+
+        let pane1 = discoveries
+            .iter()
+            .find(|d| d.pane_id == "%1")
+            .expect("pane1 discovery");
+        let pane2 = discoveries
+            .iter()
+            .find(|d| d.pane_id == "%2")
+            .expect("pane2 discovery");
+
+        assert_eq!(pane1.jsonl_path, old_path);
+        assert_eq!(pane2.jsonl_path, new_path);
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
     fn discover_sessions_reuses_existing_assignment_before_claiming_newer_file() {
         let tmp = temp_sessions_dir("discover-reuse-existing");
         let sessions_dir = tmp.join("sessions");
@@ -663,6 +769,8 @@ mod tests {
                 pane_id: "%1".to_owned(),
                 pane_pid: None,
                 cwd: cwd.to_owned(),
+                pane_active: false,
+                session_attached: false,
                 explicit_jsonl_path: None,
                 session_key_override: None,
                 existing_jsonl_path: Some(old_path.clone()),
@@ -673,6 +781,8 @@ mod tests {
                 pane_id: "%2".to_owned(),
                 pane_pid: None,
                 cwd: cwd.to_owned(),
+                pane_active: false,
+                session_attached: false,
                 explicit_jsonl_path: None,
                 session_key_override: None,
                 existing_jsonl_path: None,
@@ -714,6 +824,8 @@ mod tests {
                 pane_id: "%1".to_owned(),
                 pane_pid: None,
                 cwd: cwd.to_owned(),
+                pane_active: false,
+                session_attached: false,
                 explicit_jsonl_path: None,
                 session_key_override: None,
                 existing_jsonl_path: None,
@@ -724,6 +836,8 @@ mod tests {
                 pane_id: "%2".to_owned(),
                 pane_pid: None,
                 cwd: cwd.to_owned(),
+                pane_active: false,
+                session_attached: false,
                 explicit_jsonl_path: None,
                 session_key_override: None,
                 existing_jsonl_path: None,
@@ -760,6 +874,8 @@ mod tests {
                 pane_id: "%1".to_owned(),
                 pane_pid: None,
                 cwd: cwd.to_owned(),
+                pane_active: false,
+                session_attached: false,
                 explicit_jsonl_path: Some(spool_path.clone()),
                 session_key_override: Some("codex:%1".to_owned()),
                 existing_jsonl_path: None,
@@ -770,6 +886,8 @@ mod tests {
                 pane_id: "%2".to_owned(),
                 pane_pid: None,
                 cwd: cwd.to_owned(),
+                pane_active: false,
+                session_attached: false,
                 explicit_jsonl_path: None,
                 session_key_override: None,
                 existing_jsonl_path: None,
@@ -818,6 +936,8 @@ mod tests {
             pane_id: "%8".to_owned(),
             pane_pid: None,
             cwd: "/Users/vm/project".to_owned(),
+            pane_active: false,
+            session_attached: false,
             explicit_jsonl_path: Some(missing_path),
             session_key_override: Some("codex:%8".to_owned()),
             existing_jsonl_path: Some(real_path),
