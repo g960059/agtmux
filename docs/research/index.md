@@ -1,28 +1,16 @@
 # Research Index
 
-Current, compact entry points for `docs/research/`.
+Keep `docs/research/` small. Retain only notes that still help explain live behavior or external constraints.
 
 ## Current
 
 - [20260309-status-notification-comparison.md](./20260309-status-notification-comparison.md)
-  - Cross-tool comparison of `cmux`, `CodexMonitor`, and OpenAI `codex`
-  - Covers status kinds, event triggers, notification policy, and clear/dismiss behavior
-  - Start here for `waiting_input` / `waiting_approval` / completion-attention questions
-- Contract freeze follow-up:
-  - [`../decisions/ADR-20260309-sync-v3-contract-freeze.md`](../decisions/ADR-20260309-sync-v3-contract-freeze.md)
-  - `fixtures/sync-v3/`
-
-## Focused Background
-
-- [20260303-cmux-esc-sequences.md](./20260303-cmux-esc-sequences.md)
-  - Narrow `cmux` / Claude hook research
-  - Useful background for Claude-specific waiting-state detection
+  - Cross-tool status and attention semantics for sync-v3 related behavior
 - [claude-jsonl-waiting-states.md](./claude-jsonl-waiting-states.md)
   - Why Claude JSONL cannot provide waiting states
 - [codex-appserver-api-reference.md](./codex-appserver-api-reference.md)
-  - External API notes kept as dated research, not product truth
+  - External Codex API reference notes; re-verify against the official docs before implementation changes
 
-## Historical Design Batch
+## Rule
 
-- [20260302/](./20260302/)
-  - Multi-agent Codex JSONL design research that led to the current semantic FSM approach
+- If research no longer informs current code, tests, ADRs, or runbooks, remove it from the default branch and rely on Git history.
