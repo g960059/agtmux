@@ -37,10 +37,8 @@
 
 ## Links
 - Related docs:
-  - `docs/20_spec.md` (FR-031a)
-  - `docs/40_design.md` (Section 3: Resolver and Arbitration)
-  - `docs/80_decisions/ADR-20260225-pane-signature-v1.md`
-- Related tasks:
-  - `docs/60_tasks.md` T-121
+  - `docs/product/overview.md`
+  - `docs/product/architecture.md`
+  - `docs/decisions/ADR-20260225-pane-signature-v1.md`
 - Tests:
   - `crates/agtmux-daemon-v5/src/projection.rs` — 9 cross-session tests (#37-#45)

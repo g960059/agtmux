@@ -45,8 +45,6 @@
 
 ## Links
 - Related docs:
-  - `docs/20_spec.md` FR-018〜FR-023
-  - `docs/30_architecture.md` Flow-006/007, Observability
-  - `docs/40_design.md` Cursor/Binder/Latency sections
-- Related tasks:
-  - `docs/60_tasks.md` T-040, T-041, T-042, T-043
+  - `docs/product/overview.md`
+  - `docs/product/architecture.md`
+  - `docs/decisions/ADR-20260225-runtime-control-contracts.md`

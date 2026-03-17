@@ -16,6 +16,12 @@
 - Heuristic polling stays active so monitoring survives source outages.
 - `managed` / `unmanaged` describes agent-session presence, not evidence source.
 - Pane identity is pane-first so tmux pane reuse does not corrupt state.
+- Pane signatures use deterministic, heuristic, or none; title-only matching must not promote a pane to managed.
+
+## Non-goals
+
+- Long-lived implementation specs, task boards, and progress logs on the default branch.
+- Big-bang replacement of fallback detection with a single provider-specific mechanism.
 
 ## Success Criteria
 

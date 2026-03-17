@@ -38,7 +38,7 @@
   - 却下理由: interface churn で下流設計が不安定化する。
 
 ## Links
-- Related tasks:
-  - `docs/60_tasks.md` T-010, T-033
-- Related commits/PRs:
-  - docs update only (no code PR yet)
+- Related docs:
+  - `docs/product/overview.md`
+  - `docs/product/architecture.md`
+  - `docs/runbooks/poller-quality-gate.md`

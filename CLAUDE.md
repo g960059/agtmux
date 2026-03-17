@@ -4,7 +4,7 @@ Read `AGENTS.md` first.
 
 Source of truth is code, tests, schemas, CI, and ADRs.
 
-Treat `docs/research/` as dated notes and `docs/archive/` as history, not current truth.
+Treat `docs/research/` as dated notes, not current truth.
 
 Use `changes/<issue-id>-slug/` only for active multi-step work. Keep it short and remove it from the default branch after merge.
 

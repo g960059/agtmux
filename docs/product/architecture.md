@@ -21,4 +21,5 @@
 - Fresh deterministic evidence suppresses heuristic state for the same pane.
 - Fallback remains available when deterministic sources go stale or down.
 - Pane identity is `pane_id + generation + birth_ts`.
-- Durable cross-cutting behavior belongs in ADRs and tests; historical specs live under `docs/archive/`.
+- Startup order is source -> gateway -> daemon -> UI when the runtime is supervising dependencies.
+- Durable cross-cutting behavior belongs in ADRs, tests, and operator runbooks.

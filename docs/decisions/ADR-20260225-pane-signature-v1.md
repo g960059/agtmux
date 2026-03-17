@@ -24,7 +24,7 @@
 - Guardrails:
   - title-only match は managed 昇格根拠にしない（`current_cmd` に関係なく無条件抑制）
   - pane_title は stale になりやすく（エージェント終了後も残存）、単独シグナルとしては信頼性が低い
-  - **`pane_title` は binding 判定・provider 切替検出・generation bump のいかなる目的にも evidence として使用禁止**（compaction で即座に失われる揮発値であり、Claude UUID と Codex UUID の混同を招く。詳細は `docs/40_design.md` 「pane_title 使用禁止」節を参照）
+  - **`pane_title` は binding 判定・provider 切替検出・generation bump のいかなる目的にも evidence として使用禁止**
 - Hysteresis:
   - idle確定: `max(4s, 2*poll_interval)`
   - running昇格: `last_interaction <= 8s` かつ running hint あり
@@ -52,11 +52,9 @@
 
 ## Links
 - Related docs:
-  - `docs/20_spec.md` (Pane Signature Model, FR-024〜FR-031)
-  - `docs/30_architecture.md` (Flow-002, Flow-008)
-  - `docs/40_design.md` (Pane Signature Classifier)
-- Related tasks:
-  - `docs/60_tasks.md` T-044, T-045, T-046
+  - `docs/product/overview.md`
+  - `docs/product/architecture.md`
+  - `docs/decisions/ADR-20260226-pane-first-resolver-grouping.md`
 - Investigation references:
   - `/Users/virtualmachine/ghq/github.com/g960059/agtmux=v4`
   - `/Users/virtualmachine/ghq/github.com/g960059/agtmux/.worktrees/exp/go-codex-implementation-poc`

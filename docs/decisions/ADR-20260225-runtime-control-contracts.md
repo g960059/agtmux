@@ -52,7 +52,6 @@
 
 ## Links
 - Related docs:
-  - `docs/20_spec.md` FR-039〜FR-047
-  - `docs/30_architecture.md` Flow-011〜014
-  - `docs/40_design.md` supervisor/ack/registry/binding sections
-  - `docs/50_plan.md`, `docs/60_tasks.md`
+  - `docs/product/architecture.md`
+  - `docs/runbooks/backup-restore.md`
+  - `docs/runbooks/migration-canary-rollback.md`

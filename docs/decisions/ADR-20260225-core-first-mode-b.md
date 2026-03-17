@@ -10,11 +10,9 @@
 
 ## Decision
 - 実行モードを `B (Core-first)` に固定する。
-- `docs/20_spec.md` の FR を `[MVP]` と `[Post-MVP]` に分離する。
 - Phase 1-2 の実装ブロッカーは `[MVP]` のみとする。
 - `[Post-MVP]` は削除せず設計資産として保持し、必要時に昇格して実装する。
-- `docs/40_design.md` は `Main (MVP Slice)` と `Appendix (Post-MVP Hardening)` に分離する。
-- `docs/60_tasks.md` は `MVP Track` と `Post-MVP Backlog` を分離し、全タスクに `blocked_by` を持たせる。
+- stable docs と change-local docs を分け、長期に残す内容だけを product / ADR / runbook に昇格する。
 
 ## Consequences
 - Positive:
@@ -27,12 +25,11 @@
 
 ## Guardrails
 - `[Post-MVP]` の前倒し実装は、実害が再現した場合に限定する。
-- 前倒し時は `docs/60_tasks.md` と `docs/70_progress.md` へ理由と依存を記録する。
-- `docs/10_foundation.md` の変更を伴う場合は必ずユーザーへエスカレーションする。
+- 前倒し時は active Issue / PR と `changes/<issue-id>-slug/` に理由と依存を記録する。
+- 安定した product intent を変える場合は必ずユーザーへエスカレーションする。
 
 ## Links
-- `docs/00_router.md`
-- `docs/20_spec.md`
-- `docs/40_design.md`
-- `docs/50_plan.md`
-- `docs/60_tasks.md`
+- `AGENTS.md`
+- `docs/README.md`
+- `docs/product/overview.md`
+- `changes/README.md`

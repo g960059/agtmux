@@ -69,7 +69,6 @@ agtmux setup-hooks --unregister --scope user
 - `docs/decisions/` — ADRs and accepted design history
 - `docs/runbooks/` — operator procedures
 - `docs/research/` — dated, non-authoritative notes
-- `docs/archive/` — historical specs, plans, tasks, and reviews
 
 ---
 

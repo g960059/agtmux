@@ -101,6 +101,6 @@ Setup 負荷の解決策: `agtmux setup-hooks` コマンドが `~/.claude/settin
 
 ## 結果・影響
 
-- Phase 8 タスク T-E01〜T-E04 として実装（`docs/60_tasks.md` 参照）
-- 新 FR-053〜FR-060 として spec に追加（`docs/20_spec.md` 参照）
-- C-017 `agtmux-source-osc-tap` として architecture に追加（`docs/30_architecture.md` 参照）
+- Post-MVP の探索判断として保持する
+- C-017 `agtmux-source-osc-tap` の検討履歴として `docs/product/architecture.md` と整合させる
+- 実装に着手する場合は active Issue / PR と `changes/` で再提案する

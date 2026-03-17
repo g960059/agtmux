@@ -53,9 +53,7 @@
 
 ## Links
 - Related docs:
-  - `docs/20_spec.md` FR-032〜FR-038
-  - `docs/30_architecture.md` Flow-009/010, Security/Observability
-  - `docs/40_design.md` UDS trust / Resolver / Binding / Latency / Backup
-  - `docs/50_plan.md` Phase 2〜5
-- Related tasks:
-  - `docs/60_tasks.md` T-033, T-041, T-042, T-043, T-047, T-048, T-049, T-051, T-071
+  - `docs/product/architecture.md`
+  - `docs/runbooks/poller-quality-gate.md`
+  - `docs/runbooks/backup-restore.md`
+  - `docs/runbooks/migration-canary-rollback.md`
