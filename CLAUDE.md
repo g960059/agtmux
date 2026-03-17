@@ -10,4 +10,4 @@ Use `changes/<issue-id>-slug/` only for active multi-step work. Keep it short an
 
 Promote durable knowledge to `docs/decisions/`, `docs/runbooks/`, tests, or code comments.
 
-Project workflow skills live in `.claude/skills/`. Prefer `/start-change`, `/review-change`, `/close-change`, and `/research-note` for repo workflow rituals.
+Project workflow skills live in `.claude/skills/`. Prefer `/start-change`, `/review-change`, `/close-change`, `/research-note`, and `/adr` for repo workflow rituals.

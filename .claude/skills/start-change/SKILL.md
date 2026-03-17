@@ -25,7 +25,7 @@ Process:
    - standard: create `changes/<issue-id>-slug/` using the templates in `templates/`
    - structural: create `changes/<issue-id>-slug/`, check whether an ADR is needed before implementation, and prefer stacked PRs
    - research: create a dated note in `docs/research/` and do not create a `changes/` pack unless implementation starts
-4. If the work is standard or structural and there is no issue id yet, stop and say an issue is required before creating `changes/`.
+4. If the work is standard or structural and there is no issue id yet, recommend creating an issue first. If proceeding without one, use a temporary slug and note that the folder must be renamed once an issue is created.
 5. Keep every change-pack file short and specific to the current diff.
 6. Do not write finished product docs here. This is scaffolding only.
 7. End with a concise summary:

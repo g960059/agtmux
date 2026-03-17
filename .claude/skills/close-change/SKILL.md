@@ -25,7 +25,7 @@ Process:
    - why
    - what tests prove it
    - which durable knowledge was promoted
-5. If the change pack is no longer needed on the default branch, remove `changes/<id>/`.
+5. Remove `changes/<id>/` in the same PR that merges the work, not as a follow-up commit.
 6. Flag any leftover research, stale links, or docs references that would keep temporary context alive after merge.
 
 Never keep `changes/` packs as permanent documentation.

@@ -5,3 +5,4 @@
 - `review-change`: review a diff against requirements, tests, and promotion gaps
 - `close-change`: promote durable knowledge and retire the change pack
 - `research-note`: write dated, non-authoritative research notes
+- `adr`: write a new ADR for durable architectural or contract decisions
