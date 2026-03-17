@@ -1,7 +1,7 @@
 //! Gateway: aggregates events from multiple source servers, manages per-source
 //! cursors, and serves merged events to the daemon via `gateway.pull_events`.
 //!
-//! Architecture ref: docs/30_architecture.md C-003
+//! Architecture ref: docs/product/architecture.md C-003
 //! Task ref: T-040
 
 use std::collections::HashMap;

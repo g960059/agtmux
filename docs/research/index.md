@@ -9,7 +9,7 @@ Current, compact entry points for `docs/research/`.
   - Covers status kinds, event triggers, notification policy, and clear/dismiss behavior
   - Start here for `waiting_input` / `waiting_approval` / completion-attention questions
 - Contract freeze follow-up:
-  - [`../80_decisions/ADR-20260309-sync-v3-contract-freeze.md`](../80_decisions/ADR-20260309-sync-v3-contract-freeze.md)
+  - [`../decisions/ADR-20260309-sync-v3-contract-freeze.md`](../decisions/ADR-20260309-sync-v3-contract-freeze.md)
   - `fixtures/sync-v3/`
 
 ## Focused Background
@@ -19,6 +19,8 @@ Current, compact entry points for `docs/research/`.
   - Useful background for Claude-specific waiting-state detection
 - [claude-jsonl-waiting-states.md](./claude-jsonl-waiting-states.md)
   - Why Claude JSONL cannot provide waiting states
+- [codex-appserver-api-reference.md](./codex-appserver-api-reference.md)
+  - External API notes kept as dated research, not product truth
 
 ## Historical Design Batch
 

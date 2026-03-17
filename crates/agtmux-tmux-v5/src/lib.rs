@@ -2,7 +2,7 @@
 //! Provides subprocess execution, pane listing/capture, process inspection,
 //! and pane generation tracking. No business logic — pure IO boundary.
 //!
-//! Architecture ref: docs/30_architecture.md C-015
+//! Architecture ref: docs/product/architecture.md C-015
 
 pub mod capture;
 pub mod error;

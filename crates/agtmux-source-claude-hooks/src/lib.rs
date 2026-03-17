@@ -1,7 +1,7 @@
 //! agtmux-source-claude-hooks: Deterministic source server for Claude.
 //! Normalizes Claude hook events into SourceEventV2.
 //!
-//! Architecture ref: docs/30_architecture.md C-005
+//! Architecture ref: docs/product/architecture.md C-005
 
 pub mod source;
 pub mod translate;

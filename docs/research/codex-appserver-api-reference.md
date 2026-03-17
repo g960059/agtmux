@@ -1,10 +1,10 @@
-# Codex App Server API Reference (authoritative; MUST read before any Codex implementation)
+# Codex App Server API Reference (dated research)
 
 > Source: https://developers.openai.com/codex/app-server/
 > Last synced: 2026-02-26
+> Status: external reference only. Current product truth lives in code, tests, and ADRs.
 
-**IMPORTANT**: agtmux は公式 Codex App Server API を使用する。独自プロトコル（capture-based NDJSON 抽出等）は
-App Server が利用不可の場合のフォールバックとしてのみ使用する。新機能実装時は必ずこのリファレンスを参照すること。
+この文書は Codex App Server 調査時の参照メモです。実装判断を更新するときは、現行コード・テスト・ADR を優先し、必要なら公式ドキュメントを再確認してください。
 
 ## 1. Protocol Overview
 

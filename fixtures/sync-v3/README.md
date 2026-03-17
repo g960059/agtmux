@@ -29,4 +29,4 @@ Scenario files:
 
 The contract freeze is documented in:
 
-- `docs/80_decisions/ADR-20260309-sync-v3-contract-freeze.md`
+- `docs/decisions/ADR-20260309-sync-v3-contract-freeze.md`

@@ -1,7 +1,7 @@
 //! agtmux: tmux agent multiplexer runtime binary.
 //! Single-process binary embedding all MVP components in-process.
 //!
-//! Architecture ref: docs/30_architecture.md C-016, docs/40_design.md Section 9
+//! Architecture ref: docs/product/architecture.md C-016
 
 use clap::Parser;
 

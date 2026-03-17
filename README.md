@@ -63,6 +63,16 @@ agtmux setup-hooks --unregister --scope user
 
 ---
 
+## Project docs
+
+- `docs/product/` — stable product intent and system shape
+- `docs/decisions/` — ADRs and accepted design history
+- `docs/runbooks/` — operator procedures
+- `docs/research/` — dated, non-authoritative notes
+- `docs/archive/` — historical specs, plans, tasks, and reviews
+
+---
+
 ## Commands
 
 ### `agtmux ls` — pane list

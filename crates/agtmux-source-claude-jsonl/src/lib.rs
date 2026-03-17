@@ -2,7 +2,7 @@
 //! Reads Claude Code's JSONL transcript files as deterministic evidence,
 //! providing deterministic detection without hooks registration.
 //!
-//! Architecture ref: docs/30_architecture.md C-007
+//! Architecture ref: docs/product/architecture.md C-007
 
 pub mod discovery;
 pub mod source;
