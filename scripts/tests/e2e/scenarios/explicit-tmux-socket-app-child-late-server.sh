@@ -11,8 +11,7 @@ source "$SCRIPT_DIR/../harness/common.sh"
 
 set -euo pipefail
 
-TMUX_BIN="${TMUX_BIN:-/opt/homebrew/bin/tmux}"
-[ -x "$TMUX_BIN" ] || fail "tmux binary not found at $TMUX_BIN"
+TMUX_BIN="$(resolve_tmux_bin)"
 
 SESSION="e2e-explicit-late-server-$$"
 WORKDIR="/tmp/agtmux-e2e-explicit-late-server-$$"

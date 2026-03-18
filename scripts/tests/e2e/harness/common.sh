@@ -63,6 +63,30 @@ assert_not_contains() {
     fi
 }
 
+resolve_tmux_bin() {
+    local candidate=""
+
+    if [ -n "${TMUX_BIN:-}" ] && [ -x "${TMUX_BIN}" ]; then
+        printf '%s\n' "${TMUX_BIN}"
+        return 0
+    fi
+
+    candidate="$(command -v tmux 2>/dev/null || true)"
+    if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+        printf '%s\n' "$candidate"
+        return 0
+    fi
+
+    for candidate in /opt/homebrew/bin/tmux /usr/local/bin/tmux /usr/bin/tmux; do
+        if [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+
+    fail "tmux binary not found; set TMUX_BIN or install tmux on PATH"
+}
+
 # ── agtmux JSON field getter ───────────────────────────────────────────────
 
 # jq_get SOCKET PANE_ID FIELD

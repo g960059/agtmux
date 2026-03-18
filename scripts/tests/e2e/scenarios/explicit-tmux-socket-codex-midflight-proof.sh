@@ -18,8 +18,7 @@ source "$SCRIPT_DIR/../providers/codex/adapter.sh"
 
 set -euo pipefail
 
-TMUX_BIN="${TMUX_BIN:-/opt/homebrew/bin/tmux}"
-[ -x "$TMUX_BIN" ] || fail "tmux binary not found at $TMUX_BIN"
+TMUX_BIN="$(resolve_tmux_bin)"
 
 if [[ "${AGTMUX_BIN:-}" != /* ]]; then
     REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || pwd)"
