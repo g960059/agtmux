@@ -140,8 +140,6 @@ preflight-contract:
     @command -v socat >/dev/null || command -v python3 >/dev/null || command -v python >/dev/null || { echo "socat or python3 required (brew install socat)"; exit 1; }
     @echo "[preflight-contract] jq"
     @command -v jq    >/dev/null || { echo "jq not found (brew install jq)"; exit 1; }
-    @echo "[preflight-contract] agtmux binary"
-    @test -x target/release/agtmux || test -x target/debug/agtmux || command -v agtmux >/dev/null || { echo "agtmux not built — run: cargo build -p agtmux"; exit 1; }
     @echo "[preflight-contract] OK"
 
 e2e-contract: preflight-contract
