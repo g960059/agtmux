@@ -11,6 +11,7 @@ source "$SCRIPT_DIR/../harness/common.sh"
 set -euo pipefail
 
 TMUX_BIN="$(resolve_tmux_bin)"
+setup_test_shell
 
 SESSION="e2e-explicit-socket-$$"
 SOCKET="/tmp/agtmux-e2e-explicit-socket-$$/agtmuxd.sock"
@@ -35,7 +36,7 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "$WORKDIR" "$(dirname "$SOCKET")"
-tmux new-session -d -s "$SESSION" -n main 'zsh -l' 2>/dev/null
+tmux new-session -d -s "$SESSION" -n main "$TEST_SHELL_COMMAND" 2>/dev/null
 
 PANE_ID="$(tmux list-panes -t "$SESSION:main" -F '#{pane_id}' 2>/dev/null | head -1)"
 [ -n "$PANE_ID" ] || fail "could not resolve pane_id"
@@ -59,5 +60,5 @@ CURRENT_CMD="$(jq_get "$SOCKET" "$PANE_ID" "current_cmd")"
     fail "explicit --tmux-socket daemon returned no pane row for $PANE_ID under stripped PATH"
 }
 
-assert_eq "explicit-socket current_cmd" "zsh" "$CURRENT_CMD"
+assert_eq "explicit-socket current_cmd" "$TEST_SHELL_NAME" "$CURRENT_CMD"
 pass "explicit --tmux-socket inventory survives stripped PATH"

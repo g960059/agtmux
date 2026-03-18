@@ -12,6 +12,7 @@ source "$SCRIPT_DIR/../harness/common.sh"
 set -euo pipefail
 
 TMUX_BIN="$(resolve_tmux_bin)"
+setup_test_shell
 
 SESSION="e2e-explicit-late-server-$$"
 WORKDIR="/tmp/agtmux-e2e-explicit-late-server-$$"
@@ -74,7 +75,7 @@ INITIAL_TOTAL="$("$AGTMUX_BIN" --socket-path "$SOCKET" json 2>/dev/null | jq '.p
 log "initial agtmux json pane count before tmux server start: $INITIAL_TOTAL"
 
 log "starting tmux server/session after daemon launch"
-tmux new-session -d -s "$SESSION" -n main 'zsh -l' 2>/dev/null
+tmux new-session -d -s "$SESSION" -n main "$TEST_SHELL_COMMAND" 2>/dev/null
 
 PANE_ID=""
 for _ in $(seq 1 20); do
@@ -87,7 +88,7 @@ done
     fail "could not resolve pane_id for late-started tmux session"
 }
 
-wait_for_agtmux_state "$SOCKET" "$PANE_ID" "current_cmd" "zsh" 20 || {
+wait_for_agtmux_state "$SOCKET" "$PANE_ID" "current_cmd" "$TEST_SHELL_NAME" 20 || {
     dump_repro_context
     fail "daemon never inventoried late-started pane $PANE_ID on explicit tmux socket"
 }
@@ -98,6 +99,6 @@ CURRENT_CMD="$(jq_get "$SOCKET" "$PANE_ID" "current_cmd")"
 
 assert_eq "late-server presence" "unmanaged" "$PRESENCE"
 assert_eq "late-server session_name" "$SESSION" "$SESSION_NAME"
-assert_eq "late-server current_cmd" "zsh" "$CURRENT_CMD"
+assert_eq "late-server current_cmd" "$TEST_SHELL_NAME" "$CURRENT_CMD"
 
 pass "explicit --tmux-socket late-started tmux server is inventoried under app-like child env"

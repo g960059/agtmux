@@ -15,6 +15,7 @@ source "$SCRIPT_DIR/../providers/${PROVIDER}/adapter.sh"
 set -euo pipefail
 
 TMUX_BIN="$(resolve_tmux_bin)"
+setup_test_shell
 
 if [[ "${AGTMUX_BIN:-}" != /* ]]; then
     REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || pwd)"
@@ -75,7 +76,7 @@ mkdir -p "$WORKDIR"
 rm -f "$TMUX_SOCKET_PATH"
 
 log "starting tmux session on explicit socket before daemon launch"
-tmux new-session -d -s "$SESSION" -n main 'zsh -l' 2>/dev/null
+tmux new-session -d -s "$SESSION" -n main "$TEST_SHELL_COMMAND" 2>/dev/null
 
 for _ in $(seq 1 20); do
     PANE_ID="$(tmux list-panes -t "$SESSION:main" -F '#{pane_id}' 2>/dev/null | head -1 || true)"
@@ -108,14 +109,14 @@ env -i \
 DAEMON_PID=$!
 
 wait_for_socket "$SOCKET" 15
-wait_for_agtmux_state "$SOCKET" "$PANE_ID" "current_cmd" "zsh" 20 || {
+wait_for_agtmux_state "$SOCKET" "$PANE_ID" "current_cmd" "$TEST_SHELL_NAME" 20 || {
     dump_repro_context
-    fail "daemon never inventoried initial zsh pane $PANE_ID on explicit tmux socket"
+    fail "daemon never inventoried initial shell pane $PANE_ID on explicit tmux socket"
 }
 
 TASK="Run exactly one bash command and do not run any additional commands. Wait 20 seconds by using sleep 20. bash -lc 'sleep 20; printf \"wait_result=managed\\n\"'. Do not simulate, infer, or guess. Output only one non-empty line. Required output format: wait_result=managed"
 
-log "launching $PROVIDER from plain zsh pane $PANE_ID (workdir=$WORKDIR)"
+log "launching $PROVIDER from plain $TEST_SHELL_NAME pane $PANE_ID (workdir=$WORKDIR)"
 launch_provider "$PANE_ID" "$WORKDIR" "$TASK"
 wait_until_provider_running "$PANE_ID" 20 || log "WARN: provider-side running check timed out"
 

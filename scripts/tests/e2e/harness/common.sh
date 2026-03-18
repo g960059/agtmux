@@ -87,6 +87,28 @@ resolve_tmux_bin() {
     fail "tmux binary not found; set TMUX_BIN or install tmux on PATH"
 }
 
+setup_test_shell() {
+    local candidate=""
+    local shell_arg=""
+
+    if [ -n "${AGTMUX_TEST_SHELL_BIN:-}" ] && [ -x "${AGTMUX_TEST_SHELL_BIN}" ]; then
+        candidate="${AGTMUX_TEST_SHELL_BIN}"
+    elif candidate="$(command -v zsh 2>/dev/null || true)"; [ -n "$candidate" ] && [ -x "$candidate" ]; then
+        :
+    elif [ -n "${BASH:-}" ] && [ -x "${BASH}" ]; then
+        candidate="${BASH}"
+    elif candidate="$(command -v bash 2>/dev/null || true)"; [ -n "$candidate" ] && [ -x "$candidate" ]; then
+        :
+    else
+        fail "no supported interactive test shell found; set AGTMUX_TEST_SHELL_BIN to zsh or bash"
+    fi
+
+    TEST_SHELL_BIN="$candidate"
+    TEST_SHELL_NAME="$(basename "$candidate")"
+    shell_arg="-l"
+    printf -v TEST_SHELL_COMMAND 'exec %q %s' "$TEST_SHELL_BIN" "$shell_arg"
+}
+
 # ── agtmux JSON field getter ───────────────────────────────────────────────
 
 # jq_get SOCKET PANE_ID FIELD
