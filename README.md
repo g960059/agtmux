@@ -310,7 +310,9 @@ agtmux (single process)
 
 ```bash
 just verify              # fmt + lint + test (run before every commit)
+just verify-deterministic # poller gate + contract e2e + fake-live tmux e2e
 just e2e-contract        # contract tests: schema, state, consistency
+just e2e-fake-live       # real tmux + fake providers, no auth/network needed
 just e2e-online          # provider end-to-end (requires preflight)
 just preflight-online    # check tmux/codex/claude/network readiness
 ```

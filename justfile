@@ -146,7 +146,16 @@ preflight-contract:
 
 e2e-contract: preflight-contract
     @cargo build -p agtmux --quiet
-    @bash scripts/tests/e2e/contract/run-all.sh
+    @AGTMUX_BIN=target/debug/agtmux bash scripts/tests/e2e/contract/run-all.sh
+
+preflight-fake-live: preflight-contract
+    @echo "[preflight-fake-live] OK"
+
+e2e-fake-live: preflight-fake-live
+    @cargo build -p agtmux --quiet
+    @AGTMUX_BIN=target/debug/agtmux bash scripts/tests/e2e/fake-live/run-all.sh
+
+verify-deterministic: poller-gate e2e-contract e2e-fake-live
 
 # ── Layer 3: Detection E2E (real CLI required) ────────────────────────────
 # Default timeout: 600s per run. Override: E2E_ONLINE_TIMEOUT=<seconds>

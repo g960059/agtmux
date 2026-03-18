@@ -16,6 +16,9 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: install deterministic e2e deps
+        run: sudo apt-get update && sudo apt-get install -y tmux jq socat
+
       - name: fmt
         run: cargo fmt --all -- --check
 
@@ -24,3 +27,14 @@ jobs:
 
       - name: test
         run: cargo test --workspace --all-features --locked
+
+      - name: deterministic gates
+        run: just verify-deterministic
+
+      - name: upload e2e artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-artifacts
+          path: target/e2e-artifacts
+          if-no-files-found: ignore
