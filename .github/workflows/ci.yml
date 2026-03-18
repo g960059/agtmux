@@ -16,6 +16,9 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: install just
+        run: cargo install just --locked
+
       - name: install deterministic e2e deps
         run: sudo apt-get update && sudo apt-get install -y tmux jq socat
 
