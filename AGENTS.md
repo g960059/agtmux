@@ -1,11 +1,17 @@
 # AGENTS
 
-Read in order: `README.md`, `docs/README.md`, `docs/product/`, `docs/decisions/`, `docs/runbooks/`, then the active GitHub Issue/PR.
+Read: `README.md` → `docs/product/` → `docs/decisions/` → `docs/runbooks/` → active Issue/PR → active `changes/<issue-id>-slug>/`.
 
-Source of truth is code, tests, schemas, CI, and ADRs. Treat dated research and active `changes/` as working notes, not permanent truth.
+Source of truth: code, tests, schemas, CI, ADRs. `changes/` and dated research are working notes.
 
-Use `changes/<issue-id>-slug/` only for active multi-step work. Keep `requirements.md`, `design.md`, `plan.md`, and `tasks.md` short.
+For non-trivial work, plan first; if the plan breaks, stop and re-plan.
 
-Prefer small, reversible diffs. Update tests when behavior changes.
+Use subagents for focused research and parallel verification, one task each.
 
-Before merge, promote durable knowledge to `docs/decisions/`, `docs/runbooks/`, tests, or code comments. After merge, remove the change pack from the default branch.
+Prefer root-cause fixes over patches. No silent fallbacks, no hidden errors, unless explicitly required.
+
+For non-trivial changes, choose the simpler cleaner design; avoid over-engineering simple fixes.
+
+Require senior/staff-level quality and concrete proof before done: run relevant tests, inspect logs/output, and verify behavior.
+
+Keep diffs small, update tests with behavior changes, promote durable knowledge before merge, and remove `changes/<issue-id>-slug>/` after merge.
