@@ -6,13 +6,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../common.sh"
 
+TMUX_BIN="$(resolve_tmux_bin)"
 TMUX_SOCKET_NAME="agtmux-fake-live-switch-$$"
 SESSION="e2e-fake-live-switch-$$"
 WORKDIR="/tmp/agtmux-fake-live-switch-$$"
 SOCKET="$WORKDIR/agtmuxd.sock"
 
 tmux() {
-    env -u TMUX -u TMUX_PANE command tmux -L "$TMUX_SOCKET_NAME" "$@"
+    env -u TMUX -u TMUX_PANE "$TMUX_BIN" -L "$TMUX_SOCKET_NAME" "$@"
 }
 
 export AGTMUX_TMUX_SOCKET_NAME="$TMUX_SOCKET_NAME"
