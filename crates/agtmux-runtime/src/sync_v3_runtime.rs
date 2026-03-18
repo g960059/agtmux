@@ -3,12 +3,13 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use agtmux_core_v5::resolver::{Freshness as ResolverFreshness, classify_freshness};
 use agtmux_core_v5::sync_v3::{
     AgentLifecycleV3, AgentStateV3, AttentionSummaryV3, FreshnessSummaryV3, PendingRequestStatusV3,
-    PresenceV3, ProviderRawEnvelopeV3, SyncV3ChangeKindV3, SyncV3CursorV3, SyncV3FieldGroupV3,
-    SyncV3PaneChangeV3, SyncV3PaneSnapshot, ThreadBlockingV3, ThreadExecutionV3, ThreadFlagsV3,
-    ThreadLifecycleV3, ThreadStateV3, TurnOutcomeV3, TurnStateV3, UiBootstrapV3, UiChangesV3,
+    PresenceV3, ProviderRawEnvelopeV3, RuntimeRefV3, SyncV3ChangeKindV3, SyncV3CursorV3,
+    SyncV3FieldGroupV3, SyncV3PaneChangeV3, SyncV3PaneSnapshot, ThreadBlockingV3,
+    ThreadExecutionV3, ThreadFlagsV3, ThreadLifecycleV3, ThreadStateV3, TurnOutcomeV3, TurnStateV3,
+    UiBootstrapV3, UiChangesV3,
 };
 use agtmux_core_v5::types::{
-    FreshnessState, PaneInstanceId, PaneRuntimeState, Provider, SourceEventV2,
+    FreshnessState, PaneInstanceId, PaneRuntimeState, Provider, SourceEventV2, SourceKind,
 };
 use agtmux_daemon_v5::claude_v3::apply_claude_source_event;
 use agtmux_daemon_v5::codex_v3::apply_codex_source_event;
@@ -19,9 +20,19 @@ use chrono::{DateTime, Utc};
 #[derive(Debug, Default)]
 pub struct SyncV3LiveState {
     reducers: BTreeMap<String, SyncV3Reducer>,
+    binding_epochs: BTreeMap<String, BindingEpochState>,
     rows: BTreeMap<SyncV3RowKey, SyncV3PaneSnapshot>,
     replay_log: Vec<SyncV3PaneChangeV3>,
     head_seq: u64,
+    next_binding_epoch_seq: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BindingEpochState {
+    epoch_id: String,
+    pane_instance_id: PaneInstanceId,
+    provider: Option<Provider>,
+    runtime_ref: Option<RuntimeRefV3>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -48,6 +59,8 @@ impl SyncV3LiveState {
             .map(|pane| pane.pane_id.as_str())
             .collect::<HashSet<_>>();
         self.reducers
+            .retain(|pane_id, _| live_ids.contains(pane_id.as_str()));
+        self.binding_epochs
             .retain(|pane_id, _| live_ids.contains(pane_id.as_str()));
     }
 
@@ -77,6 +90,9 @@ impl SyncV3LiveState {
             if let Some(existing) = self.reducers.get_mut(pane_id)
                 && existing.snapshot().provider == Some(event.provider)
             {
+                if let Some(runtime_ref) = runtime_ref_from_event(event) {
+                    existing.set_runtime_ref(Some(runtime_ref));
+                }
                 apply_supported_semantics(existing, event);
                 continue;
             }
@@ -87,6 +103,7 @@ impl SyncV3LiveState {
                 event.provider,
                 updated_at,
             ));
+            candidate.set_runtime_ref(runtime_ref_from_event(event));
             if apply_supported_semantics(&mut candidate, event) {
                 self.reducers.insert(pane_id.to_string(), candidate);
             }
@@ -96,6 +113,7 @@ impl SyncV3LiveState {
     pub fn demote_panes_to_unmanaged(&mut self, pane_ids: &[String]) {
         for pane_id in pane_ids {
             self.reducers.remove(pane_id);
+            self.binding_epochs.remove(pane_id);
         }
     }
 
@@ -108,7 +126,7 @@ impl SyncV3LiveState {
         conversation_subtitles: &HashMap<String, String>,
         now: DateTime<Utc>,
     ) {
-        let next_rows = compose_rows(
+        let mut next_rows = compose_rows(
             managed_fallbacks,
             &self.reducers,
             tmux_panes,
@@ -117,6 +135,19 @@ impl SyncV3LiveState {
             conversation_subtitles,
             now,
         );
+        self.assign_binding_epochs(&mut next_rows);
+        next_rows.retain(|_, pane| match pane.validate() {
+            Ok(()) => true,
+            Err(err) => {
+                tracing::warn!(
+                    session_name = %pane.session_name,
+                    window_id = %pane.window_id,
+                    pane_id = %pane.pane_id,
+                    "dropping invalid sync-v3 pane row: {err}"
+                );
+                false
+            }
+        });
         let mut changes = Vec::new();
 
         for (pane_id, previous) in &self.rows {
@@ -158,6 +189,83 @@ impl SyncV3LiveState {
 
         self.rows = next_rows;
         self.replay_log.extend(changes);
+    }
+
+    fn assign_binding_epochs(&mut self, rows: &mut BTreeMap<SyncV3RowKey, SyncV3PaneSnapshot>) {
+        let mut assignments = HashMap::new();
+        let mut next_epochs = BTreeMap::new();
+
+        for pane in rows.values() {
+            if assignments.contains_key(&pane.pane_id) {
+                continue;
+            }
+
+            let state = self.next_binding_epoch_state(pane);
+            if let Some(state_ref) = state.as_ref() {
+                next_epochs.insert(pane.pane_id.clone(), state_ref.clone());
+            }
+            assignments.insert(pane.pane_id.clone(), state);
+        }
+
+        for pane in rows.values_mut() {
+            match assignments.get(&pane.pane_id).cloned().flatten() {
+                Some(state) => {
+                    pane.binding_epoch_id = Some(state.epoch_id.clone());
+                    if pane.runtime_ref.is_none() && pane.provider.is_some() {
+                        pane.runtime_ref = state.runtime_ref.clone();
+                    }
+                }
+                None => {
+                    pane.binding_epoch_id = None;
+                    if !matches!(pane.presence, PresenceV3::Managed) {
+                        pane.runtime_ref = None;
+                    }
+                }
+            }
+        }
+
+        self.binding_epochs = next_epochs;
+    }
+
+    fn next_binding_epoch_state(&mut self, pane: &SyncV3PaneSnapshot) -> Option<BindingEpochState> {
+        if !matches!(pane.presence, PresenceV3::Managed) {
+            return None;
+        }
+
+        let previous = self.binding_epochs.get(&pane.pane_id);
+        let should_rotate = previous.is_none_or(|state| {
+            state.pane_instance_id != pane.pane_instance_id
+                || provider_changed(state.provider, pane.provider)
+                || runtime_identity_changed(&state.runtime_ref, &pane.runtime_ref)
+        });
+
+        let epoch_id = if should_rotate {
+            self.next_binding_epoch_seq += 1;
+            format!("bnd_{:016x}", self.next_binding_epoch_seq)
+        } else {
+            previous
+                .expect("existing epoch state when rotation is skipped")
+                .epoch_id
+                .clone()
+        };
+
+        let provider = pane
+            .provider
+            .or_else(|| previous.and_then(|state| state.provider));
+        let runtime_ref = if pane.provider.is_some() {
+            pane.runtime_ref
+                .clone()
+                .or_else(|| previous.and_then(|state| state.runtime_ref.clone()))
+        } else {
+            None
+        };
+
+        Some(BindingEpochState {
+            epoch_id,
+            pane_instance_id: pane.pane_instance_id.clone(),
+            provider,
+            runtime_ref,
+        })
     }
 
     pub fn current_cursor(&self) -> SyncV3CursorV3 {
@@ -269,19 +377,7 @@ fn compose_rows(
             build_unmanaged_snapshot(tmux_pane, pane_instance_id)
         };
 
-        match snapshot.validate() {
-            Ok(()) => {
-                rows.insert(SyncV3RowKey::from_tmux_pane(tmux_pane), snapshot);
-            }
-            Err(err) => {
-                tracing::warn!(
-                    session_name = %tmux_pane.session_name,
-                    window_id = %tmux_pane.window_id,
-                    pane_id = %tmux_pane.pane_id,
-                    "dropping invalid sync-v3 pane row: {err}"
-                );
-            }
-        }
+        rows.insert(SyncV3RowKey::from_tmux_pane(tmux_pane), snapshot);
     }
 
     rows
@@ -360,6 +456,8 @@ fn diff_field_groups(
         groups.push(SyncV3FieldGroupV3::Presence);
     }
     if previous.provider != next.provider
+        || previous.binding_epoch_id != next.binding_epoch_id
+        || previous.runtime_ref != next.runtime_ref
         || previous.conversation_title != next.conversation_title
         || previous.session_subtitle != next.session_subtitle
     {
@@ -444,6 +542,8 @@ fn new_managed_snapshot(
         pane_id: tmux_pane.pane_id.clone(),
         pane_instance_id,
         provider: Some(provider),
+        binding_epoch_id: None,
+        runtime_ref: None,
         conversation_title: None,
         session_subtitle: None,
         presence: PresenceV3::Managed,
@@ -482,6 +582,7 @@ fn build_managed_snapshot(
         .unwrap_or_else(|| format!("managed:{}", tmux_pane.pane_id));
     pane.pane_id = tmux_pane.pane_id.clone();
     pane.pane_instance_id = pane_instance_id;
+    pane.binding_epoch_id = None;
     pane.conversation_title = conversation_title;
     pane.session_subtitle = session_subtitle;
     pane.presence = PresenceV3::Managed;
@@ -509,6 +610,8 @@ fn build_managed_fallback_snapshot(
         pane_id: tmux_pane.pane_id.clone(),
         pane_instance_id,
         provider: managed.provider,
+        binding_epoch_id: None,
+        runtime_ref: None,
         conversation_title,
         session_subtitle,
         presence: PresenceV3::Managed,
@@ -543,6 +646,8 @@ fn build_unmanaged_snapshot(
         pane_id: tmux_pane.pane_id.clone(),
         pane_instance_id,
         provider: None,
+        binding_epoch_id: None,
+        runtime_ref: None,
         conversation_title: None,
         session_subtitle: None,
         presence: PresenceV3::Unmanaged,
@@ -592,6 +697,50 @@ fn managed_session_key(provider: Provider, pane_id: &str) -> String {
 
 fn unmanaged_session_key(pane_id: &str) -> String {
     format!("shell:{pane_id}")
+}
+
+fn runtime_ref_from_event(event: &SourceEventV2) -> Option<RuntimeRefV3> {
+    let native_id = match event.source_kind {
+        SourceKind::ClaudeHooks => {
+            extract_payload_string(&event.payload, &["claude_hook", "session_id"])
+                .map(ToOwned::to_owned)
+                .or_else(|| Some(event.session_key.clone()))
+        }
+        SourceKind::ClaudeJsonl => {
+            extract_payload_string(&event.payload, &["claude_jsonl", "session_id"])
+                .map(ToOwned::to_owned)
+                .or_else(|| Some(event.session_key.clone()))
+        }
+        SourceKind::CodexAppserver => Some(event.session_key.clone()),
+        SourceKind::CodexJsonl => {
+            let pane_id = event.pane_id.as_deref()?;
+            let pane_scoped_key = managed_session_key(Provider::Codex, pane_id);
+            (event.session_key != pane_scoped_key).then(|| event.session_key.clone())
+        }
+        SourceKind::Poller => None,
+        _ => None,
+    }?;
+
+    Some(RuntimeRefV3 {
+        provider: event.provider,
+        native_id,
+    })
+}
+
+fn provider_changed(previous: Option<Provider>, next: Option<Provider>) -> bool {
+    previous != next
+}
+
+fn runtime_identity_changed(previous: &Option<RuntimeRefV3>, next: &Option<RuntimeRefV3>) -> bool {
+    matches!((previous, next), (Some(left), Some(right)) if left != right)
+}
+
+fn extract_payload_string<'a>(payload: &'a serde_json::Value, path: &[&str]) -> Option<&'a str> {
+    let mut current = payload;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    current.as_str()
 }
 
 fn freshness_from_updated_at(updated_at: DateTime<Utc>, now: DateTime<Utc>) -> FreshnessSummaryV3 {
@@ -652,11 +801,20 @@ mod tests {
     }
 
     fn claude_event(hook_type: &str, pane_id: &str, observed_at: DateTime<Utc>) -> SourceEventV2 {
+        claude_event_for_session(hook_type, pane_id, "claude-session-1", observed_at)
+    }
+
+    fn claude_event_for_session(
+        hook_type: &str,
+        pane_id: &str,
+        session_id: &str,
+        observed_at: DateTime<Utc>,
+    ) -> SourceEventV2 {
         let mut payload = serde_json::json!({});
         payload["claude_hook"] = serde_json::json!({
             "hook_id": format!("hook-{}", observed_at.timestamp()),
             "hook_type": hook_type,
-            "session_id": "claude-session-1",
+            "session_id": session_id,
             "timestamp": observed_at,
         });
         SourceEventV2 {
@@ -665,7 +823,7 @@ mod tests {
             source_kind: SourceKind::ClaudeHooks,
             tier: EvidenceTier::Deterministic,
             observed_at,
-            session_key: format!("claude:{pane_id}"),
+            session_key: session_id.to_string(),
             pane_id: Some(pane_id.to_string()),
             pane_generation: None,
             pane_birth_ts: None,
@@ -744,6 +902,17 @@ mod tests {
         let pane = &payload.panes[0];
         assert_eq!(pane.session_key, "codex:%12");
         assert_eq!(pane.presence, PresenceV3::Managed);
+        assert_eq!(
+            pane.binding_epoch_id.as_deref(),
+            Some("bnd_0000000000000001")
+        );
+        assert_eq!(
+            pane.runtime_ref,
+            Some(RuntimeRefV3 {
+                provider: Provider::Codex,
+                native_id: "thr-codex-1".to_string(),
+            })
+        );
         assert_eq!(pane.thread.lifecycle, ThreadLifecycleV3::Idle);
         assert_eq!(pane.thread.blocking, ThreadBlockingV3::None);
         assert_eq!(pane.thread.turn.outcome, TurnOutcomeV3::Completed);
@@ -856,6 +1025,7 @@ mod tests {
             assert_eq!(pane.provider, Some(Provider::Codex));
             assert_eq!(pane.thread.lifecycle, ThreadLifecycleV3::Active);
         }
+        assert_eq!(primary.binding_epoch_id, linked.binding_epoch_id);
     }
 
     #[test]
@@ -946,6 +1116,11 @@ mod tests {
         let pane = &payload.panes[0];
         assert_eq!(pane.session_key, "claude:%34");
         assert_eq!(pane.presence, PresenceV3::Managed);
+        assert_eq!(
+            pane.binding_epoch_id.as_deref(),
+            Some("bnd_0000000000000001")
+        );
+        assert!(pane.runtime_ref.is_none());
         assert_eq!(pane.agent.lifecycle, AgentLifecycleV3::Unknown);
         assert_eq!(pane.thread.lifecycle, ThreadLifecycleV3::NotLoaded);
         assert_eq!(pane.thread.blocking, ThreadBlockingV3::None);
@@ -1029,6 +1204,11 @@ mod tests {
                 pane_id: "%88".to_string(),
                 pane_instance_id: pane_instance_id.clone(),
                 provider: Some(Provider::Codex),
+                binding_epoch_id: Some("bnd_existing".to_string()),
+                runtime_ref: Some(RuntimeRefV3 {
+                    provider: Provider::Codex,
+                    native_id: "thr-codex-1".to_string(),
+                }),
                 conversation_title: None,
                 session_subtitle: None,
                 presence: PresenceV3::Managed,
@@ -1194,6 +1374,10 @@ mod tests {
         assert_eq!(pane.provider, Some(Provider::Claude));
         assert_eq!(pane.presence, PresenceV3::Managed);
         assert_eq!(pane.session_key, "claude:%34");
+        assert_eq!(
+            pane.binding_epoch_id.as_deref(),
+            Some("bnd_0000000000000001")
+        );
     }
 
     #[test]
@@ -1233,6 +1417,10 @@ mod tests {
             "initial upsert should identify thread group"
         );
         let pane = change.pane.as_ref().expect("upsert pane");
+        assert_eq!(
+            pane.binding_epoch_id.as_deref(),
+            Some("bnd_0000000000000001")
+        );
         assert_eq!(pane.thread.lifecycle, ThreadLifecycleV3::Idle);
         assert_eq!(pane.thread.turn.outcome, TurnOutcomeV3::Completed);
     }
@@ -1367,5 +1555,265 @@ mod tests {
                 .reason,
             "ahead_of_head"
         );
+    }
+
+    #[test]
+    fn binding_epoch_stays_stable_for_same_runtime() {
+        let mut live = SyncV3LiveState::default();
+        let panes = vec![tmux_pane("%21", "workbench", "@5", "claude")];
+        let mut tracker = PaneGenerationTracker::new();
+        tracker.update(&["%21"], ts(0));
+
+        live.apply_events(
+            &[claude_event_for_session(
+                "PermissionRequest",
+                "%21",
+                "claude-session-1",
+                ts(10),
+            )],
+            &panes,
+            &tracker,
+        );
+        live.reconcile(
+            &[],
+            &panes,
+            &tracker,
+            &HashMap::new(),
+            &HashMap::new(),
+            ts(11),
+        );
+        let first_epoch = live.build_bootstrap(ts(11)).panes[0]
+            .binding_epoch_id
+            .clone()
+            .expect("managed row must carry epoch");
+
+        live.apply_events(
+            &[claude_event_for_session(
+                "Stop",
+                "%21",
+                "claude-session-1",
+                ts(12),
+            )],
+            &panes,
+            &tracker,
+        );
+        live.reconcile(
+            &[],
+            &panes,
+            &tracker,
+            &HashMap::new(),
+            &HashMap::new(),
+            ts(13),
+        );
+        let second = live.build_bootstrap(ts(13)).panes[0].clone();
+
+        assert_eq!(
+            second.binding_epoch_id.as_deref(),
+            Some(first_epoch.as_str())
+        );
+        assert_eq!(
+            second.runtime_ref,
+            Some(RuntimeRefV3 {
+                provider: Provider::Claude,
+                native_id: "claude-session-1".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn binding_epoch_rotates_when_runtime_identity_changes_same_provider() {
+        let mut live = SyncV3LiveState::default();
+        let panes = vec![tmux_pane("%22", "workbench", "@5", "claude")];
+        let mut tracker = PaneGenerationTracker::new();
+        tracker.update(&["%22"], ts(0));
+
+        live.apply_events(
+            &[claude_event_for_session(
+                "PermissionRequest",
+                "%22",
+                "claude-session-1",
+                ts(10),
+            )],
+            &panes,
+            &tracker,
+        );
+        live.reconcile(
+            &[],
+            &panes,
+            &tracker,
+            &HashMap::new(),
+            &HashMap::new(),
+            ts(11),
+        );
+        let first = live.build_bootstrap(ts(11)).panes[0].clone();
+
+        live.apply_events(
+            &[claude_event_for_session(
+                "PermissionRequest",
+                "%22",
+                "claude-session-2",
+                ts(12),
+            )],
+            &panes,
+            &tracker,
+        );
+        live.reconcile(
+            &[],
+            &panes,
+            &tracker,
+            &HashMap::new(),
+            &HashMap::new(),
+            ts(13),
+        );
+        let second = live.build_bootstrap(ts(13)).panes[0].clone();
+
+        assert_ne!(first.binding_epoch_id, second.binding_epoch_id);
+        assert_eq!(
+            second.runtime_ref,
+            Some(RuntimeRefV3 {
+                provider: Provider::Claude,
+                native_id: "claude-session-2".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn runtime_identity_change_maps_to_provider_group_without_identity_replacement() {
+        let pane_instance_id = PaneInstanceId {
+            pane_id: "%25".to_string(),
+            generation: 1,
+            birth_ts: ts(0),
+        };
+        let previous = SyncV3PaneSnapshot {
+            session_name: "workbench".to_string(),
+            window_id: "@5".to_string(),
+            session_key: "claude:%25".to_string(),
+            pane_id: "%25".to_string(),
+            pane_instance_id: pane_instance_id.clone(),
+            provider: Some(Provider::Claude),
+            binding_epoch_id: Some("bnd_1".to_string()),
+            runtime_ref: Some(RuntimeRefV3 {
+                provider: Provider::Claude,
+                native_id: "claude-session-1".to_string(),
+            }),
+            conversation_title: None,
+            session_subtitle: None,
+            presence: PresenceV3::Managed,
+            agent: AgentStateV3 {
+                lifecycle: AgentLifecycleV3::Running,
+            },
+            thread: ThreadStateV3 {
+                lifecycle: ThreadLifecycleV3::Active,
+                blocking: ThreadBlockingV3::None,
+                execution: ThreadExecutionV3::ToolRunning,
+                flags: ThreadFlagsV3::default(),
+                turn: empty_turn(),
+            },
+            pending_requests: Vec::new(),
+            attention: AttentionSummaryV3::none(),
+            freshness: FreshnessSummaryV3::fresh(),
+            provider_raw: ProviderRawEnvelopeV3::default(),
+            updated_at: ts(10),
+        };
+        let mut next = previous.clone();
+        next.binding_epoch_id = Some("bnd_2".to_string());
+        next.runtime_ref = Some(RuntimeRefV3 {
+            provider: Provider::Claude,
+            native_id: "claude-session-2".to_string(),
+        });
+
+        let field_groups = diff_field_groups(&previous, &next);
+        assert!(
+            field_groups.contains(&SyncV3FieldGroupV3::Provider),
+            "binding/runtime handoff must ride the provider group for v3 compatibility"
+        );
+        assert!(
+            !field_groups.contains(&SyncV3FieldGroupV3::Identity),
+            "same-pane runtime handoff must not force identity replacement"
+        );
+    }
+
+    #[test]
+    fn binding_epoch_does_not_rotate_on_freshness_only_changes() {
+        let mut live = SyncV3LiveState::default();
+        let panes = vec![tmux_pane("%23", "workbench", "@5", "codex")];
+        let mut tracker = PaneGenerationTracker::new();
+        tracker.update(&["%23"], ts(0));
+
+        live.apply_events(
+            &[codex_event("task_started", "%23", ts(10))],
+            &panes,
+            &tracker,
+        );
+        live.reconcile(
+            &[],
+            &panes,
+            &tracker,
+            &HashMap::new(),
+            &HashMap::new(),
+            ts(11),
+        );
+        let first_epoch = live.build_bootstrap(ts(11)).panes[0]
+            .binding_epoch_id
+            .clone()
+            .expect("managed row must carry epoch");
+
+        live.reconcile(
+            &[],
+            &panes,
+            &tracker,
+            &HashMap::new(),
+            &HashMap::new(),
+            ts(26),
+        );
+        let second = live.build_bootstrap(ts(26)).panes[0].clone();
+
+        assert_eq!(
+            second.binding_epoch_id.as_deref(),
+            Some(first_epoch.as_str())
+        );
+        assert_eq!(second.freshness.snapshot, FreshnessState::Down);
+    }
+
+    #[test]
+    fn demotion_to_unmanaged_clears_binding_epoch_and_runtime_ref() {
+        let mut live = SyncV3LiveState::default();
+        let panes = vec![tmux_pane("%24", "workbench", "@5", "claude")];
+        let mut tracker = PaneGenerationTracker::new();
+        tracker.update(&["%24"], ts(0));
+
+        live.apply_events(
+            &[claude_event_for_session(
+                "PermissionRequest",
+                "%24",
+                "claude-session-1",
+                ts(10),
+            )],
+            &panes,
+            &tracker,
+        );
+        live.reconcile(
+            &[],
+            &panes,
+            &tracker,
+            &HashMap::new(),
+            &HashMap::new(),
+            ts(11),
+        );
+
+        live.demote_panes_to_unmanaged(&["%24".to_string()]);
+        live.reconcile(
+            &[],
+            &panes,
+            &tracker,
+            &HashMap::new(),
+            &HashMap::new(),
+            ts(12),
+        );
+        let pane = live.build_bootstrap(ts(12)).panes[0].clone();
+
+        assert_eq!(pane.presence, PresenceV3::Unmanaged);
+        assert!(pane.binding_epoch_id.is_none());
+        assert!(pane.runtime_ref.is_none());
     }
 }

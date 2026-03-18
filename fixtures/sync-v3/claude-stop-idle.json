@@ -13,6 +13,11 @@
         "birth_ts": "2026-03-09T20:14:05Z"
       },
       "provider": "claude",
+      "binding_epoch_id": "bnd_claude_review_01",
+      "runtime_ref": {
+        "provider": "claude",
+        "native_id": "claude-session-review-01"
+      },
       "presence": "managed",
       "agent": {
         "lifecycle": "running"

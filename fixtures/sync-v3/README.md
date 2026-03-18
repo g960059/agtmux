@@ -12,6 +12,9 @@ Rules for these fixtures:
   - `session_key`
   - `pane_id`
   - `pane_instance_id`
+- `binding_epoch_id` is required for managed rows and absent for unmanaged rows.
+- `runtime_ref` is optional and appears only when the daemon knows a
+  provider-native runtime ID.
 - `attention` is derived summary only.
 - `pending_requests[].request_id` is the request identity truth.
 - `provider_raw` is opaque/debuggable and may evolve additively.
@@ -30,3 +33,4 @@ Scenario files:
 The contract freeze is documented in:
 
 - `docs/decisions/ADR-20260309-sync-v3-contract-freeze.md`
+- `docs/decisions/ADR-20260318-sync-v3-binding-epoch-extension.md`

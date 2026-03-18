@@ -13,6 +13,11 @@
         "birth_ts": "2026-03-09T20:09:54Z"
       },
       "provider": "codex",
+      "binding_epoch_id": "bnd_codex_workbench_01",
+      "runtime_ref": {
+        "provider": "codex",
+        "native_id": "thr-codex-workbench-01"
+      },
       "presence": "managed",
       "agent": {
         "lifecycle": "completed"

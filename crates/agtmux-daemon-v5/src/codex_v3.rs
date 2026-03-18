@@ -378,7 +378,8 @@ mod tests {
     use super::*;
     use agtmux_core_v5::sync_v3::{
         AgentStateV3, AttentionSummaryV3, FreshnessSummaryV3, PresenceV3, ProviderRawEnvelopeV3,
-        SyncV3PaneSnapshot, ThreadBlockingV3, ThreadFlagsV3, ThreadStateV3, TurnStateV3,
+        RuntimeRefV3, SyncV3PaneSnapshot, ThreadBlockingV3, ThreadFlagsV3, ThreadStateV3,
+        TurnStateV3,
     };
     use agtmux_core_v5::types::{ActivityState, EvidenceTier, PaneInstanceId};
     use chrono::TimeZone;
@@ -401,6 +402,11 @@ mod tests {
                 birth_ts: ts(0),
             },
             provider: Some(Provider::Codex),
+            binding_epoch_id: Some("bnd_test".to_string()),
+            runtime_ref: Some(RuntimeRefV3 {
+                provider: Provider::Codex,
+                native_id: "thr-codex-1".to_string(),
+            }),
             conversation_title: None,
             session_subtitle: None,
             presence: PresenceV3::Managed,

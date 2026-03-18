@@ -232,6 +232,12 @@ pub struct ProviderRawEnvelopeV3 {
     pub copilot: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeRefV3 {
+    pub provider: Provider,
+    pub native_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SyncV3PaneSnapshot {
     pub session_name: String,
@@ -240,6 +246,10 @@ pub struct SyncV3PaneSnapshot {
     pub pane_id: String,
     pub pane_instance_id: PaneInstanceId,
     pub provider: Option<Provider>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding_epoch_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_ref: Option<RuntimeRefV3>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conversation_title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -271,6 +281,42 @@ impl SyncV3PaneSnapshot {
 
         if self.pane_instance_id.pane_id != self.pane_id {
             return Err("pane_instance_id.pane_id must match pane_id".to_string());
+        }
+
+        match self.presence {
+            PresenceV3::Managed => {
+                let binding_epoch_id = self
+                    .binding_epoch_id
+                    .as_deref()
+                    .ok_or_else(|| "managed pane requires binding_epoch_id".to_string())?;
+                if binding_epoch_id.is_empty() {
+                    return Err("managed pane requires non-empty binding_epoch_id".to_string());
+                }
+            }
+            PresenceV3::Unmanaged | PresenceV3::Missing => {
+                if self.binding_epoch_id.is_some() {
+                    return Err(
+                        "unmanaged or missing pane must not include binding_epoch_id".to_string(),
+                    );
+                }
+                if self.runtime_ref.is_some() {
+                    return Err(
+                        "unmanaged or missing pane must not include runtime_ref".to_string()
+                    );
+                }
+            }
+        }
+
+        if let Some(runtime_ref) = &self.runtime_ref {
+            let provider = self
+                .provider
+                .ok_or_else(|| "runtime_ref requires top-level provider".to_string())?;
+            if runtime_ref.provider != provider {
+                return Err("runtime_ref.provider must match pane provider".to_string());
+            }
+            if runtime_ref.native_id.is_empty() {
+                return Err("runtime_ref.native_id must not be empty".to_string());
+            }
         }
 
         if self
@@ -671,6 +717,42 @@ mod tests {
             .validate()
             .expect_err("blocking must match requests");
         assert!(err.contains("waiting_approval"));
+    }
+
+    #[test]
+    fn managed_row_requires_binding_epoch_id() {
+        let mut payload = parse_fixture("codex-running.json");
+        payload.panes[0].binding_epoch_id = None;
+
+        let err = payload
+            .validate()
+            .expect_err("managed pane must require epoch");
+        assert!(err.contains("binding_epoch_id"));
+    }
+
+    #[test]
+    fn unmanaged_row_must_not_include_runtime_fields() {
+        let mut payload = parse_fixture("unmanaged-demotion.json");
+        payload.panes[0].binding_epoch_id = Some("bnd_test".to_string());
+
+        let err = payload
+            .validate()
+            .expect_err("unmanaged pane must reject epoch");
+        assert!(err.contains("binding_epoch_id"));
+    }
+
+    #[test]
+    fn runtime_ref_provider_must_match_top_level_provider() {
+        let mut payload = parse_fixture("codex-running.json");
+        payload.panes[0].runtime_ref = Some(RuntimeRefV3 {
+            provider: Provider::Claude,
+            native_id: "sess-1".to_string(),
+        });
+
+        let err = payload
+            .validate()
+            .expect_err("provider mismatch must fail validation");
+        assert!(err.contains("runtime_ref.provider"));
     }
 
     #[test]

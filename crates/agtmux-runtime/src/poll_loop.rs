@@ -21,7 +21,7 @@ use agtmux_source_claude_hooks::source::SourceState as ClaudeSourceState;
 use agtmux_source_claude_jsonl::discovery::{PaneDiscoveryHint, discovery_from_transcript_path};
 use agtmux_source_claude_jsonl::source::ClaudeJsonlSourceState;
 use agtmux_source_claude_jsonl::watcher::SessionFileWatcher;
-use agtmux_source_codex_jsonl::discovery::CodexPaneHint;
+use agtmux_source_codex_jsonl::discovery::{CodexPaneHint, CodexSessionDiscovery};
 use agtmux_source_codex_jsonl::source::CodexJsonlSourceState;
 use agtmux_source_codex_jsonl::watcher::CodexSessionFileWatcher;
 use agtmux_source_poller::source::{PollerSourceState, poll_pane};
@@ -385,6 +385,49 @@ fn sync_conversation_subtitle<'a, I>(
     } else {
         conversation_subtitles.remove(session_key);
     }
+}
+
+fn codex_title_fallbacks_from_real_sessions(
+    hints: &[CodexPaneHint],
+    discoveries: &[CodexSessionDiscovery],
+    conversation_titles: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    let panes_needing_title = discoveries
+        .iter()
+        .filter(|disc| {
+            disc.explicit_jsonl_path.is_some()
+                && !conversation_titles.contains_key(&disc.session_key)
+        })
+        .map(|disc| disc.pane_id.as_str())
+        .collect::<HashSet<_>>();
+    if panes_needing_title.is_empty() {
+        return HashMap::new();
+    }
+
+    // Pane-bound exec spools do not carry the original user prompt, so use the
+    // same CWD assignment pass against the real Codex session files to recover
+    // a stable first-prompt title for the pane-scoped session key.
+    let title_hints = hints
+        .iter()
+        .filter(|hint| panes_needing_title.contains(hint.pane_id.as_str()))
+        .cloned()
+        .map(|mut hint| {
+            hint.explicit_jsonl_path = None;
+            hint.session_key_override = None;
+            hint.existing_jsonl_path = None;
+            hint
+        })
+        .collect::<Vec<_>>();
+
+    CodexJsonlSourceState::discover_sessions(&title_hints)
+        .into_iter()
+        .filter_map(|disc| {
+            let watcher = CodexSessionFileWatcher::new(disc.jsonl_path.clone());
+            watcher
+                .last_first_prompt()
+                .map(|prompt| (disc.pane_id, prompt.to_string()))
+        })
+        .collect()
 }
 
 fn update_focus_state(st: &mut DaemonState, now: chrono::DateTime<Utc>) {
@@ -756,8 +799,17 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
                         .map(|prompt| (disc.session_key.clone(), prompt.to_string()))
                 })
                 .collect();
+            let codex_title_fallbacks = codex_title_fallbacks_from_real_sessions(
+                &codex_hints,
+                &discoveries,
+                &st.conversation_titles,
+            );
             for disc in &discoveries {
-                if let Some(first_prompt) = codex_first_prompts.get(&disc.session_key) {
+                if let Some(first_prompt) = codex_first_prompts
+                    .get(&disc.session_key)
+                    .cloned()
+                    .or_else(|| codex_title_fallbacks.get(&disc.pane_id).cloned())
+                {
                     st.conversation_titles
                         .entry(disc.session_key.clone())
                         .or_insert_with(|| first_prompt.clone());
@@ -2267,6 +2319,68 @@ mod tests {
             st.gateway.source_cursor(SourceKind::CodexJsonl).is_some(),
             "exec NDJSON spool should feed the existing CodexJsonl source cursor"
         );
+    }
+
+    #[tokio::test]
+    async fn poll_tick_exec_spool_uses_real_session_prompt_for_conversation_title() {
+        let _env_lock = ENV_LOCK.lock().expect("env lock");
+        let temp = temp_dir("codex-exec-title");
+        let codex_home = temp.join("codex-home");
+        let project_dir = temp.join("project");
+        fs::create_dir_all(&codex_home).expect("codex home dir");
+        fs::create_dir_all(&project_dir).expect("project dir");
+        let _codex_home = TestEnvGuard::set("CODEX_HOME", codex_home.to_str().expect("utf8 path"));
+
+        write_codex_session_file_named(
+            &codex_home,
+            &project_dir,
+            "title-fallback.jsonl",
+            &[
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Count lines in /etc/hosts and write the count to result.txt"}]}}"#,
+                r#"{"type":"event_msg","payload":{"type":"user_message","message":"Count lines in /etc/hosts and write the count to result.txt"}}"#,
+                r#"{"type":"event_msg","payload":{"type":"task_started"}}"#,
+            ],
+        );
+
+        let backend = Arc::new(
+            FakeTmuxBackend::new().with_pane_cwd(
+                "%1",
+                "vm agtmux",
+                "node",
+                concat!(
+                    r#"{"type":"thread.started","thread_id":"thr_1"}"#,
+                    "\n",
+                    r#"{"type":"turn.started","turn_id":"turn_1"}"#,
+                    "\n",
+                    r#"{"type":"item.started","item":{"id":"item_1","type":"command_execution","status":"in_progress","command":"sleep 30"}}"#
+                ),
+                project_dir.to_str().expect("utf8 path"),
+            ),
+        );
+        let state = new_state();
+
+        poll_tick(&backend, &state).await.expect("tick");
+
+        let mut st = state.lock().await;
+        assert_eq!(
+            st.conversation_titles.get("codex:%1").map(String::as_str),
+            Some("Count lines in /etc/hosts and write the count to result.txt")
+        );
+
+        let payload: UiBootstrapV3 = serde_json::from_value(build_ui_bootstrap_v3(&mut st))
+            .expect("valid ui.bootstrap.v3 payload");
+        let pane = payload
+            .panes
+            .iter()
+            .find(|pane| pane.pane_id == "%1")
+            .expect("exec pane row");
+        assert_eq!(
+            pane.conversation_title.as_deref(),
+            Some("Count lines in /etc/hosts and write the count to result.txt")
+        );
+
+        drop(st);
+        let _ = fs::remove_dir_all(temp);
     }
 
     #[tokio::test]

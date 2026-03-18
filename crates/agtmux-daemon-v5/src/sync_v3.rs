@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 
 use agtmux_core_v5::sync_v3::{
     AgentLifecycleV3, AttentionKindV3, AttentionPriorityV3, AttentionSummaryV3, FreshnessSummaryV3,
-    PendingRequestKindV3, PendingRequestStatusV3, PendingRequestV3, SyncV3PaneSnapshot,
-    ThreadBlockingV3, ThreadExecutionV3, ThreadLifecycleV3, TurnOutcomeV3, TurnStateV3,
+    PendingRequestKindV3, PendingRequestStatusV3, PendingRequestV3, RuntimeRefV3,
+    SyncV3PaneSnapshot, ThreadBlockingV3, ThreadExecutionV3, ThreadLifecycleV3, TurnOutcomeV3,
+    TurnStateV3,
 };
 use agtmux_core_v5::types::FreshnessState;
 use chrono::{DateTime, Utc};
@@ -157,6 +158,10 @@ impl SyncV3Reducer {
 
     pub fn snapshot(&self) -> &SyncV3PaneSnapshot {
         &self.snapshot
+    }
+
+    pub fn set_runtime_ref(&mut self, runtime_ref: Option<RuntimeRefV3>) {
+        self.snapshot.runtime_ref = runtime_ref;
     }
 
     pub fn into_snapshot(self) -> SyncV3PaneSnapshot {
@@ -406,6 +411,11 @@ mod tests {
                 birth_ts: ts(0),
             },
             provider: Some(Provider::Codex),
+            binding_epoch_id: Some("bnd_test".to_string()),
+            runtime_ref: Some(RuntimeRefV3 {
+                provider: Provider::Codex,
+                native_id: "thr-test".to_string(),
+            }),
             conversation_title: None,
             session_subtitle: None,
             presence: PresenceV3::Managed,

@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# scenarios/codex-title.sh — conversation_title from Codex App Server thread/list
+# scenarios/codex-title.sh — conversation_title for managed Codex exec panes
 #
-# Verifies: The thread name/preview returned by the Codex App Server thread/list
-# endpoint is exposed as conversation_title while the pane is managed, and exact
-# shell demotion clears that title if Codex exits back to the shell.
+# Verifies: the daemon exposes a non-empty conversation_title while a Codex exec
+# pane is managed, and exact shell demotion clears that title if Codex exits
+# back to the shell.
 #
-# Note: Codex does not support in-session rename like Claude's /rename.
-# The title (name/preview) is set by the App Server from the thread metadata.
+# Note: `codex exec --json` pane capture drives semantic state, but the original
+# prompt lives in the real Codex session transcript. The daemon must surface a
+# stable title even when the pane-scoped exec spool is the active semantic path.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../harness/common.sh"
@@ -56,12 +57,12 @@ wait_for_agtmux_state_any "$SOCKET" "$PANE_ID" "activity_state" "running waiting
 
 pass "Phase 1: Codex pane managed (provider=codex)"
 
-# ── Phase 2: Verify conversation_title from App Server while managed ──────
+# ── Phase 2: Verify conversation_title while managed ───────────────────────
 #
-# Allow up to 30s for the App Server to report the thread and for the daemon to
-# extract and expose it on the managed pane row.
+# Allow up to 30s for the daemon to discover the Codex session transcript and
+# expose a non-empty title on the managed pane row.
 
-log "waiting for conversation_title from App Server thread/list..."
+log "waiting for conversation_title from Codex session transcript..."
 actual_title="null"
 elapsed=0
 while [ "$elapsed" -lt 30 ]; do
@@ -76,10 +77,10 @@ done
 log "conversation_title='$actual_title'"
 
 if [ "$actual_title" = "null" ] || [ -z "$actual_title" ]; then
-    fail "conversation_title is null/empty for Codex pane — App Server thread/list may not return name/preview fields"
+    fail "conversation_title is null/empty for Codex pane — transcript-backed title extraction failed"
 fi
 
-pass "Phase 2: conversation_title='$actual_title' (non-empty, from App Server)"
+pass "Phase 2: conversation_title='$actual_title' (non-empty while managed)"
 
 # ── Phase 3: Completion may stay managed or demote back to shell ──────────
 
