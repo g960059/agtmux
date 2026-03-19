@@ -27,7 +27,8 @@ use agtmux_source_codex_jsonl::watcher::CodexSessionFileWatcher;
 use agtmux_source_poller::source::{PollerSourceState, poll_pane};
 use agtmux_tmux_v5::{
     PaneGenerationTracker, TmuxCommandRunner, TmuxExecutor, TmuxPaneInfo, capture_pane,
-    capture_pane_joined, list_panes, scan_all_processes, to_pane_snapshot,
+    capture_pane_joined, collect_process_tree_pids, list_panes, scan_all_processes,
+    to_pane_snapshot,
 };
 
 use crate::cli::DaemonOpts;
@@ -332,6 +333,78 @@ fn is_codex_jsonl_candidate(process_hint: Option<&str>, current_cmd: &str) -> bo
     }
 }
 
+fn capture_has_live_codex_json_signal(capture_lines: &[String]) -> bool {
+    const TOKENS: &[&str] = &[
+        "\"type\":\"thread.started\"",
+        "\"type\":\"turn.started\"",
+        "\"type\":\"item.started\"",
+        "\"status\":\"in_progress\"",
+    ];
+
+    capture_lines.iter().rev().take(16).any(|line| {
+        let lower = line.to_ascii_lowercase();
+        TOKENS.iter().any(|token| lower.contains(token))
+    })
+}
+
+fn capture_tail_has_shell_prompt(capture_lines: &[String]) -> bool {
+    capture_lines
+        .iter()
+        .rev()
+        .find_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        })
+        .is_some_and(|trimmed| {
+            trimmed.ends_with("❯")
+                || trimmed.ends_with('$')
+                || trimmed.ends_with('%')
+                || trimmed.ends_with('#')
+        })
+}
+
+fn capture_mentions_codex_exec(capture_lines: &[String]) -> bool {
+    const TOKENS: &[&str] = &["codex exec", "codex --yolo"];
+
+    capture_lines.iter().rev().take(32).any(|line| {
+        let lower = line.to_ascii_lowercase();
+        TOKENS.iter().any(|token| lower.contains(token))
+    })
+}
+
+fn is_shell_pane(process_hint: Option<&str>, current_cmd: &str) -> bool {
+    const SHELL_CMDS: &[&str] = &[
+        "zsh", "bash", "fish", "sh", "csh", "tcsh", "ksh", "dash", "nu", "pwsh",
+    ];
+
+    match process_hint {
+        Some("shell") => true,
+        Some("codex") | Some("claude") | Some("runtime_unknown") => false,
+        Some(_) => false,
+        None => SHELL_CMDS.contains(&current_cmd),
+    }
+}
+
+fn is_codex_exec_probe_candidate(
+    process_hint: Option<&str>,
+    current_cmd: &str,
+    capture_lines: &[String],
+) -> bool {
+    if is_codex_jsonl_candidate(process_hint, current_cmd) {
+        return true;
+    }
+
+    if !is_shell_pane(process_hint, current_cmd) || capture_tail_has_shell_prompt(capture_lines) {
+        return false;
+    }
+
+    capture_mentions_codex_exec(capture_lines) || capture_has_live_codex_json_signal(capture_lines)
+}
+
 fn is_claude_jsonl_candidate(
     process_hint: Option<&str>,
     current_cmd: &str,
@@ -631,6 +704,10 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
         .iter()
         .map(|s| (s.pane_id.as_str(), s.current_cmd.as_str()))
         .collect();
+    let snapshot_capture: HashMap<&str, &[String]> = snapshots
+        .iter()
+        .map(|s| (s.pane_id.as_str(), s.capture_lines.as_slice()))
+        .collect();
 
     let mut codex_exec_joined_captures: HashMap<String, Vec<String>> = HashMap::new();
     if !metadata_backoff_active {
@@ -640,7 +717,11 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
                 .get(pane.pane_id.as_str())
                 .copied()
                 .unwrap_or("");
-            if !is_codex_jsonl_candidate(process_hint, current_cmd) {
+            let raw_capture_lines = snapshot_capture
+                .get(pane.pane_id.as_str())
+                .copied()
+                .unwrap_or(&[]);
+            if !is_codex_exec_probe_candidate(process_hint, current_cmd, raw_capture_lines) {
                 continue;
             }
 
@@ -709,7 +790,11 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
             .filter(|p| {
                 let process_hint = snapshot_hint.get(p.pane_id.as_str()).copied().flatten();
                 let current_cmd = snapshot_cmd.get(p.pane_id.as_str()).copied().unwrap_or("");
-                is_codex_jsonl_candidate(process_hint, current_cmd)
+                let raw_capture_lines = snapshot_capture
+                    .get(p.pane_id.as_str())
+                    .copied()
+                    .unwrap_or(&[]);
+                is_codex_exec_probe_candidate(process_hint, current_cmd, raw_capture_lines)
             })
             .map(|p| p.pane_id.as_str())
             .collect();
@@ -723,7 +808,12 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
                 .get(pane.pane_id.as_str())
                 .copied()
                 .unwrap_or("");
-            if !is_codex_jsonl_candidate(process_hint, current_cmd) {
+            let raw_capture_lines = snapshot_capture
+                .get(pane.pane_id.as_str())
+                .copied()
+                .unwrap_or(&[]);
+            let discovery_candidate = is_codex_jsonl_candidate(process_hint, current_cmd);
+            if !is_codex_exec_probe_candidate(process_hint, current_cmd, raw_capture_lines) {
                 continue;
             }
 
@@ -765,9 +855,17 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
                 tracker.discovery_hint(&pane.pane_id)
             };
 
+            if !discovery_candidate && explicit_spool_hint.is_none() {
+                continue;
+            }
+
             codex_hints.push(CodexPaneHint {
                 pane_id: pane.pane_id.clone(),
                 pane_pid: pane.pane_pid,
+                candidate_pids: pane
+                    .pane_pid
+                    .map(|pane_pid| collect_process_tree_pids(pane_pid, &process_map))
+                    .unwrap_or_default(),
                 cwd: pane.current_path.clone(),
                 pane_active: pane.active,
                 session_attached: pane.session_attached,
@@ -880,6 +978,10 @@ async fn poll_tick_with_cache<R: TmuxCommandRunner + 'static>(
                     pane_generation: pane_gen,
                     pane_birth_ts: pane_birth,
                     pane_pid: p.pane_pid,
+                    candidate_pids: p
+                        .pane_pid
+                        .map(|pane_pid| collect_process_tree_pids(pane_pid, &process_map))
+                        .unwrap_or_default(),
                 }
             })
             .collect();
@@ -1399,6 +1501,8 @@ mod tests {
         list_panes_output: String,
         /// Per-pane capture data: pane_id -> capture lines.
         captures: HashMap<String, String>,
+        /// Per-pane joined capture data for `capture-pane -J`.
+        joined_captures: HashMap<String, String>,
         /// If set, list-panes will fail with this error.
         list_panes_error: Option<String>,
         /// Set of pane_ids whose capture should fail.
@@ -1410,6 +1514,7 @@ mod tests {
             Self {
                 list_panes_output: String::new(),
                 captures: HashMap::new(),
+                joined_captures: HashMap::new(),
                 list_panes_error: None,
                 capture_errors: HashSet::new(),
             }
@@ -1420,7 +1525,7 @@ mod tests {
         }
 
         fn with_pane_cwd_flags(
-            mut self,
+            self,
             pane_id: &str,
             session: &str,
             cmd: &str,
@@ -1429,16 +1534,46 @@ mod tests {
             active: bool,
             session_attached: bool,
         ) -> Self {
+            self.with_pane_cwd_flags_pid(
+                pane_id,
+                session,
+                cmd,
+                capture,
+                cwd,
+                active,
+                session_attached,
+                None,
+            )
+        }
+
+        fn with_pane_cwd_flags_pid(
+            mut self,
+            pane_id: &str,
+            session: &str,
+            cmd: &str,
+            capture: &str,
+            cwd: &str,
+            active: bool,
+            session_attached: bool,
+            pane_pid: Option<u32>,
+        ) -> Self {
             let active = if active { 1 } else { 0 };
             let session_attached = if session_attached { 1 } else { 0 };
-            let line = format!(
-                "$0\t{session}\t@0\tdev\t{pane_id}\t{cmd}\t{cwd}\t{cmd}\t200\t50\t{active}\t{session_attached}"
-            );
+            let line = match pane_pid {
+                Some(pane_pid) => format!(
+                    "$0\t{session}\t@0\tdev\t{pane_id}\t{cmd}\t{cwd}\t{cmd}\t200\t50\t{active}\t{session_attached}\t{pane_pid}"
+                ),
+                None => format!(
+                    "$0\t{session}\t@0\tdev\t{pane_id}\t{cmd}\t{cwd}\t{cmd}\t200\t50\t{active}\t{session_attached}"
+                ),
+            };
             if !self.list_panes_output.is_empty() {
                 self.list_panes_output.push('\n');
             }
             self.list_panes_output.push_str(&line);
             self.captures
+                .insert(pane_id.to_string(), capture.to_string());
+            self.joined_captures
                 .insert(pane_id.to_string(), capture.to_string());
             self
         }
@@ -1454,6 +1589,27 @@ mod tests {
             self.with_pane_cwd_flags(pane_id, session, cmd, capture, cwd, true, true)
         }
 
+        fn with_pane_cwd_pid(
+            self,
+            pane_id: &str,
+            session: &str,
+            cmd: &str,
+            capture: &str,
+            cwd: &str,
+            pane_pid: u32,
+        ) -> Self {
+            self.with_pane_cwd_flags_pid(
+                pane_id,
+                session,
+                cmd,
+                capture,
+                cwd,
+                true,
+                true,
+                Some(pane_pid),
+            )
+        }
+
         fn with_list_panes_error(mut self, err: &str) -> Self {
             self.list_panes_error = Some(err.to_string());
             self
@@ -1461,6 +1617,12 @@ mod tests {
 
         fn with_capture_error(mut self, pane_id: &str) -> Self {
             self.capture_errors.insert(pane_id.to_string());
+            self
+        }
+
+        fn with_joined_capture(mut self, pane_id: &str, capture: &str) -> Self {
+            self.joined_captures
+                .insert(pane_id.to_string(), capture.to_string());
             self
         }
     }
@@ -1486,6 +1648,14 @@ mod tests {
                     return Err(TmuxError::CommandFailed(format!(
                         "capture failed for {pane_id}"
                     )));
+                }
+
+                if args.contains(&"-J") {
+                    return Ok(self
+                        .joined_captures
+                        .get(pane_id)
+                        .cloned()
+                        .unwrap_or_default());
                 }
 
                 return Ok(self.captures.get(pane_id).cloned().unwrap_or_default());
@@ -1616,6 +1786,55 @@ mod tests {
 
     fn write_claude_session_file(home_dir: &Path, cwd: &Path, lines: &[&str]) -> PathBuf {
         write_claude_session_file_named(home_dir, cwd, "idle-proof.jsonl", lines)
+    }
+
+    fn write_claude_sessions_index(
+        home_dir: &Path,
+        cwd: &Path,
+        entries: serde_json::Value,
+    ) -> PathBuf {
+        let canonical_cwd = std::fs::canonicalize(cwd).expect("canonical cwd");
+        let projects_dir = home_dir.join(".claude").join("projects");
+        let project_dir = projects_dir.join(agtmux_source_claude_jsonl::discovery::encode_path(
+            canonical_cwd.to_str().expect("utf8 path"),
+        ));
+        fs::create_dir_all(&project_dir).expect("claude project dir");
+
+        let index_path = project_dir.join("sessions-index.json");
+        let payload = serde_json::json!({
+            "version": 1,
+            "originalPath": canonical_cwd,
+            "entries": entries,
+        });
+        fs::write(
+            &index_path,
+            serde_json::to_string(&payload).expect("sessions index json"),
+        )
+        .expect("sessions index file");
+        index_path
+    }
+
+    fn spawn_descendant_file_holder_in_dir(
+        path: &Path,
+        cwd: &Path,
+        process_marker: &str,
+    ) -> std::process::Child {
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(
+                "python3 -c 'import sys,time; f=open(sys.argv[1], \"r\"); time.sleep(30)' \"$1\" \"$2\" & wait",
+            )
+            .arg("sh")
+            .arg(path)
+            .arg(process_marker)
+            .current_dir(cwd)
+            .spawn()
+            .expect("spawn descendant file holder")
+    }
+
+    fn spawn_descendant_file_holder(path: &Path, process_marker: &str) -> std::process::Child {
+        let cwd = path.parent().unwrap_or_else(|| Path::new("/"));
+        spawn_descendant_file_holder_in_dir(path, cwd, process_marker)
     }
 
     // --- Integration tests ---
@@ -2384,6 +2603,204 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn poll_tick_codex_same_pane_rebinds_from_stale_aborted_session_to_new_open_transcript() {
+        let _env_lock = ENV_LOCK.lock().expect("env lock");
+        let temp = temp_dir("codex-session-rebind");
+        let codex_home = temp.join("codex-home");
+        let project_dir = temp.join("project");
+        fs::create_dir_all(&codex_home).expect("codex home dir");
+        fs::create_dir_all(&project_dir).expect("project dir");
+        let _codex_home = TestEnvGuard::set("CODEX_HOME", codex_home.to_str().expect("utf8 path"));
+
+        let old_session_path = write_codex_session_file_named(
+            &codex_home,
+            &project_dir,
+            "rollout-old.jsonl",
+            &[
+                r#"{"timestamp":"2026-03-19T12:08:38.811Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Old interrupted prompt"}]}}"#,
+                r#"{"timestamp":"2026-03-19T12:08:38.812Z","type":"event_msg","payload":{"type":"user_message","message":"Old interrupted prompt"}}"#,
+                r#"{"timestamp":"2026-03-19T12:08:38.813Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-old"}}"#,
+                r#"{"timestamp":"2026-03-19T12:08:43.822Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call-old"}}"#,
+                r#"{"timestamp":"2026-03-19T12:09:02.482Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-old","output":"aborted by user after 18.7s"}}"#,
+                r#"{"timestamp":"2026-03-19T12:09:02.482Z","type":"event_msg","payload":{"type":"turn_aborted","turn_id":"turn-old","reason":"interrupted"}}"#,
+            ],
+        );
+
+        let state = new_state();
+        let backend1 = Arc::new(FakeTmuxBackend::new().with_pane_cwd(
+            "%162",
+            "main",
+            "node",
+            "Codex waiting for input",
+            project_dir.to_str().expect("utf8 path"),
+        ));
+        poll_tick(&backend1, &state).await.expect("initial tick");
+
+        {
+            let st = state.lock().await;
+            let watcher = st
+                .codex_jsonl_watchers
+                .get("%162")
+                .expect("old session watcher");
+            assert_eq!(watcher.path(), old_session_path.as_path());
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let current_session_path = write_codex_session_file_named(
+            &codex_home,
+            &project_dir,
+            "rollout-current.jsonl",
+            &[
+                r#"{"timestamp":"2026-03-19T12:36:46.314Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Fresh running prompt"}]}}"#,
+                r#"{"timestamp":"2026-03-19T12:36:46.314Z","type":"event_msg","payload":{"type":"user_message","message":"Fresh running prompt"}}"#,
+                r#"{"timestamp":"2026-03-19T12:36:46.315Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-current"}}"#,
+                r#"{"timestamp":"2026-03-19T12:36:50.530Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call-current"}}"#,
+            ],
+        );
+        let mut holder = spawn_descendant_file_holder_in_dir(
+            &current_session_path,
+            &project_dir,
+            "codex-descendant",
+        );
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let canonical_current_session_path =
+            std::fs::canonicalize(&current_session_path).expect("canonical current session path");
+
+        let backend2 = Arc::new(FakeTmuxBackend::new().with_pane_cwd_pid(
+            "%162",
+            "main",
+            "node",
+            "Codex is running",
+            project_dir.to_str().expect("utf8 path"),
+            holder.id(),
+        ));
+        poll_tick(&backend2, &state).await.expect("rebind tick");
+
+        let mut st = state.lock().await;
+        let watcher = st
+            .codex_jsonl_watchers
+            .get("%162")
+            .expect("current session watcher");
+        assert_eq!(
+            watcher.path(),
+            canonical_current_session_path.as_path(),
+            "same pane should switch to the newly opened transcript instead of keeping the stale aborted session"
+        );
+
+        let payload: UiBootstrapV3 = serde_json::from_value(build_ui_bootstrap_v3(&mut st))
+            .expect("valid ui.bootstrap.v3 payload");
+        let pane = payload
+            .panes
+            .iter()
+            .find(|pane| pane.pane_id == "%162")
+            .expect("codex pane row");
+        assert_eq!(pane.provider, Some(Provider::Codex));
+        assert_eq!(pane.presence, agtmux_core_v5::sync_v3::PresenceV3::Managed);
+        assert_eq!(
+            pane.runtime_ref
+                .as_ref()
+                .map(|runtime| runtime.native_id.as_str()),
+            Some("rollout-current"),
+            "bootstrap should rebind to the new session file opened by the live Codex process"
+        );
+        assert_eq!(
+            pane.conversation_title.as_deref(),
+            Some("Fresh running prompt")
+        );
+        assert_eq!(pane.thread.lifecycle, ThreadLifecycleV3::Active);
+        assert_eq!(pane.thread.execution, ThreadExecutionV3::ToolRunning);
+
+        drop(st);
+        let _ = holder.kill();
+        let _ = holder.wait();
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[tokio::test]
+    async fn poll_tick_shell_child_codex_exec_promotes_exact_pane_to_sync_v3_running_via_joined_spool()
+     {
+        let _env_lock = ENV_LOCK.lock().expect("env lock");
+        let temp = temp_dir("shell-child-codex-exec");
+        let home_dir = temp.join("home");
+        let project_dir = temp.join("project");
+        fs::create_dir_all(&home_dir).expect("home dir");
+        fs::create_dir_all(&project_dir).expect("project dir");
+        let _home = TestEnvGuard::set("HOME", home_dir.to_str().expect("utf8 path"));
+
+        let cwd = project_dir.to_str().expect("utf8 path");
+        let raw_capture = concat!(
+            "$ codex exec --json --dangerously-bypass-approvals-and-sandbox 'sleep 30'\n",
+            "{\"type\":\"thread.starte\n",
+            "d\",\"thread_id\":\"thr_1\"}\n",
+            "{\"type\":\"item.started\",\"item\":{\"id\":\"item_1\",\"type\":\"command_exe\n",
+            "cution\",\"status\":\"in_progress\",\"command\":\"sleep 30\"}}"
+        );
+        let joined_capture = concat!(
+            r#"{"type":"thread.started","thread_id":"thr_1"}"#,
+            "\n",
+            r#"{"type":"turn.started","turn_id":"turn_1"}"#,
+            "\n",
+            r#"{"type":"item.started","item":{"id":"item_1","type":"command_execution","status":"in_progress","command":"sleep 30"}}"#
+        );
+
+        let backend = Arc::new(
+            FakeTmuxBackend::new()
+                .with_pane_cwd("%1", "vm agtmux", "zsh", raw_capture, cwd)
+                .with_joined_capture("%1", joined_capture)
+                .with_pane_cwd("%2", "vm agtmux", "zsh", "$ ", cwd),
+        );
+        let state = new_state();
+
+        poll_tick(&backend, &state).await.expect("tick");
+
+        let mut st = state.lock().await;
+        let managed = st.daemon.list_panes();
+        let managed_pane = managed
+            .iter()
+            .find(|pane| pane.pane_instance_id.pane_id == "%1")
+            .expect("shell-child pane should be managed");
+        assert_eq!(managed_pane.provider, Some(Provider::Codex));
+        assert!(
+            managed
+                .iter()
+                .all(|pane| pane.pane_instance_id.pane_id != "%2"),
+            "same-cwd sibling should stay unmanaged"
+        );
+
+        let payload: UiBootstrapV3 = serde_json::from_value(build_ui_bootstrap_v3(&mut st))
+            .expect("valid ui.bootstrap.v3 payload");
+
+        let pane1 = payload
+            .panes
+            .iter()
+            .find(|pane| pane.pane_id == "%1")
+            .expect("shell-child pane row");
+        assert_eq!(pane1.provider, Some(Provider::Codex));
+        assert_eq!(pane1.presence, agtmux_core_v5::sync_v3::PresenceV3::Managed);
+        assert_eq!(pane1.session_key, "codex:%1");
+        assert_eq!(pane1.thread.lifecycle, ThreadLifecycleV3::Active);
+        assert_eq!(pane1.thread.execution, ThreadExecutionV3::ToolRunning);
+
+        let pane2 = payload
+            .panes
+            .iter()
+            .find(|pane| pane.pane_id == "%2")
+            .expect("same-cwd sibling row");
+        assert_eq!(pane2.provider, None);
+        assert_eq!(
+            pane2.presence,
+            agtmux_core_v5::sync_v3::PresenceV3::Unmanaged
+        );
+        assert!(
+            st.gateway.source_cursor(SourceKind::CodexJsonl).is_some(),
+            "joined shell-child capture should feed the CodexJsonl source"
+        );
+
+        drop(st);
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[tokio::test]
     async fn poll_tick_exec_spool_rehydrates_running_truth_after_restart() {
         let _env_lock = ENV_LOCK.lock().expect("env lock");
         let temp = temp_dir("codex-exec-restart");
@@ -2507,6 +2924,95 @@ mod tests {
         );
 
         drop(st);
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[tokio::test]
+    async fn poll_tick_claude_descendant_fd_discovery_beats_stale_project_fallback() {
+        let _env_lock = ENV_LOCK.lock().expect("env lock");
+        let temp = temp_dir("claude-descendant-fd-discovery");
+        let home_dir = temp.join("home");
+        let project_dir = temp.join("project");
+        fs::create_dir_all(&project_dir).expect("project dir");
+
+        let stale_session_path = write_claude_session_file_named(
+            &home_dir,
+            &project_dir,
+            "stale-session.jsonl",
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"Stale conversation title"}}"#,
+                r#"{"type":"assistant","timestamp":"2026-03-08T12:36:37.256Z","uuid":"claude-stale-1","sessionId":"stale-session"}"#,
+            ],
+        );
+        let current_session_path =
+            write_claude_session_file_named(&home_dir, &project_dir, "current-session.jsonl", &[]);
+        let _index_path = write_claude_sessions_index(
+            &home_dir,
+            &project_dir,
+            serde_json::json!([
+                {
+                    "sessionId": "stale-session",
+                    "fullPath": stale_session_path,
+                    "projectPath": std::fs::canonicalize(&project_dir)
+                        .expect("canonical project dir")
+                        .to_string_lossy()
+                        .to_string(),
+                    "modified": "2026-03-08T12:36:37.256Z",
+                    "isSidechain": false,
+                    "summary": "Stale summary",
+                    "firstPrompt": "Stale first prompt"
+                }
+            ]),
+        );
+
+        let _home = TestEnvGuard::set("HOME", home_dir.to_str().expect("utf8 path"));
+        let mut holder = spawn_descendant_file_holder(&current_session_path, "claude-descendant");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let backend = Arc::new(FakeTmuxBackend::new().with_pane_cwd_pid(
+            "%155",
+            "vm agtmux",
+            "node",
+            "╭ Claude Code\n❯",
+            project_dir.to_str().expect("utf8 path"),
+            holder.id(),
+        ));
+        let state = new_state();
+        let observed_before_tick = Utc::now();
+
+        poll_tick(&backend, &state).await.expect("tick");
+
+        let mut st = state.lock().await;
+        let payload: UiBootstrapV3 = serde_json::from_value(build_ui_bootstrap_v3(&mut st))
+            .expect("valid ui.bootstrap.v3 payload");
+        let pane = payload
+            .panes
+            .iter()
+            .find(|pane| pane.pane_id == "%155")
+            .expect("sync-v3 pane row");
+
+        assert_eq!(pane.provider, Some(Provider::Claude));
+        assert_eq!(pane.presence, agtmux_core_v5::sync_v3::PresenceV3::Managed);
+        assert_eq!(
+            pane.runtime_ref
+                .as_ref()
+                .map(|runtime| runtime.native_id.as_str()),
+            Some("current-session"),
+            "descendant fd discovery must bind the pane to the actual open transcript, not the stale latest-by-cwd session"
+        );
+        assert!(
+            pane.conversation_title.is_none(),
+            "empty current session should keep conversation_title unset so UI can fall back to provider name"
+        );
+        assert!(
+            pane.updated_at >= observed_before_tick,
+            "bootstrap from the current empty transcript should use a fresh observed_at, not the stale historical session timestamp"
+        );
+        assert_eq!(pane.thread.lifecycle, ThreadLifecycleV3::Idle);
+
+        drop(st);
+        let _ = holder.kill();
+        let _ = holder.wait();
         let _ = fs::remove_dir_all(temp);
     }
 
@@ -2663,6 +3169,34 @@ mod tests {
         assert!(!is_codex_jsonl_candidate(Some("claude"), "node"));
         assert!(!is_codex_jsonl_candidate(None, "zsh"));
         assert!(!is_codex_jsonl_candidate(Some("runtime_unknown"), "python"));
+    }
+
+    #[test]
+    fn codex_exec_probe_candidates_include_shell_with_codex_exec_command_before_prompt_returns() {
+        let capture_lines = vec![
+            "$ codex exec --json --dangerously-bypass-approvals-and-sandbox".to_string(),
+            "{\"type\":\"thread.starte".to_string(),
+            "d\",\"thread_id\":\"thr_1\"}".to_string(),
+        ];
+        assert!(is_codex_exec_probe_candidate(
+            Some("shell"),
+            "zsh",
+            &capture_lines
+        ));
+    }
+
+    #[test]
+    fn codex_exec_probe_candidates_exclude_shell_once_prompt_returns() {
+        let capture_lines = vec![
+            "$ codex exec --json".to_string(),
+            "{\"type\":\"thread.started\",\"thread_id\":\"thr_1\"}".to_string(),
+            "❯".to_string(),
+        ];
+        assert!(!is_codex_exec_probe_candidate(
+            Some("shell"),
+            "zsh",
+            &capture_lines
+        ));
     }
 
     #[test]

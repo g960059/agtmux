@@ -22,6 +22,11 @@ pub struct PaneDiscoveryHint {
     /// PID of the process running in this pane (tmux `#{pane_pid}`).
     /// Used for fd-based P2 discovery via lsof.
     pub pane_pid: Option<u32>,
+    /// Candidate PIDs for fd-based discovery, ordered from pane root to descendants.
+    ///
+    /// When wrapper shells or launch helpers own the tmux pane, the actual Claude process
+    /// that has the transcript open may only exist in a descendant PID.
+    pub candidate_pids: Vec<u32>,
 }
 
 /// Entry in the `sessions-index.json` file.
@@ -125,9 +130,14 @@ fn discover_sessions_in_projects_dir(
         let cwd_candidate_count = *cwd_count.get(canonical_cwd.as_str()).unwrap_or(&1);
 
         // P2: fd-based discovery (lsof) — higher confidence than CWD-based
-        if let Some(pane_pid) = hint.pane_pid
+        let lsof_candidate_pids = if hint.candidate_pids.is_empty() {
+            hint.pane_pid.into_iter().collect::<Vec<_>>()
+        } else {
+            hint.candidate_pids.clone()
+        };
+        if !lsof_candidate_pids.is_empty()
             && let Some((session_id, jsonl_path)) =
-                discover_jsonl_via_lsof(pane_pid, claude_projects_dir)
+                discover_jsonl_via_lsof_pids(&lsof_candidate_pids, claude_projects_dir)
         {
             results.push(SessionDiscovery {
                 pane_id: hint.pane_id.clone(),
@@ -276,48 +286,55 @@ fn discover_latest_jsonl_file(project_dir: &Path) -> Option<(String, PathBuf)> {
     best.map(|(path, _)| (session_id_from_jsonl_path(&path), path))
 }
 
-/// Attempt to find an open Claude Code JSONL file for a given PID using `lsof`.
-///
-/// Returns the first matching `(session_id, jsonl_path)` found.
-/// Returns `None` if lsof is not available, fails, or finds no JSONL files.
-fn discover_jsonl_via_lsof(pid: u32, claude_projects_dir: &Path) -> Option<(String, PathBuf)> {
+fn discover_jsonl_via_lsof_pids(
+    pids: &[u32],
+    claude_projects_dir: &Path,
+) -> Option<(String, PathBuf)> {
     use std::process::Command;
     use std::time::SystemTime;
 
     let lsof_bin = resolve_lsof_bin();
-    let output = Command::new(&lsof_bin)
-        .args(["-F", "n", "-p", &pid.to_string()])
-        .output()
-        .ok()?;
-
-    // lsof returns non-zero if the pid has no open files matching, but stdout may still have data.
-    // We proceed with whatever stdout we got.
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let projects_prefix = claude_projects_dir.to_string_lossy();
-
+    let canonical_projects_dir = std::fs::canonicalize(claude_projects_dir)
+        .unwrap_or_else(|_| claude_projects_dir.to_path_buf());
     let mut best: Option<(PathBuf, SystemTime)> = None;
 
-    for line in stdout.lines() {
-        // lsof -F n output: lines starting with 'n' are file names
-        let Some(path_str) = line.strip_prefix('n') else {
-            continue;
+    for pid in pids {
+        let output = match Command::new(&lsof_bin)
+            .args(["-F", "n", "-p", &pid.to_string()])
+            .output()
+        {
+            Ok(output) => output,
+            Err(_) => continue,
         };
-        let path = Path::new(path_str);
-        if !is_jsonl_file(path) {
-            continue;
-        }
-        // Must be inside claude_projects_dir
-        if !path_str.starts_with(projects_prefix.as_ref()) {
-            continue;
-        }
-        if let Ok(meta) = std::fs::metadata(path) {
-            let modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-            let is_better = match &best {
-                None => true,
-                Some((_, best_modified)) => modified > *best_modified,
+
+        // lsof returns non-zero if the pid has no open files matching, but stdout may still have data.
+        // We proceed with whatever stdout we got.
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        for line in stdout.lines() {
+            // lsof -F n output: lines starting with 'n' are file names
+            let Some(path_str) = line.strip_prefix('n') else {
+                continue;
             };
-            if is_better {
-                best = Some((path.to_path_buf(), modified));
+            let path = Path::new(path_str);
+            if !is_jsonl_file(path) {
+                continue;
+            }
+            let canonical_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+            // Must be inside claude_projects_dir. Canonicalize both sides because macOS can
+            // report `/private/...` from lsof even when callers built the path via `/tmp/...`.
+            if !canonical_path.starts_with(&canonical_projects_dir) {
+                continue;
+            }
+            if let Ok(meta) = std::fs::metadata(&canonical_path) {
+                let modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+                let is_better = match &best {
+                    None => true,
+                    Some((_, best_modified)) => modified > *best_modified,
+                };
+                if is_better {
+                    best = Some((canonical_path, modified));
+                }
             }
         }
     }
@@ -647,6 +664,7 @@ mod tests {
             pane_generation: Some(9),
             pane_birth_ts: None,
             pane_pid: None,
+            candidate_pids: Vec::new(),
         }];
         let discoveries = discover_sessions_in_projects_dir(&pane_cwds, &claude_projects_dir);
 
@@ -681,6 +699,7 @@ mod tests {
             pane_generation: None,
             pane_birth_ts: None,
             pane_pid: None,
+            candidate_pids: Vec::new(),
         }];
         let discoveries = discover_sessions_in_projects_dir(&pane_cwds, &claude_projects_dir);
 
@@ -756,6 +775,7 @@ mod tests {
                 pane_generation: None,
                 pane_birth_ts: None,
                 pane_pid: None,
+                candidate_pids: Vec::new(),
             },
             PaneDiscoveryHint {
                 pane_id: "%2".to_owned(),
@@ -763,6 +783,7 @@ mod tests {
                 pane_generation: None,
                 pane_birth_ts: None,
                 pane_pid: None,
+                candidate_pids: Vec::new(),
             },
             PaneDiscoveryHint {
                 pane_id: "%3".to_owned(),
@@ -770,6 +791,7 @@ mod tests {
                 pane_generation: None,
                 pane_birth_ts: None,
                 pane_pid: None,
+                candidate_pids: Vec::new(),
             },
         ];
         let discoveries = discover_sessions_in_projects_dir(&pane_cwds, &claude_projects_dir);
@@ -792,7 +814,7 @@ mod tests {
     fn discover_jsonl_via_lsof_nonexistent_pid_returns_none() {
         let tmp = std::env::temp_dir();
         // PID 999999999 is almost certainly invalid → lsof returns error or empty
-        let result = discover_jsonl_via_lsof(999999999, &tmp);
+        let result = discover_jsonl_via_lsof_pids(&[999999999], &tmp);
         assert!(result.is_none());
     }
 }

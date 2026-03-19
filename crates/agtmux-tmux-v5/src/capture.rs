@@ -76,7 +76,7 @@ fn parse_ps_line(line: &str) -> Option<ProcessInfo> {
 }
 
 /// Collect `root_pid` and every reachable descendant PID from the process map.
-fn collect_process_tree_pids(root_pid: u32, process_map: &ProcessMap) -> Vec<u32> {
+pub fn collect_process_tree_pids(root_pid: u32, process_map: &ProcessMap) -> Vec<u32> {
     let mut children_by_parent: HashMap<u32, Vec<u32>> = HashMap::new();
     for info in process_map.values() {
         children_by_parent

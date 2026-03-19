@@ -21,6 +21,11 @@ pub struct CodexPaneHint {
     pub pane_id: String,
     /// PID of the process in the pane (for lsof CWD lookup).
     pub pane_pid: Option<u32>,
+    /// Candidate PIDs for fd-based JSONL discovery, ordered from pane root to descendants.
+    ///
+    /// When wrapper shells or launch helpers own the tmux pane, the actual Codex
+    /// process that has the current session file open may only exist in a descendant PID.
+    pub candidate_pids: Vec<u32>,
     /// Fallback CWD from tmux (used if lsof fails).
     pub cwd: String,
     /// Latest tmux `pane_active` bit for this pane.
@@ -78,7 +83,7 @@ pub fn discover_sessions_in_dir(
     codex_sessions_dir: &Path,
 ) -> Vec<CodexSessionDiscovery> {
     let mut explicit_results = Vec::new();
-    let mut explicit_bound_paths = HashSet::new();
+    let mut prebound_paths = HashSet::new();
     let mut cwd_hints = Vec::new();
 
     for hint in hints {
@@ -93,7 +98,7 @@ pub fn discover_sessions_in_dir(
             hint.session_key_override.as_deref(),
             hint.pane_generation,
             hint.pane_birth_ts,
-        ) && explicit_bound_paths.insert(discovery.jsonl_path.clone())
+        ) && prebound_paths.insert(discovery.jsonl_path.clone())
         {
             explicit_results.push(discovery);
         }
@@ -114,6 +119,33 @@ pub fn discover_sessions_in_dir(
     // Resolve pane CWDs first so multiple same-CWD panes can share a unique assignment pass.
     let mut hints_by_cwd: BTreeMap<String, Vec<&CodexPaneHint>> = BTreeMap::new();
     for hint in cwd_hints {
+        let lsof_candidate_pids = if hint.candidate_pids.is_empty() {
+            hint.pane_pid.into_iter().collect::<Vec<_>>()
+        } else {
+            hint.candidate_pids.clone()
+        };
+        if !lsof_candidate_pids.is_empty()
+            && let Some(jsonl_path) =
+                discover_jsonl_via_lsof_pids(&lsof_candidate_pids, codex_sessions_dir)
+            && prebound_paths.insert(jsonl_path.clone())
+        {
+            explicit_results.push(CodexSessionDiscovery {
+                pane_id: hint.pane_id.clone(),
+                session_key: resolved_session_key(
+                    &jsonl_path,
+                    hint.session_key_override.as_deref(),
+                ),
+                jsonl_path,
+                explicit_jsonl_path: None,
+                session_key_override: normalize_session_key_override(
+                    hint.session_key_override.as_deref(),
+                ),
+                pane_generation: hint.pane_generation,
+                pane_birth_ts: hint.pane_birth_ts,
+            });
+            continue;
+        }
+
         let cwd = if let Some(pid) = hint.pane_pid {
             get_cwd_via_lsof(pid).unwrap_or_else(|| hint.cwd.clone())
         } else {
@@ -134,7 +166,7 @@ pub fn discover_sessions_in_dir(
 
         let mut used_paths: HashSet<PathBuf> = candidates
             .iter()
-            .filter_map(|(path, _)| explicit_bound_paths.contains(path).then_some(path.clone()))
+            .filter_map(|(path, _)| prebound_paths.contains(path).then_some(path.clone()))
             .collect();
         let mut pending_hints = Vec::new();
 
@@ -194,6 +226,50 @@ pub fn discover_sessions_in_dir(
     }
 
     results
+}
+
+fn discover_jsonl_via_lsof_pids(pids: &[u32], codex_sessions_dir: &Path) -> Option<PathBuf> {
+    let lsof_bin = resolve_lsof_bin();
+    let canonical_sessions_dir = std::fs::canonicalize(codex_sessions_dir)
+        .unwrap_or_else(|_| codex_sessions_dir.to_path_buf());
+    let mut best: Option<(PathBuf, SystemTime)> = None;
+
+    for pid in pids {
+        let output = match Command::new(&lsof_bin)
+            .args(["-F", "n", "-p", &pid.to_string()])
+            .output()
+        {
+            Ok(output) => output,
+            Err(_) => continue,
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let Some(path_str) = line.strip_prefix('n') else {
+                continue;
+            };
+            let path = Path::new(path_str);
+            if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let canonical_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+            if !canonical_path.starts_with(&canonical_sessions_dir) {
+                continue;
+            }
+            if let Ok(meta) = std::fs::metadata(&canonical_path) {
+                let modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+                let is_better = match &best {
+                    None => true,
+                    Some((_, best_modified)) => modified > *best_modified,
+                };
+                if is_better {
+                    best = Some((canonical_path, modified));
+                }
+            }
+        }
+    }
+
+    best.map(|(path, _)| path)
 }
 
 /// Create a [`CodexSessionDiscovery`] directly from an explicit JSONL path binding.
@@ -488,6 +564,7 @@ mod tests {
         let hints = vec![CodexPaneHint {
             pane_id: "%5".to_owned(),
             pane_pid: None,
+            candidate_pids: Vec::new(),
             cwd: cwd.to_owned(),
             pane_active: false,
             session_attached: false,
@@ -523,6 +600,7 @@ mod tests {
         let hints = vec![CodexPaneHint {
             pane_id: "%3".to_owned(),
             pane_pid: None,
+            candidate_pids: Vec::new(),
             cwd: cwd.to_owned(),
             pane_active: false,
             session_attached: false,
@@ -557,6 +635,7 @@ mod tests {
         let hints = vec![CodexPaneHint {
             pane_id: "%9".to_owned(),
             pane_pid: None,
+            candidate_pids: Vec::new(),
             cwd: "/Users/vm/my-project".to_owned(),
             pane_active: false,
             session_attached: false,
@@ -591,6 +670,7 @@ mod tests {
         let hints = vec![CodexPaneHint {
             pane_id: "%1".to_owned(),
             pane_pid: None,
+            candidate_pids: Vec::new(),
             cwd: cwd.to_owned(),
             pane_active: false,
             session_attached: false,
@@ -656,6 +736,7 @@ mod tests {
             CodexPaneHint {
                 pane_id: "%1".to_owned(),
                 pane_pid: None,
+                candidate_pids: Vec::new(),
                 cwd: cwd.to_owned(),
                 pane_active: false,
                 session_attached: false,
@@ -668,6 +749,7 @@ mod tests {
             CodexPaneHint {
                 pane_id: "%2".to_owned(),
                 pane_pid: None,
+                candidate_pids: Vec::new(),
                 cwd: cwd.to_owned(),
                 pane_active: false,
                 session_attached: false,
@@ -711,6 +793,7 @@ mod tests {
             CodexPaneHint {
                 pane_id: "%1".to_owned(),
                 pane_pid: None,
+                candidate_pids: Vec::new(),
                 cwd: cwd.to_owned(),
                 pane_active: false,
                 session_attached: true,
@@ -723,6 +806,7 @@ mod tests {
             CodexPaneHint {
                 pane_id: "%2".to_owned(),
                 pane_pid: None,
+                candidate_pids: Vec::new(),
                 cwd: cwd.to_owned(),
                 pane_active: true,
                 session_attached: true,
@@ -768,6 +852,7 @@ mod tests {
             CodexPaneHint {
                 pane_id: "%1".to_owned(),
                 pane_pid: None,
+                candidate_pids: Vec::new(),
                 cwd: cwd.to_owned(),
                 pane_active: false,
                 session_attached: false,
@@ -780,6 +865,7 @@ mod tests {
             CodexPaneHint {
                 pane_id: "%2".to_owned(),
                 pane_pid: None,
+                candidate_pids: Vec::new(),
                 cwd: cwd.to_owned(),
                 pane_active: false,
                 session_attached: false,
@@ -823,6 +909,7 @@ mod tests {
             CodexPaneHint {
                 pane_id: "%1".to_owned(),
                 pane_pid: None,
+                candidate_pids: Vec::new(),
                 cwd: cwd.to_owned(),
                 pane_active: false,
                 session_attached: false,
@@ -835,6 +922,7 @@ mod tests {
             CodexPaneHint {
                 pane_id: "%2".to_owned(),
                 pane_pid: None,
+                candidate_pids: Vec::new(),
                 cwd: cwd.to_owned(),
                 pane_active: false,
                 session_attached: false,
@@ -873,6 +961,7 @@ mod tests {
             CodexPaneHint {
                 pane_id: "%1".to_owned(),
                 pane_pid: None,
+                candidate_pids: Vec::new(),
                 cwd: cwd.to_owned(),
                 pane_active: false,
                 session_attached: false,
@@ -885,6 +974,7 @@ mod tests {
             CodexPaneHint {
                 pane_id: "%2".to_owned(),
                 pane_pid: None,
+                candidate_pids: Vec::new(),
                 cwd: cwd.to_owned(),
                 pane_active: false,
                 session_attached: false,
@@ -935,6 +1025,7 @@ mod tests {
         let hints = vec![CodexPaneHint {
             pane_id: "%8".to_owned(),
             pane_pid: None,
+            candidate_pids: Vec::new(),
             cwd: "/Users/vm/project".to_owned(),
             pane_active: false,
             session_attached: false,
